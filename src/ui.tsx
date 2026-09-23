@@ -30,7 +30,7 @@ export function Brand() {
       <span>
         raíz<span className="brand-dot">.</span>
       </span>
-      <span className="brand-caption">CLUB MANAGER</span>
+      <span className="brand-caption">GESTIÓN DEL CLUB</span>
     </div>
   );
 }
@@ -48,7 +48,7 @@ export function Avatar({
       className="avatar"
       style={{
         background: color ? `${color}28` : undefined,
-        color: "#e5d7ff",
+        color: color || "#315846",
         width: size,
         height: size,
       }}

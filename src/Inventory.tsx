@@ -36,7 +36,7 @@ export default function Inventory() {
   const { state, money, canManage, isManager, reload, user, owner } = useClub();
   const [params] = useSearchParams();
   const [query, setQuery] = useState(params.get("q") || "");
-  const [filter, setFilter] = useState("all");
+  const [filter, setFilter] = useState(params.get("filter") === "low" ? "low" : "all");
   const [view, setView] = useState<"cards" | "table">("cards");
   const [type, setType] = useState("all");
   const [editor, setEditor] = useState<Product | "new" | null>(null);

@@ -9,7 +9,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
     .getByRole("button", { name: "Explorar club de demostración" })
     .click();
   await expect(
-    page.getByRole("heading", { name: "Todo en orden, Tomás." }),
+    page.getByRole("heading", { name: "Hola, Tomás." }),
   ).toBeVisible();
   await page
     .getByRole("combobox", { name: "Período del dashboard" })
@@ -126,7 +126,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
     await expect(
       page.getByRole("heading", { name: heading, exact: true }),
     ).toBeVisible();
-    if (label === "Caja y planificación") await expect(page.getByText("Valuación por lote y proveedor")).toBeVisible();
+    if (label === "Caja y planificación") await expect(page.getByRole("heading", { name: "Capital en inventario" })).toBeVisible();
   }
   await page.getByRole("link", { name: "Caja y planificación" }).click();
   await page.getByRole("button", { name: "Agregar proyección" }).click();
@@ -137,6 +137,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await dialog.getByLabel("Detalle / comprobante de referencia").fill(`Personal QA ${suffix}`);
   await dialog.getByRole("button", { name: "Guardar", exact: true }).click();
   await expect(dialog).toBeHidden();
+  await page.getByRole("button", { name: "Proyección", exact: true }).click();
   await expect(page.getByRole("row", { name: new RegExp(`Personal QA ${suffix}`) })).toContainText("123,45");
   expect(errors).toEqual([]);
 });
@@ -150,7 +151,7 @@ test("responsible: scope cannot be switched; foreign lots and settings actions a
   await page.getByRole("button", { name: "Probar otro rol" }).click();
   await page.getByRole("button", { name: "Lucía · solo su reprogram" }).click();
   await expect(
-    page.getByRole("heading", { name: "Todo en orden, Lucía." }),
+    page.getByRole("heading", { name: "Hola, Lucía." }),
   ).toBeVisible();
   await expect(
     page.getByRole("combobox", { name: "Filtrar por responsable" }),
@@ -178,7 +179,7 @@ test("mobile: navigation, filters and sale modal fit the viewport", async ({
     .getByRole("button", { name: "Explorar club de demostración" })
     .click();
   await expect(
-    page.getByRole("heading", { name: "Todo en orden, Tomás." }),
+    page.getByRole("heading", { name: "Hola, Tomás." }),
   ).toBeVisible();
   expect(
     await page.evaluate(
@@ -203,4 +204,7 @@ test("mobile: navigation, filters and sale modal fit the viewport", async ({
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
+  await page.getByRole("button", { name: "Abrir navegación" }).click();
+  await page.getByRole("button", { name: /3 lotes necesitan atención/ }).click();
+  await expect(page.locator(".stock-card")).toHaveCount(3);
 });

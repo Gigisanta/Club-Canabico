@@ -18,7 +18,6 @@ import {
   GearSix,
   Bell,
   MagnifyingGlass,
-  CaretDown,
   Plus,
   SignOut,
   List,
@@ -306,6 +305,7 @@ function Workspace({
           <Brand />
           <button
             className="club-switch"
+            aria-label={`Configurar ${state.settings.clubName}`}
             onClick={() => navigate("/configuracion")}
           >
             <span className="club-avatar">
@@ -313,15 +313,15 @@ function Workspace({
             </span>
             <span>
               <strong>{state.settings.clubName}</strong>
-              <small>Espacio de trabajo</small>
+              <small>Configurar espacio</small>
             </span>
-            <CaretDown size={14} />
+            <ArrowRight size={14} />
           </button>
-          <div className="nav-label">PRINCIPAL</div>
-          <nav>
-            {nav.map(({ path, label, icon: Icon }) => (
+          <div className="nav-label">OPERACIÓN</div>
+          <nav aria-label="Operación del club">
+            {nav.slice(0, 4).map(({ path, label, icon: Icon }) => (
               <NavLink key={path} to={path} end={path === "/"}>
-                <Icon size={21} />
+                <Icon size={20} weight="duotone" />
                 <span>{label}</span>
                 {path === "/inventario" && alerts > 0 && (
                   <span className="nav-count">{alerts}</span>
@@ -329,16 +329,27 @@ function Workspace({
               </NavLink>
             ))}
           </nav>
+          {nav.length > 4 && <div className="nav-label secondary">ADMINISTRACIÓN</div>}
+          <nav aria-label="Administración del club">
+            {nav.slice(4).map(({ path, label, icon: Icon }) => (
+              <NavLink key={path} to={path}>
+                <Icon size={20} weight="duotone" />
+                <span>{label}</span>
+              </NavLink>
+            ))}
+          </nav>
           <div className="sidebar-bottom">
-            <div className="club-health">
-              <span className="live-dot" />
-              <strong>Todo tu club, conectado</strong>
-              <p>
-                La información que necesitás,
-                <br />
-                justo donde la necesitás.
-              </p>
-            </div>
+            {alerts > 0 ? (
+              <button className="club-health" onClick={() => navigate("/inventario?filter=low")}>
+                <span className="club-health-icon"><Package size={20} /></span>
+                <span><strong>{alerts} {alerts === 1 ? "lote necesita" : "lotes necesitan"} atención</strong><small>Revisar stock bajo <ArrowRight size={13} /></small></span>
+              </button>
+            ) : (
+              <div className="club-health is-clear">
+                <span className="club-health-icon"><ShieldCheck size={20} /></span>
+                <span><strong>Stock al día</strong><small>Sin lotes bajo el mínimo</small></span>
+              </div>
+            )}
             <NavLink className="settings-link" to="/configuracion">
               <GearSix size={21} />
               Configuración
@@ -369,14 +380,15 @@ function Workspace({
               >
                 <List size={23} />
               </button>
-              <span>Mi club</span>
+              <span>Espacio de trabajo</span>
               <span className="breadcrumb-slash">/</span>
-              <strong>
+              <strong aria-current="page">
                 {navigation.find((n) => n.path === location.pathname)?.label ||
                   "Configuración"}
               </strong>
             </div>
             <div className="top-actions">
+              <span className="topbar-date">{new Date(`${state.today}T12:00:00`).toLocaleDateString("es-AR", { day: "numeric", month: "long", year: "numeric" })}</span>
               <button
                 className="global-search"
                 aria-label="Buscar en el club"

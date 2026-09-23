@@ -154,9 +154,9 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
   return (
     <>
       <PageHeader
-        eyebrow="TU CLUB, DE UN VISTAZO"
-        title={`Todo en orden, ${user.name.split(" ")[0]}.`}
-        description="Una visión clara de lo que pasa y de lo que viene."
+        eyebrow="PANORAMA DEL CLUB"
+        title={`Hola, ${user.name.split(" ")[0]}.`}
+        description={low.length ? `${low.length} ${low.length === 1 ? "lote necesita" : "lotes necesitan"} atención. El resto de la operación, de un vistazo.` : "Acá tenés lo importante de la operación para decidir qué sigue."}
         actions={
           <>
             {financial && (
@@ -309,27 +309,27 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
               >
                 <defs>
                   <linearGradient id="incomeFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#a78bfa" stopOpacity={0.17} />
-                    <stop offset="95%" stopColor="#a78bfa" stopOpacity={0.01} />
+                    <stop offset="0%" stopColor="#4b815b" stopOpacity={0.24} />
+                    <stop offset="95%" stopColor="#4b815b" stopOpacity={0.01} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid
                   strokeDasharray="3 5"
                   vertical={false}
-                  stroke="#2d2937"
+                  stroke="#e3e9df"
                 />
                 <XAxis
                   dataKey="label"
                   tickLine={false}
                   axisLine={false}
                   minTickGap={40}
-                  tick={{ fontSize: 10, fill: "#aaa5b7" }}
+                  tick={{ fontSize: 10, fill: "#6e806f" }}
                   dy={8}
                 />
                 <YAxis
                   tickLine={false}
                   axisLine={false}
-                  tick={{ fontSize: 10, fill: "#aaa5b7" }}
+                  tick={{ fontSize: 10, fill: "#6e806f" }}
                   tickFormatter={(v) =>
                     `${v >= 1000 ? `${number(v / 1000)}k` : v}`
                   }
@@ -337,9 +337,9 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
                 <Tooltip
                   contentStyle={{
                     borderRadius: 10,
-                    border: "1px solid #393144",
-                    background: "#211d2a",
-                    color: "#f1edf8",
+                    border: "1px solid #d9e4d7",
+                    background: "#fffefa",
+                    color: "#20382c",
                     fontSize: 12,
                   }}
                   formatter={(v, name) => [
@@ -356,7 +356,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
                     type="monotone"
                     dataKey="previous"
                     fill="transparent"
-                    stroke="#665a80"
+                    stroke="#9fb5a0"
                     strokeWidth={1.5}
                     strokeDasharray="5 5"
                     isAnimationActive={false}
@@ -365,7 +365,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
                 <Area
                   type="monotone"
                   dataKey={tab}
-                  stroke="#a78bfa"
+                  stroke="#4b815b"
                   strokeWidth={2.5}
                   fill="url(#incomeFill)"
                   isAnimationActive={false}
@@ -423,11 +423,11 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
                   {owners.map((o, i) => (
                     <Cell
                       key={o.id}
-                      fill={["#a78bfa", "#7757b5", "#d3b7f0", "#5b4383"][i % 4]}
+                      fill={["#315e43", "#7b9e69", "#c2a266", "#a6c8b1"][i % 4]}
                     />
                   ))}
                 </Pie>
-                <Tooltip contentStyle={{ background: "#211d2a", borderColor: "#393144", color: "#f1edf8" }} itemStyle={{ color: "#f1edf8" }} formatter={(v) => money(Number(v))} />
+                <Tooltip contentStyle={{ background: "#fffefa", borderColor: "#d9e4d7", color: "#20382c" }} itemStyle={{ color: "#20382c" }} formatter={(v) => money(Number(v))} />
               </PieChart>
             </ResponsiveContainer>
             <div className="donut-center">
@@ -444,7 +444,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
                 <span>
                   <i
                     style={{
-                      background: ["#a78bfa", "#7757b5", "#d3b7f0", "#5b4383"][
+                      background: ["#315e43", "#7b9e69", "#c2a266", "#a6c8b1"][
                         i % 4
                       ],
                     }}
