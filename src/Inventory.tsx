@@ -368,6 +368,9 @@ export default function Inventory() {
                 required
               />
             </Field>
+            <Field label="Proveedor">
+              <input name="supplier" defaultValue={edit?.supplier || ""} placeholder="Proveedor del lote" />
+            </Field>
             <Field label="Ubicación">
               <input
                 name="location"

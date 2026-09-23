@@ -55,8 +55,8 @@ export function Expenses() {
     <>
       <PageHeader
         eyebrow="CUIDÁ LOS RECURSOS DEL CLUB"
-        title="Gastos y flujo de caja"
-        description="Costos fijos, variables y compromisos recurrentes en un solo lugar."
+        title="Gastos registrados"
+        description="Costos fijos, variables y compromisos recurrentes. Los pagos reales se registran en Caja y planificación."
         actions={
           <>
             {isManager && (
@@ -98,10 +98,10 @@ export function Expenses() {
           detail={`${state.settings.budget ? Math.round((total / state.settings.budget) * 100) : 0}% del presupuesto mensual`}
         />
         <Metric
-          title="Flujo neto"
+          title="Ventas menos gastos registrados"
           value={money(income - total)}
           icon={<ChartBar />}
-          detail="Ingresos cobrados menos gastos registrados"
+          detail="Indicador preliminar: no descuenta costo vendido ni separa movimientos de caja"
         />
       </div>
       <Panel title="Registro de gastos">

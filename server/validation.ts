@@ -8,6 +8,9 @@ export const productSchema = z.object({
   type: z.enum(["Flor", "Extracto", "Aceite", "Accesorio"]),
   unit: z.enum(["g", "ud"]),
   lot: text,
+  supplier: z.string().trim().max(180).default(""),
+  sourceSystem: z.string().trim().min(1).max(80).nullable().default(null),
+  sourceId: z.string().trim().min(1).max(180).nullable().default(null),
   stock: z.number().int().min(0).max(100_000_000),
   minimum: z.number().int().min(0).max(100_000_000),
   cost: money,
@@ -21,6 +24,24 @@ export const customerSchema = z.object({
   email: z.union([z.email(), z.literal("")]),
   phone: z.string().max(40),
   notes: z.string().max(5000).default(""),
+  sourceSystem: z.string().trim().min(1).max(80).nullable().default(null),
+  sourceId: z.string().trim().min(1).max(180).nullable().default(null),
+});
+export const permitSchema = z.object({
+  status: z.enum(["unverified", "pending", "verified", "expired"]),
+  validUntil: date.nullable(),
+});
+export const cashEntrySchema = z.object({
+  date,
+  account: z.enum(["cash", "bank"]),
+  category: z.enum(["opening_balance", "operating_expense", "stock_purchase", "local_investment", "capital_contribution", "owner_draw", "delivery_receipt", "other_income", "other_outflow", "adjustment"]),
+  amount: z.number().int().min(-1_000_000_000).max(1_000_000_000).refine((n) => n !== 0),
+  description: text,
+  sourceSystem: z.string().trim().min(1).max(80),
+  sourceId: z.string().trim().min(1).max(180),
+});
+export const cashPlanSchema = cashEntrySchema.pick({ date: true, account: true, category: true, amount: true, description: true }).extend({
+  scenario: z.enum(["base", "cautious", "growth"]),
 });
 export const saleSchema = z
   .object({

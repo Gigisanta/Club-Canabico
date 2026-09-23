@@ -33,9 +33,7 @@ export default function Sales({ onSale }: { onSale: () => void }) {
   const [ticket, setTicket] = useState<Sale | null>(null);
   const [close, setClose] = useState(false);
   const daily = state.sales.filter((s) => s.date === state.today);
-  const cash = daily
-    .filter((s) => s.payment === "cash")
-    .reduce((n, s) => n + s.total, 0);
+  const cash = state.cashExpected;
   const closed = state.closures.find((c) => c.date === state.today);
   const canClose = ["owner", "admin", "cashier"].includes(user.role);
   const sales = state.sales.filter(
@@ -85,7 +83,7 @@ export default function Sales({ onSale }: { onSale: () => void }) {
         <div>
           <span>Efectivo esperado</span>
           <strong>{money(cash)}</strong>
-          <small>Solo cobros en efectivo del día</small>
+          <small>Saldo anterior más movimientos de efectivo registrados</small>
         </div>
         <div>
           <span>Estado de caja</span>
@@ -218,8 +216,8 @@ export default function Sales({ onSale }: { onSale: () => void }) {
         <div className="note-box">
           Efectivo esperado: <strong>{money(cash)}</strong>
           <p>
-            Registrá el efectivo recaudado hoy. No incluye saldo inicial ni
-            pagos de gastos.
+            Contá todo el efectivo en caja. Incluye saldo inicial, cobros y
+            pagos en efectivo registrados.
           </p>
         </div>
         <Form

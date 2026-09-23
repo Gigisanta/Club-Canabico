@@ -111,13 +111,14 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
     name: "socios.csv",
     mimeType: "text/csv",
     buffer: Buffer.from(
-      "name,email,phone,notes\nSocio Importado,importado@example.com,,Prueba",
+      `name,email,phone,notes,sourceSystem,sourceId\nSocio Importado,importado@example.com,,Prueba,appsheet,browser-${suffix}`,
     ),
   });
   await page.getByRole("button", { name: "Validar archivo" }).click();
   await expect(page.getByText("1 registros válidos")).toBeVisible();
   for (const [label, heading] of [
-    ["Gastos", "Gastos y flujo de caja"],
+    ["Gastos", "Gastos registrados"],
+    ["Caja y planificación", "Caja y planificación"],
     ["Responsables", "Responsables de reprogram"],
     ["Reportes", "Reportes y liquidaciones"],
   ] as const) {
@@ -125,7 +126,18 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
     await expect(
       page.getByRole("heading", { name: heading, exact: true }),
     ).toBeVisible();
+    if (label === "Caja y planificación") await expect(page.getByText("Valuación por lote y proveedor")).toBeVisible();
   }
+  await page.getByRole("link", { name: "Caja y planificación" }).click();
+  await page.getByRole("button", { name: "Agregar proyección" }).click();
+  dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Fecha").fill("2027-01-10");
+  await dialog.getByLabel("Categoría").selectOption("operating_expense");
+  await dialog.getByLabel("Importe en ARS (negativo si sale dinero)").fill("-123.45");
+  await dialog.getByLabel("Detalle / comprobante de referencia").fill(`Personal QA ${suffix}`);
+  await dialog.getByRole("button", { name: "Guardar", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole("row", { name: new RegExp(`Personal QA ${suffix}`) })).toContainText("123,45");
   expect(errors).toEqual([]);
 });
 test("responsible: scope cannot be switched; foreign lots and settings actions absent", async ({

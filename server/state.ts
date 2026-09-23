@@ -18,7 +18,7 @@ export async function getState(user: User, requested?: string) {
   const salesWhere: Prisma.SaleWhereInput = ownerId
     ? { items: { some: { ownerId } } }
     : {};
-  const [users, products, sales, customers, expenses, movements, closures] =
+  const [users, products, sales, customers, expenses, movements, closures, cashEntries, cashPlans] =
     await Promise.all([
       db.user.findMany({
         select: publicUser,
@@ -57,6 +57,12 @@ export async function getState(user: User, requested?: string) {
       ownerId || user.role === "viewer"
         ? Promise.resolve([])
         : db.closure.findMany({ orderBy: { date: "desc" }, take: 90 }),
+      user.role === "owner" || user.role === "admin"
+        ? db.cashEntry.findMany({ orderBy: [{ date: "desc" }, { createdAt: "desc" }], take: 2000 })
+        : Promise.resolve([]),
+      user.role === "owner" || user.role === "admin"
+        ? db.cashPlan.findMany({ orderBy: { date: "asc" } })
+        : Promise.resolve([]),
     ]);
   const lifetime = await db.sale.groupBy({
     by: ["customerId"],
@@ -66,6 +72,17 @@ export async function getState(user: User, requested?: string) {
   const lifetimeTotals = new Map(
     lifetime.map((s) => [s.customerId, s._sum.total || 0]),
   );
+  const previousClosure = ownerId || user.role === "viewer" ? null : await db.closure.findFirst({
+    where: { date: { lt: businessDate(settings) } },
+    orderBy: { date: "desc" },
+  });
+  const financeBalance = ["owner", "admin"].includes(user.role) ?
+    ((await db.cashEntry.aggregate({ where: { date: { lte: businessDate(settings) } }, _sum: { amount: true } }))._sum.amount || 0) : 0;
+  const cashExpected = ownerId || user.role === "viewer" ? 0 :
+    (previousClosure?.counted || 0) + ((await db.cashEntry.aggregate({
+      where: { account: "cash", date: { gt: previousClosure?.date || "0000-00-00", lte: businessDate(settings) } },
+      _sum: { amount: true },
+    }))._sum.amount || 0);
   const scopedSales = sales.map((s) => {
     const items = s.items.map((i) => ({ ...i, cost: restricted ? 0 : i.cost }));
     const total = ownerId ? items.reduce((n, i) => n + i.revenue, 0) : s.total;
@@ -111,7 +128,14 @@ export async function getState(user: User, requested?: string) {
       const totalSpent = history.reduce((n, s) => n + s.total, 0);
       return {
         ...c,
-        notes: user.role === "responsible" ? "" : c.notes,
+        notes: ["owner", "admin", "cashier"].includes(user.role) ? c.notes : "",
+        email: ["owner", "admin", "cashier"].includes(user.role) ? c.email : "",
+        phone: ["owner", "admin", "cashier"].includes(user.role) ? c.phone : "",
+        permitStatus: ["owner", "admin", "cashier"].includes(user.role) ? c.permitStatus : "unverified",
+        permitValidUntil: ["owner", "admin", "cashier"].includes(user.role) ? c.permitValidUntil : null,
+        permitCheckedAt: ["owner", "admin"].includes(user.role) ? c.permitCheckedAt : null,
+        sourceSystem: ["owner", "admin"].includes(user.role) ? c.sourceSystem : null,
+        sourceId: ["owner", "admin"].includes(user.role) ? c.sourceId : null,
         points: user.role === "responsible" ? 0 : c.points,
         totalSpent,
         purchases: history.length,
@@ -122,6 +146,11 @@ export async function getState(user: User, requested?: string) {
     expenses,
     movements,
     closures,
+    cashEntries,
+    cashPlans,
+    financeBalance,
+    cashExpected,
+    operationsEnabled: process.env.DEMO_MODE === "true" || process.env.CLUB_OPERATIONS_APPROVED === "true",
     settings,
     today: businessDate(settings),
     demo: process.env.DEMO_MODE === "true",

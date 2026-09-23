@@ -13,6 +13,7 @@ import { useClub, send, roleLabels, type Settings as Config } from "./lib";
 import { PageHeader, Panel, Form, Field, Avatar, Badge, Modal } from "./ui";
 interface ImportResult {
   count: number;
+  skipped: number;
   errors: string[];
   preview: Record<string, unknown>[];
   committed: boolean;
@@ -63,10 +64,12 @@ export default function Settings() {
   function template() {
     const content =
       kind === "products"
-        ? "name,strain,type,unit,lot,stock,minimum,cost,price,location,ownerId,expires\nProducto ejemplo,Híbrida,Flor,g,LOTE-EJEMPLO,100,20,4.50,12.00,Almacén A," +
+        ? "name,strain,type,unit,lot,supplier,stock,minimum,cost,price,location,ownerId,expires,sourceSystem,sourceId\nProducto ejemplo,Híbrida,Flor,g,LOTE-EJEMPLO,Proveedor ejemplo,100,20,4.50,12.00,Almacén A," +
           (state.users.find((u) => u.role === "responsible")?.id || user.id) +
-          ",\n"
-        : "name,email,phone,notes\nSocio ejemplo,socio@example.com,+34000000000,\n";
+          ",,appsheet,lote-ejemplo-001\n"
+        : kind === "customers"
+          ? "name,email,phone,notes,sourceSystem,sourceId\nSocio ejemplo,socio@example.com,+54000000000,,appsheet,socio-ejemplo-001\n"
+          : `date,account,category,amount,description,sourceSystem,sourceId\n${state.today},bank,delivery_receipt,1000.00,Cobro delivery ejemplo,appsheet,cobro-ejemplo-001\n`;
     const url = URL.createObjectURL(
       new Blob([content], { type: "text/csv;charset=utf-8" }),
     );
@@ -340,6 +343,7 @@ export default function Settings() {
                 >
                   <option value="products">Productos y lotes</option>
                   <option value="customers">Socios</option>
+                  <option value="cash_entries">Movimientos de caja y banco</option>
                 </select>
               </Field>
               <div className="template-button">
@@ -352,7 +356,8 @@ export default function Settings() {
             <p className="muted small">
               Importes en moneda principal, cantidades en gramos o unidades.
               Separador coma o punto y coma. Hasta 2.000 filas. Los lotes
-              existentes se rechazan para evitar duplicar stock.
+              existentes con el mismo origen se omiten; los datos conflictivos se rechazan para conciliación. Los cobros del delivery importados no descuentan stock ni crean ventas locales.
+              No importes diagnósticos ni documentos de salud de socios.
             </p>
             <label className="upload-zone">
               <UploadSimple size={32} />
@@ -395,6 +400,7 @@ export default function Settings() {
                     `${result.count} registros válidos`
                   )}
                 </h3>
+                <p className="muted small">{result.skipped} registros ya presentes, sin duplicar.</p>
                 {result.errors.length > 0 ? (
                   <div className="form-error">
                     {result.errors.slice(0, 20).map((e, i) => (
@@ -418,8 +424,8 @@ export default function Settings() {
                           <tbody>
                             {result.preview.map((r, i) => (
                               <tr key={i}>
-                                <td>{String(r.name)}</td>
-                                <td>{String(r.lot || r.email || "")}</td>
+                                <td>{String(r.name || r.description || "")}</td>
+                                <td>{String(r.lot || r.email || `${r.sourceSystem || ""} · ${r.sourceId || ""}`)}</td>
                               </tr>
                             ))}
                           </tbody>

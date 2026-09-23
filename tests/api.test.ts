@@ -259,7 +259,7 @@ test(
         "CSV validation is non-mutating; duplicate lots reject entire import",
         async () => {
           const csv =
-            "name,strain,type,unit,lot,stock,minimum,cost,price,location,ownerId\nNuevo,Híbrida,Flor,g,nuevo,10,2,4,10,A,r1\nDuplicado,Híbrida,Flor,g,p1,10,2,4,10,A,r1";
+            "name,strain,type,unit,lot,stock,minimum,cost,price,location,ownerId,sourceSystem,sourceId\nNuevo,Híbrida,Flor,g,nuevo,10,2,4,10,A,r1,appsheet,lote-nuevo\nDuplicado,Híbrida,Flor,g,p1,10,2,4,10,A,r1,appsheet,lote-duplicado";
           const preview = await (
             await call("/import", "owner", { kind: "products", csv })
           ).json();
@@ -276,7 +276,7 @@ test(
           );
           assert.equal(await db.product.count(), 2);
           const valid =
-            "name,email,phone,notes\nNuevo socio,nuevo@example.com,,Migrado";
+            "name,email,phone,notes,sourceSystem,sourceId\nNuevo socio,nuevo@example.com,,Migrado,appsheet,contacto-1";
           assert.equal(
             (
               await call("/import", "owner", {
@@ -288,8 +288,43 @@ test(
             200,
           );
           assert.equal(await db.customer.count(), 2);
+          const repeated = await (await call("/import", "owner", { kind: "customers", csv: valid, commit: true })).json();
+          assert.equal(repeated.count, 0);
+          assert.equal(repeated.skipped, 1);
+          assert.equal(await db.customer.count(), 2);
         },
       );
+      await t.test("permit verification is restricted and finance entries are idempotent", async () => {
+        assert.equal((await call("/customers/customer/permit", "cashier", { status: "verified", validUntil: "2027-01-01" }, "PATCH")).status, 403);
+        assert.equal((await call("/customers/customer/permit", "owner", { status: "verified", validUntil: "2027-01-01" }, "PATCH")).status, 200);
+        const cashier = await (await call("/state", "cashier")).json();
+        assert.equal(cashier.customers.find((c: {id: string}) => c.id === "customer").permitStatus, "verified");
+        const responsible = await (await call("/state", "r1")).json();
+        assert.equal(responsible.customers.find((c: {id: string}) => c.id === "customer").permitStatus, "unverified");
+        const viewer = await (await call("/state", "viewer")).json();
+        const masked = viewer.customers.find((c: {id: string}) => c.id === "customer");
+        assert.equal(masked.permitStatus, "unverified");
+        assert.equal(masked.email, "");
+        assert.equal(masked.notes, "");
+        const date = cashier.today;
+        const entry = { date, account: "bank", category: "owner_draw", amount: -50000, description: "Retiro de prueba", sourceSystem: "sheet", sourceId: "row-1" };
+        assert.equal((await call("/cash-entries", "cashier", entry)).status, 403);
+        assert.equal((await call("/cash-entries", "owner", entry)).status, 201);
+        assert.equal((await call("/cash-entries", "owner", entry)).status, 201);
+        assert.equal(await db.cashEntry.count({ where: { sourceSystem: "sheet", sourceId: "row-1" } }), 1);
+        assert.equal((await call("/cash-entries", "owner", { ...entry, amount: -60000 })).status, 409);
+        assert.equal((await call("/cash-plans", "owner", { date: "2027-01-10", account: "bank", category: "operating_expense", amount: -300000, description: "Personal", scenario: "base" })).status, 201);
+        const csv = `date,account,category,amount,description,sourceSystem,sourceId\n${date},bank,delivery_receipt,123.45,Cobro delivery,appsheet,cobro-1`;
+        const preview = await (await call("/import", "owner", { kind: "cash_entries", csv })).json();
+        assert.equal(preview.count, 1);
+        assert.equal(await db.cashEntry.count({ where: { sourceSystem: "appsheet" } }), 0);
+        assert.equal((await call("/import", "owner", { kind: "cash_entries", csv, commit: true })).status, 200);
+        const repeated = await (await call("/import", "owner", { kind: "cash_entries", csv, commit: true })).json();
+        assert.equal(repeated.count, 0);
+        assert.equal(repeated.skipped, 1);
+        assert.equal(await db.cashEntry.count({ where: { sourceSystem: "appsheet" } }), 1);
+        assert.equal((await call("/import", "owner", { kind: "cash_entries", csv: csv.replace("123.45", "124.45"), commit: true })).status, 400);
+      });
       await t.test('expired lots, invalid point redemption and changing units cannot mutate stock',async()=>{
         const before=await db.product.findUniqueOrThrow({where:{id:'p2'}});
         const sale={requestId:randomUUID(),customerId:'customer',payment:'cash',items:[{productId:'p2',quantity:1000}]};

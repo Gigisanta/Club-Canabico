@@ -56,12 +56,14 @@ const Reports = lazy(() =>
   import("./Management").then((m) => ({ default: m.Reports })),
 );
 const Settings = lazy(() => import("./Settings"));
+const Finance = lazy(() => import("./Finance"));
 const navigation = [
   { path: "/", label: "Resumen general", icon: SquaresFour },
   { path: "/inventario", label: "Inventario", icon: Package },
   { path: "/socios", label: "Socios y fidelización", icon: Users },
   { path: "/ventas", label: "Ventas y caja", icon: Receipt },
   { path: "/gastos", label: "Gastos", icon: Wallet },
+  { path: "/finanzas", label: "Caja y planificación", icon: ChartBar },
   { path: "/responsables", label: "Responsables", icon: Plant },
   { path: "/reportes", label: "Reportes", icon: ChartBar },
 ];
@@ -230,7 +232,7 @@ function Workspace({
   const navigate = useNavigate();
   const isManager = ["owner", "admin"].includes(user.role);
   const canManage = ["owner", "admin", "responsible"].includes(user.role);
-  const canSell = user.role !== "viewer";
+  const canSell = user.role !== "viewer" && Boolean(state?.operationsEnabled);
   useEffect(() => {
     setMenu(false);
   }, [location.pathname]);
@@ -274,8 +276,8 @@ function Workspace({
   const alerts = low.length;
   const nav = navigation.filter(
     (n) =>
-      user.role !== "cashier" ||
-      !["/gastos", "/reportes", "/responsables"].includes(n.path),
+      (user.role !== "cashier" || !["/gastos", "/finanzas", "/reportes", "/responsables"].includes(n.path)) &&
+      (isManager || n.path !== "/finanzas"),
   );
   return (
     <ClubProvider
@@ -425,6 +427,7 @@ function Workspace({
                 </button>
               </div>
             )}
+            {!state.operationsEnabled && <div className="scope-banner" role="status">Operaciones con cannabis deshabilitadas hasta la validación legal del club. Inventario, socios y planificación siguen disponibles.</div>}
             {(owner || user.role === "responsible") && (
               <div className="scope-banner">
                 <span>
@@ -454,6 +457,7 @@ function Workspace({
                 />
                 <Route path="/inventario" element={<Inventory />} />
                 <Route path="/socios" element={<Customers />} />
+                <Route path="/finanzas" element={isManager ? <Finance /> : <Navigate to="/" replace />} />
                 <Route
                   path="/ventas"
                   element={<Sales onSale={() => setSaleOpen(true)} />}

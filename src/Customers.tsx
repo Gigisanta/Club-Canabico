@@ -133,6 +133,7 @@ export default function Customers() {
               <tr>
                 <th>Socio</th>
                 <th>Nivel / estado</th>
+                <th>Permiso</th>
                 <th className="numeric">Puntos</th>
                 <th className="numeric">Total gastado</th>
                 <th className="numeric">Compras</th>
@@ -177,6 +178,7 @@ export default function Customers() {
                       </small>
                     ) : null}
                   </td>
+                  <td>{["owner", "admin", "cashier"].includes(user.role) ? (c.permitStatus === "verified" && c.permitValidUntil && c.permitValidUntil >= state.today ? "Verificado" : c.permitStatus === "pending" ? "Pendiente" : "Sin verificar / vencido") : "Acceso restringido"}</td>
                   <td className="numeric">{number(c.points)}</td>
                   <td className="numeric amount">{money(c.totalSpent)}</td>
                   <td className="numeric">{c.purchases}</td>
@@ -231,11 +233,11 @@ export default function Customers() {
           <Field label="Teléfono">
             <input name="phone" type="tel" defaultValue={editing?.phone} />
           </Field>
-          <Field label="Notas internas">
+          <Field label="Notas internas (sin datos de salud)">
             <textarea
               name="notes"
               defaultValue={editing?.notes}
-              placeholder="Preferencias o información útil para el equipo"
+              placeholder="Información operativa sin datos de salud"
             />
           </Field>
         </Form>
@@ -267,6 +269,15 @@ export default function Customers() {
                 </button>
               )}
             </div>
+            {["owner", "admin", "cashier"].includes(user.role) && <p className="scope-banner">Permiso: <strong>{detail.permitStatus === "verified" && detail.permitValidUntil && detail.permitValidUntil >= state.today ? `verificado hasta ${detail.permitValidUntil}` : detail.permitStatus === "pending" ? "pendiente" : "sin verificación vigente"}</strong></p>}
+            {["owner", "admin"].includes(user.role) && <Form submit="Guardar verificación" onSubmit={async (fd) => {
+              await send(`/customers/${detail.id}/permit`, { status: fd.get("status"), validUntil: fd.get("validUntil") || null }, "PATCH");
+              toast.success("Estado de permiso actualizado");
+              setDetail(null);
+              await reload();
+            }}>
+              <div className="form-grid"><Field label="Estado de verificación"><select name="status" defaultValue={detail.permitStatus}><option value="unverified">Sin verificar</option><option value="pending">Pendiente</option><option value="verified">Verificado</option><option value="expired">Vencido</option></select></Field><Field label="Vigente hasta"><input name="validUntil" type="date" defaultValue={detail.permitValidUntil || ""} /></Field></div>
+            </Form>}
             <div className="detail-stats">
               <div>
                 <small>Nivel actual</small>

@@ -1,5 +1,7 @@
 # Raíz · Club Manager
 
+**Apertura 2026:** el plan de diagnóstico, conciliación, base financiera y salida gradual está en [docs/implementacion-octubre-2026.md](docs/implementacion-octubre-2026.md). En bases reales las operaciones con cannabis están deshabilitadas por defecto; `CLUB_OPERATIONS_APPROVED=true` requiere validación documentada por el profesional del club. Los datos reales de AppSheet, Sheets y caja siguen pendientes de recibir y conciliar.
+
 Aplicación full-stack de gestión de inventario, socios, fidelización, caja, gastos y responsables de reprogram. Interfaz en español, responsive, con persistencia real en PostgreSQL. No usa localStorage como base de datos ni respuestas simuladas de API.
 
 Paleta violeta y negra. Inventario visual con tarjetas por lote, indicadores de stock mínimo, alertas de vencimiento, responsable visible y detalle expandible; también dispone de vista de tabla. Componentes Minimal Card y Expandable adaptados del código oficial de [Cult UI](https://www.cult-ui.com/docs/components/expandable) a CSS propio y Motion, con licencia en [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
@@ -52,11 +54,12 @@ El seed nunca borra datos: si ya existen usuarios, termina sin modificar la base
 - **Inventario:** productos/lotes, cepa, tipo, gramos/unidades, precios, mínimos, ubicación, responsable y vencimiento. Alta, edición de datos, entradas, salidas, ajustes por conteo y traspasos completos de lote. Historial completo paginado de 100 en 100.
 - **Socios:** altas/edición, notas internas, puntos, nivel por gasto acumulado, historial, frecuencia, segmentos top/inactivos/en riesgo.
 - **Ventas:** carrito con varios productos, socio, responsable derivado del lote, pago efectivo/tarjeta/transferencia, descuentos por nivel y puntos, comprobante imprimible. El servidor recalcula todos los importes.
-- **Caja:** cierre diario global con efectivo esperado, contado, diferencia y observaciones. Una vez cerrado el día no admite nuevas ventas. No incluye fondos iniciales ni gastos pagados desde el cajón.
+- **Caja:** libro de movimientos reales por efectivo/banco y categoría, con aportes, retiros, compras de stock e inversiones separados. Venta local crea un movimiento automáticamente. El cierre suma saldo anterior y movimientos de efectivo desde el cierre previo; registra esperado, contado y diferencia. El saldo inicial debe cargarse y conciliarse.
+- **Planificación:** partidas manuales por escenario, proyección semanal de 13 semanas y resumen mensual 2027. Sin partidas cargadas no se infieren ingresos ni gastos futuros.
 - **Gastos:** fijos/variables, categorías, asignación opcional, recurrencia semanal/mensual, ingresos menos gastos y presupuesto. «Procesar recurrencias» materializa los vencimientos pendientes de forma idempotente; no se generan cargos bancarios ni se ejecutan pagos externos.
 - **Reprogram:** vista consolidada y por responsable, costos/margen por producto, ventas históricas atribuidas al responsable original, ranking y rotación.
 - **Reportes:** ventas detalladas en CSV/XLSX y resumen de liquidación por responsable en PDF; filtros de fecha y ámbito aplicados en servidor.
-- **Migración:** productos y socios mediante CSV exportado de Sheets, plantillas descargables, validación por fila, vista previa y confirmación atómica. No requiere acceso a la cuenta de Google.
+- **Migración:** productos, socios y movimientos de caja/banco mediante CSV exportado de Sheets/AppSheet, identificadores de origen, validación por fila, omitidos y conflictos, vista previa y confirmación atómica. Los cobros del delivery importados no crean ventas ni descuentan stock local. No requiere acceso a la cuenta de Google.
 - **Equipo:** creación de usuarios con rol desde la cuenta del dueño. Los permisos no dependen de ocultar botones.
 
 ## Permisos
@@ -73,7 +76,7 @@ Un responsable no puede ampliar su ámbito cambiando `?owner=` ni enviando IDs a
 
 ## Modelo y reglas
 
-El esquema se encuentra en `prisma/schema.prisma`: usuarios, productos/lotes, socios, ventas, líneas, movimientos, gastos, reglas recurrentes, cierres y configuración.
+El esquema se encuentra en `prisma/schema.prisma`: usuarios, productos/lotes, socios, ventas, líneas, movimientos de stock y caja, partidas proyectadas, gastos, reglas recurrentes, cierres y configuración.
 
 - Dinero en **centavos enteros**. Stock/cantidades en **milésimas** de gramo o unidad; los artículos por unidad requieren cantidades enteras.
 - Cada lote tiene un responsable actual. Cada línea de venta conserva responsable, nombre, precio y costo originales. Los traspasos no reescriben ventas anteriores.
@@ -81,7 +84,7 @@ El esquema se encuentra en `prisma/schema.prisma`: usuarios, productos/lotes, so
 - El cierre y la venta usan transacciones serializables, para que no se inserte una venta incompatible con un cierre concurrente.
 - Los precios del carrito son informativos: la API usa los precios vigentes de la base. El canje nunca puede producir un total negativo.
 - Puntos: `floor(total neto / importe por punto)`. Niveles determinados por gasto neto acumulado previo a la compra. Descuento de nivel y luego canje de puntos.
-- Margen bruto: ingresos netos menos costo histórico; no descuenta gastos operativos. Flujo neto: ingresos menos gastos registrados.
+- Margen bruto: ingresos netos menos costo histórico; no descuenta gastos operativos. El resultado de gestión preliminar también resta gastos operativos registrados. El libro de caja solo incluye cobros y pagos efectivamente registrados.
 - Rotación mostrada: costo vendido en el mes dividido por valor del stock actual a costo; no usa inventario promedio histórico.
 - Tasa de recompra: clientes con dos o más compras en el período / clientes con al menos una compra en el período.
 - Inactivo: días desde última compra, o desde alta si no compró. En riesgo: entre la mitad del umbral y el umbral de inactividad.
@@ -95,11 +98,13 @@ El esquema se encuentra en `prisma/schema.prisma`: usuarios, productos/lotes, so
 2. Copiar las columnas de la planilla al formato de la plantilla. Exportar como CSV UTF-8.
 3. Subir, revisar los errores y la vista previa, y confirmar.
 
-Productos: `name,strain,type,unit,lot,stock,minimum,cost,price,location,ownerId,expires`.
+Productos: `name,strain,type,unit,lot,supplier,stock,minimum,cost,price,location,ownerId,expires,sourceSystem,sourceId`.
 
-Socios: `name,email,phone,notes`.
+Socios: `name,email,phone,notes,sourceSystem,sourceId`. Los dos últimos campos son obligatorios para cada lote y socio importado. `sourceSystem` identifica la fuente (por ejemplo, `appsheet`) y `sourceId` el ID estable en esa fuente. La importación repetida omite registros iguales y bloquea los conflictivos para revisión.
 
-Los importes del CSV se expresan en moneda principal (por ejemplo `12.50`), no en centavos; las cantidades en gramos/unidades, no en milésimas. `ownerId` usa el identificador real del usuario; la plantilla incluye un ejemplo válido. Fechas `AAAA-MM-DD`, separador coma o punto y coma, decimal punto. Lotes duplicados o responsables desconocidos bloquean la confirmación completa. Límite 2.000 filas. La importación actual no importa ventas históricas ni saldos de puntos: requieren un mapeo específico de la planilla original para evitar asignaciones y totales incorrectos.
+Movimientos financieros: `date,account,category,amount,description,sourceSystem,sourceId`. `account` es `cash` o `bank`; importes con signo en ARS, decimal punto. Categorías: `opening_balance`, `operating_expense`, `stock_purchase`, `local_investment`, `capital_contribution`, `owner_draw`, `delivery_receipt`, `other_income`, `other_outflow`, `adjustment`. Un movimiento en efectivo previo a un cierre requiere conciliación antes de importar. Los movimientos del delivery no se suman a las ventas locales del resultado preliminar.
+
+Los importes del CSV se expresan en moneda principal (por ejemplo `12.50`), no en centavos; las cantidades en gramos/unidades, no en milésimas. `ownerId` usa el identificador real del usuario; la plantilla incluye un ejemplo válido. Fechas `AAAA-MM-DD`, separador coma o punto y coma, decimal punto. Lotes conflictivos o responsables desconocidos bloquean la confirmación completa; filas idénticas de la misma fuente se omiten. Límite 2.000 filas. La importación actual no importa ventas históricas ni saldos de puntos: requieren un mapeo específico de la planilla original para evitar asignaciones y totales incorrectos.
 
 ## API
 
@@ -117,6 +122,8 @@ Todas las rutas de datos requieren JWT en cookie `HttpOnly`, `SameSite=Strict`; 
 | POST/PATCH | `/api/customers`, `/api/customers/:id`     | Socios                                     |
 | POST       | `/api/sales`                               | Venta transaccional e idempotente          |
 | POST       | `/api/closures`                            | Cierre diario                              |
+| POST       | `/api/cash-entries`, `/api/cash-plans`     | Movimientos reales y partidas proyectadas; dueño/gerente |
+| PATCH      | `/api/customers/:id/permit`               | Estado y vigencia del permiso; dueño/gerente |
 | POST       | `/api/expenses`, `/api/expenses/recurring` | Gastos/recurrencias                        |
 | PUT        | `/api/settings`                            | Configuración                              |
 | POST       | `/api/users`                               | Alta de usuarios, solo dueño               |
@@ -132,9 +139,9 @@ npm test
 npm run build
 ```
 
-Las pruebas de dominio siempre se ejecutan. Para ejecutar también la suite API, configurar `TEST_DATABASE_URL` contra una base **de pruebas**. La suite crea un esquema `test_<uuid>`, aplica el SQL inicial, prepara fixtures y elimina solo ese esquema al terminar. No usa los datos de la demo. Sin esta variable, la prueba API se marca explícitamente como omitida.
+Las pruebas de dominio siempre se ejecutan. Para ejecutar también la suite API, configurar `TEST_DATABASE_URL` contra una base **de pruebas**. La suite crea un esquema `test_<uuid>`, aplica todas las migraciones SQL, prepara fixtures y elimina solo ese esquema al terminar. No usa los datos de la demo. Sin esta variable, las pruebas API se marcan explícitamente como omitidas.
 
-La suite cubre descuentos/puntos, zona horaria, recurrencias, CSV, autenticación/origen, aislamiento por responsable, lectura sin permisos de escritura, venta atómica, idempotencia, stock insuficiente, concurrencia, traspasos históricos, ocultación de costos al cajero, importación atómica, formatos de exportación y cierre.
+La suite cubre descuentos/puntos, zona horaria, recurrencias, CSV, autenticación/origen, aislamiento por responsable, lectura sin permisos de escritura, venta atómica, idempotencia, stock insuficiente, concurrencia, traspasos históricos, ocultación de costos al cajero, importación atómica, permisos de socios, movimientos de caja, bloqueo legal por defecto, formatos de exportación y cierre.
 
 Con una demo local en ejecución:
 

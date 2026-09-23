@@ -26,6 +26,9 @@ export interface Product {
   type: string;
   unit: string;
   lot: string;
+  supplier: string;
+  sourceSystem: string | null;
+  sourceId: string | null;
   stock: number;
   minimum: number;
   cost: number;
@@ -42,6 +45,11 @@ export interface Customer {
   phone: string;
   notes: string;
   points: number;
+  permitStatus: "unverified" | "pending" | "verified" | "expired";
+  permitValidUntil: string | null;
+  permitCheckedAt: string | null;
+  sourceSystem: string | null;
+  sourceId: string | null;
   createdAt: string;
   totalSpent: number;
   purchases: number;
@@ -71,6 +79,7 @@ export interface Sale {
   pointsEarned: number;
   pointsUsed: number;
   payment: string;
+  channel: string;
   items: SaleItem[];
 }
 export interface Expense {
@@ -104,6 +113,25 @@ export interface Closure {
   difference: number;
   note: string;
 }
+export interface CashEntry {
+  id: string;
+  date: string;
+  account: "cash" | "bank";
+  category: string;
+  amount: number;
+  description: string;
+  sourceSystem: string | null;
+  sourceId: string | null;
+}
+export interface CashPlan {
+  id: string;
+  date: string;
+  scenario: "base" | "cautious" | "growth";
+  account: "cash" | "bank";
+  category: string;
+  amount: number;
+  description: string;
+}
 export interface ClubState {
   user: User;
   users: User[];
@@ -113,6 +141,11 @@ export interface ClubState {
   expenses: Expense[];
   movements: Movement[];
   closures: Closure[];
+  cashEntries: CashEntry[];
+  cashPlans: CashPlan[];
+  financeBalance: number;
+  cashExpected: number;
+  operationsEnabled: boolean;
   settings: Settings;
   today: string;
   demo: boolean;

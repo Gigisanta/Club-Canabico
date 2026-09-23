@@ -26,6 +26,9 @@ import {
   expenseSchema,
   settingsSchema,
   date,
+  permitSchema,
+  cashEntrySchema,
+  cashPlanSchema,
   HttpError,
 } from "./validation.js";
 import { exportReport } from "./reports.js";
@@ -37,6 +40,7 @@ declare global {
   }
 }
 const demo = process.env.DEMO_MODE === "true";
+const operationsEnabled = demo || process.env.CLUB_OPERATIONS_APPROVED === "true";
 const secret = process.env.JWT_SECRET;
 if (!secret || secret.length < 32)
   throw new Error("JWT_SECRET debe tener al menos 32 caracteres.");
@@ -212,18 +216,25 @@ async function validOwner(id: string) {
   if (!owner || !["responsible", "owner", "admin"].includes(owner.role))
     throw new HttpError(400, "Responsable inválido");
 }
+function validateCashDirection(category: string, amount: number) {
+  if (["opening_balance", "capital_contribution", "delivery_receipt", "other_income"].includes(category) && amount < 0)
+    throw new HttpError(400, "Este tipo de ingreso requiere importe positivo");
+  if (["operating_expense", "stock_purchase", "local_investment", "owner_draw", "other_outflow"].includes(category) && amount > 0)
+    throw new HttpError(400, "Este tipo de egreso requiere importe negativo");
+}
 app.post(
   "/api/products",
   roles("owner", "admin", "responsible"),
   async (req, res) => {
     const v = productSchema.parse(req.body);
+    if (Boolean(v.sourceSystem) !== Boolean(v.sourceId)) throw new HttpError(400, "Completá origen e ID de origen juntos");
     if (v.unit === "ud" && (v.stock % 1000 !== 0 || v.minimum % 1000 !== 0))
       throw new HttpError(400, "El stock de unidades debe ser entero");
     if (req.user.role === "responsible" && v.ownerId !== req.user.id)
       throw new HttpError(403, "Solo podés crear lotes propios");
     await validOwner(v.ownerId);
     const product = await atomic(async (tx) => {
-      const p = await tx.product.create({ data: v });
+      const p = await tx.product.create({ data: { ...v, sourceSystem: v.sourceSystem || "local", sourceId: v.sourceId || randomUUID() } });
       await tx.movement.create({
         data: {
           productId: p.id,
@@ -246,7 +257,7 @@ app.patch(
   roles("owner", "admin", "responsible"),
   async (req, res) => {
     const v = productSchema
-      .omit({ stock: true, ownerId: true })
+      .omit({ stock: true, ownerId: true, sourceSystem: true, sourceId: true })
       .parse(req.body);
     const existing = await db.product.findFirst({
       where: {
@@ -335,10 +346,11 @@ app.post(
 app.post(
   "/api/customers",
   roles("owner", "admin", "cashier"),
-  async (req, res) =>
-    res
-      .status(201)
-      .json(await db.customer.create({ data: customerSchema.parse(req.body) })),
+  async (req, res) => {
+    const v = customerSchema.parse(req.body);
+    if (Boolean(v.sourceSystem) !== Boolean(v.sourceId)) throw new HttpError(400, "Completá origen e ID de origen juntos");
+    res.status(201).json(await db.customer.create({ data: { ...v, sourceSystem: v.sourceSystem || "local", sourceId: v.sourceId || randomUUID() } }));
+  },
 );
 app.patch(
   "/api/customers/:id",
@@ -347,14 +359,25 @@ app.patch(
     res.json(
       await db.customer.update({
         where: { id: String(req.params.id) },
-        data: customerSchema.parse(req.body),
+        data: customerSchema.omit({ sourceSystem: true, sourceId: true }).parse(req.body),
       }),
     ),
 );
+app.patch("/api/customers/:id/permit", roles("owner", "admin"), async (req, res) => {
+  const v = permitSchema.parse(req.body);
+  if (v.status === "verified" && (!v.validUntil || v.validUntil < businessDate(await getSettings())))
+    throw new HttpError(400, "La vigencia verificada debe ser futura o de hoy");
+  const customer = await db.customer.update({
+    where: { id: String(req.params.id) },
+    data: { permitStatus: v.status, permitValidUntil: v.validUntil, permitCheckedAt: new Date() },
+  });
+  res.json({ id: customer.id, permitStatus: customer.permitStatus, permitValidUntil: customer.permitValidUntil });
+});
 app.post(
   "/api/sales",
   roles("owner", "admin", "cashier", "responsible"),
   async (req, res) => {
+    if (!operationsEnabled) throw new HttpError(403, "Operaciones con cannabis pendientes de validación legal del club");
     const v = saleSchema.parse(req.body);
     const config = await getSettings();
     const result = await atomic(async (tx) => {
@@ -374,6 +397,8 @@ app.post(
         where: { id: v.customerId },
       });
       if (!customer) throw new HttpError(404, "Socio no encontrado");
+      if (!demo && (customer.permitStatus !== "verified" || !customer.permitValidUntil || customer.permitValidUntil < today))
+        throw new HttpError(403, "Permiso del socio sin verificación vigente");
       if (
         req.user.role === "responsible" &&
         !(await tx.sale.findFirst({
@@ -436,6 +461,7 @@ app.post(
           payment: v.payment,
           cost: lines.reduce((n, l) => n + l.cost, 0),
           requestId: v.requestId,
+          channel: "local",
           items: {
             create: lines.map((l, i) => {
               const revenue = allocations[i];
@@ -476,6 +502,15 @@ app.post(
         where: { id: customer.id },
         data: { points: { increment: pricing.pointsEarned - v.points } },
       });
+      await tx.cashEntry.create({ data: {
+        date: today,
+        account: v.payment === "cash" ? "cash" : "bank",
+        category: "sale",
+        amount: sale.total,
+        description: `Venta local ${sale.id}`,
+        saleId: sale.id,
+        userId: req.user.id,
+      } });
       return sale;
     });
     res
@@ -581,13 +616,12 @@ app.post(
       await atomic(async (tx) => {
         if (await tx.closure.findUnique({ where: { date: today } }))
           throw new HttpError(409, "La caja ya está cerrada");
-        const expected =
-          (
-            await tx.sale.aggregate({
-              where: { date: today, payment: "cash" },
-              _sum: { total: true },
-            })
-          )._sum.total || 0;
+        const previous = await tx.closure.findFirst({ where: { date: { lt: today } }, orderBy: { date: "desc" } });
+        const movements = await tx.cashEntry.aggregate({
+          where: { account: "cash", date: { gt: previous?.date || "0000-00-00", lte: today } },
+          _sum: { amount: true },
+        });
+        const expected = (previous?.counted || 0) + (movements._sum.amount || 0);
         return tx.closure.create({
           data: {
             date: today,
@@ -602,6 +636,32 @@ app.post(
     );
   },
 );
+app.post("/api/cash-entries", roles("owner", "admin"), async (req, res) => {
+  const v = cashEntrySchema.parse(req.body);
+  validateCashDirection(v.category, v.amount);
+  const today = businessDate(await getSettings());
+  if (v.date > today) throw new HttpError(400, "Un movimiento real no puede tener fecha futura; usá la proyección");
+  const entry = await atomic(async (tx) => {
+    if (v.sourceSystem && v.sourceId) {
+      const prior = await tx.cashEntry.findUnique({ where: { sourceSystem_sourceId: { sourceSystem: v.sourceSystem, sourceId: v.sourceId } } });
+      if (prior) {
+        if (prior.date !== v.date || prior.amount !== v.amount || prior.category !== v.category || prior.account !== v.account)
+          throw new HttpError(409, "Identificador de origen con datos distintos");
+        return prior;
+      }
+    }
+    if (v.account === "cash" && await tx.closure.findFirst({ where: { date: { gte: v.date } } }))
+      throw new HttpError(409, "Hay un cierre de caja para esta fecha o posterior");
+    return tx.cashEntry.create({ data: { ...v, userId: req.user.id } });
+  });
+  res.status(201).json(entry);
+});
+app.post("/api/cash-plans", roles("owner", "admin"), async (req, res) => {
+  const v = cashPlanSchema.parse(req.body);
+  validateCashDirection(v.category, v.amount);
+  const plan = await db.cashPlan.create({ data: { ...v, userId: req.user.id } });
+  res.status(201).json(plan);
+});
 app.put("/api/settings", roles("owner", "admin"), async (req, res) => {
   const value = settingsSchema.parse(req.body);
   const current = await getSettings();
@@ -642,7 +702,7 @@ app.post("/api/users", roles("owner"), async (req, res) => {
 app.post("/api/import", roles("owner", "admin"), async (req, res) => {
   const v = z
     .object({
-      kind: z.enum(["products", "customers"]),
+      kind: z.enum(["products", "customers", "cash_entries"]),
       csv: z.string().min(1).max(1500000),
       commit: z.boolean().default(false),
     })
@@ -665,6 +725,7 @@ app.post("/api/import", roles("owner", "admin"), async (req, res) => {
   const data: (
     | z.infer<typeof productSchema>
     | z.infer<typeof customerSchema>
+    | z.infer<typeof cashEntrySchema>
   )[] = [];
   const owners = await db.user.findMany({
     where: { role: { in: ["owner", "admin", "responsible"] } },
@@ -673,6 +734,13 @@ app.post("/api/import", roles("owner", "admin"), async (req, res) => {
   const lots = new Set(
     (await db.product.findMany({ select: { lot: true } })).map((p) => p.lot),
   );
+  const existingProducts = await db.product.findMany();
+  const existingCustomers = await db.customer.findMany();
+  const existingCashEntries = v.kind === "cash_entries" ? await db.cashEntry.findMany() : [];
+  const latestClosure = v.kind === "cash_entries" ? await db.closure.findFirst({ orderBy: { date: "desc" } }) : null;
+  const today = businessDate(await getSettings());
+  const sourceKeys = new Set<string>();
+  let skipped = 0;
   rows.forEach((r, i) => {
     try {
       if (v.kind === "products") {
@@ -683,23 +751,73 @@ app.post("/api/import", roles("owner", "admin"), async (req, res) => {
           cost: Math.round(Number(r.cost) * 100),
           price: Math.round(Number(r.price) * 100),
           expires: r.expires || null,
+          supplier: r.supplier || "",
+          sourceSystem: r.sourceSystem || null,
+          sourceId: r.sourceId || null,
         });
+        if (!p.sourceSystem || !p.sourceId) throw new Error("Cada lote importado requiere sourceSystem y sourceId");
         if (p.unit === "ud" && (p.stock % 1000 !== 0 || p.minimum % 1000 !== 0))
           throw new Error("Las unidades deben ser enteras");
         if (!owners.some((o) => o.id === p.ownerId))
           throw new Error("Responsable desconocido");
+        const key = `${p.sourceSystem}\u0000${p.sourceId}`;
+        if (sourceKeys.has(key)) throw new Error("ID de origen repetido en el archivo");
+        sourceKeys.add(key);
+        const prior = existingProducts.find((e) => e.lot === p.lot || (e.sourceSystem === p.sourceSystem && e.sourceId === p.sourceId));
+        if (prior) {
+          if (prior.lot !== p.lot || prior.sourceSystem !== p.sourceSystem || prior.sourceId !== p.sourceId ||
+              prior.name !== p.name || prior.strain !== p.strain || prior.type !== p.type || prior.unit !== p.unit ||
+              prior.supplier !== p.supplier || prior.stock !== p.stock || prior.minimum !== p.minimum ||
+              prior.cost !== p.cost || prior.price !== p.price || prior.location !== p.location ||
+              prior.ownerId !== p.ownerId || prior.expires !== p.expires)
+            throw new Error("Lote o ID de origen existente con datos diferentes; conciliar antes de importar");
+          skipped++;
+          return;
+        }
         if (lots.has(p.lot)) throw new Error("Lote duplicado");
         lots.add(p.lot);
         data.push(p);
-      } else
-        data.push(
-          customerSchema.parse({
+      } else if (v.kind === "cash_entries") {
+        const c = cashEntrySchema.parse({
+          ...r,
+          amount: Math.round(Number(r.amount) * 100),
+        });
+        validateCashDirection(c.category, c.amount);
+        if (c.date > today) throw new Error("Un movimiento real no puede tener fecha futura");
+        const key = `${c.sourceSystem}\u0000${c.sourceId}`;
+        if (sourceKeys.has(key)) throw new Error("ID de origen repetido en el archivo");
+        sourceKeys.add(key);
+        const prior = existingCashEntries.find((e) => e.sourceSystem === c.sourceSystem && e.sourceId === c.sourceId);
+        if (prior) {
+          if (prior.date !== c.date || prior.account !== c.account || prior.category !== c.category || prior.amount !== c.amount || prior.description !== c.description)
+            throw new Error("Movimiento de origen existente con datos diferentes; conciliar antes de importar");
+          skipped++;
+          return;
+        }
+        if (c.account === "cash" && latestClosure && latestClosure.date >= c.date)
+          throw new Error("Hay un cierre de caja posterior; conciliar antes de importar efectivo");
+        data.push(c);
+      } else {
+        const c = customerSchema.parse({
             ...r,
             email: r.email || "",
             phone: r.phone || "",
             notes: r.notes || "",
-          }),
-        );
+            sourceSystem: r.sourceSystem || null,
+            sourceId: r.sourceId || null,
+          });
+        if (!c.sourceSystem || !c.sourceId) throw new Error("Cada socio importado requiere sourceSystem y sourceId");
+        const key = `${c.sourceSystem}\u0000${c.sourceId}`;
+        if (sourceKeys.has(key)) throw new Error("ID de origen repetido en el archivo");
+        sourceKeys.add(key);
+        const prior = existingCustomers.find((e) => e.sourceSystem === c.sourceSystem && e.sourceId === c.sourceId);
+        if (prior) {
+          if (prior.name !== c.name || prior.email !== c.email || prior.phone !== c.phone || prior.notes !== c.notes) throw new Error("Socio de origen existente con datos diferentes; conciliar antes de importar");
+          skipped++;
+          return;
+        }
+        data.push(c);
+      }
     } catch (e) {
       errors.push(
         `Fila ${i + 2}: ${e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join(", ") : (e as Error).message}`,
@@ -725,11 +843,13 @@ app.post("/api/import", roles("owner", "admin"), async (req, res) => {
               note: "Importación CSV",
             },
           });
-        } else await tx.customer.create({ data: row });
+        } else if ("category" in row) await tx.cashEntry.create({ data: { ...row, userId: req.user.id } });
+        else await tx.customer.create({ data: row });
       }
     });
   res.json({
     count: data.length,
+    skipped,
     errors,
     preview: data.slice(0, 5),
     committed: v.commit,

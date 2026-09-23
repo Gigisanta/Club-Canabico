@@ -28,6 +28,8 @@ model User {
   expenses Expense[]
   recurring RecurringRule[]
   closures Closure[]
+  cashEntries CashEntry[]
+  cashPlans CashPlan[]
 }
 model Product {
   id String @id @default(cuid())
@@ -36,6 +38,9 @@ model Product {
   type String
   unit String @default("g")
   lot String @unique
+  supplier String @default("")
+  sourceSystem String?
+  sourceId String?
   stock Int
   minimum Int
   cost Int
@@ -48,6 +53,7 @@ model Product {
   items SaleItem[]
   movements Movement[]
   @@index([ownerId])
+  @@unique([sourceSystem, sourceId])
 }
 model Customer {
   id String @id @default(cuid())
@@ -56,8 +62,14 @@ model Customer {
   phone String
   notes String @default("")
   points Int @default(0)
+  permitStatus String @default("unverified")
+  permitValidUntil String?
+  permitCheckedAt DateTime?
+  sourceSystem String?
+  sourceId String?
   createdAt DateTime @default(now())
   sales Sale[]
+  @@unique([sourceSystem, sourceId])
 }
 model Sale {
   id String @id @default(cuid())
@@ -75,9 +87,41 @@ model Sale {
   pointsUsed Int
   payment String
   requestId String @unique
+  channel String @default("local")
   items SaleItem[]
+  cashEntry CashEntry?
   @@index([date])
   @@index([customerId])
+}
+model CashEntry {
+  id String @id @default(cuid())
+  date String
+  account String
+  category String
+  amount Int
+  description String
+  sourceSystem String?
+  sourceId String?
+  saleId String? @unique
+  sale Sale? @relation(fields: [saleId], references: [id])
+  userId String
+  user User @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+  @@unique([sourceSystem, sourceId])
+  @@index([date, account])
+}
+model CashPlan {
+  id String @id @default(cuid())
+  date String
+  scenario String
+  account String
+  category String
+  amount Int
+  description String
+  userId String
+  user User @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+  @@index([date, scenario])
 }
 model SaleItem {
   id String @id @default(cuid())
