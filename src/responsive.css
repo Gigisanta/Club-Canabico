@@ -1,0 +1,541 @@
+/* Responsive rules are repeated with explicit viewport scope to keep layout predictable. */
+@media (min-width: 1550px) {
+  .main-content.main-content {
+    padding-left: 45px;
+    padding-right: 45px;
+  }
+  .metric.metric {
+    min-height: 145px;
+  }
+  .main-chart.main-chart {
+    height: 240px;
+  }
+}
+@media (max-width: 1200px) {
+  .sidebar.sidebar {
+    width: 200px;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  .workspace.workspace {
+    margin-left: 200px;
+    width: calc(100% - 200px);
+  }
+  .main-content.main-content {
+    padding-left: 23px;
+    padding-right: 23px;
+  }
+  .topbar.topbar {
+    padding-left: 23px;
+    padding-right: 23px;
+  }
+  .metric.metric {
+    padding: 14px 13px;
+  }
+  .metric > strong {
+    font-size: 24px !important;
+  }
+  .spark.spark {
+    width: 40px;
+    right: 12px;
+    opacity: 0.4;
+  }
+  .dashboard-bottom.dashboard-bottom {
+    grid-template-columns: minmax(0, 1.4fr) minmax(275px, 1fr);
+  }
+  .chart-foot.chart-foot {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+  .chart-foot > span {
+    gap: 4px !important;
+    font-size: 9px !important;
+  }
+  .chart-summary.chart-summary {
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .owner-cards.owner-cards {
+    gap: 12px;
+  }
+  .owner-card.owner-card {
+    padding: 18px;
+  }
+  .heading-actions.heading-actions {
+    gap: 7px;
+  }
+  .table-scroll th,
+  .table-scroll td {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+}
+@media (max-width: 1024px) {
+  .sidebar.sidebar {
+    width: 184px;
+  }
+  .workspace.workspace {
+    margin-left: 184px;
+    width: calc(100% - 184px);
+  }
+  .sidebar nav > a {
+    font-size: 12px !important;
+    gap: 8px !important;
+    padding-left: 9px !important;
+    padding-right: 9px !important;
+  }
+  .main-content.main-content {
+    padding: 18px 19px 0;
+  }
+  .topbar.topbar {
+    padding: 0 19px;
+  }
+  .dashboard-charts.dashboard-charts,
+  .dashboard-bottom.dashboard-bottom {
+    grid-template-columns: 1fr;
+  }
+  .dashboard-charts > .panel:last-child .donut-wrap {
+    height: 190px;
+  }
+  .donut-legend.donut-legend {
+    display: flex;
+    justify-content: center;
+    gap: 30px;
+  }
+  .donut-legend > div {
+    display: flex !important;
+    gap: 8px !important;
+  }
+  .attention-column.attention-column {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .dashboard-toolbar.dashboard-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .dashboard-toolbar > .filter-group {
+    padding-bottom: 12px;
+    width: 100%;
+  }
+  .dashboard-toolbar .select-wrap {
+    flex: 1;
+  }
+  .dashboard-toolbar select {
+    width: 100%;
+  }
+  .metrics-grid.metrics-grid {
+    gap: 10px;
+  }
+  .metric-bottom.metric-bottom {
+    white-space: normal;
+    font-size: 10px;
+  }
+  .spark.spark {
+    display: none;
+  }
+  .metric > strong {
+    font-size: 22px !important;
+  }
+  .metric-top.metric-top {
+    font-size: 11px;
+  }
+  .metric-icon.metric-icon {
+    width: 22px;
+    height: 22px;
+  }
+  .page-heading.page-heading {
+    gap: 12px;
+  }
+  h1 {
+    font-size: 25px !important;
+  }
+  .global-search > span,
+  .global-search kbd {
+    display: none;
+  }
+  .owner-cards.owner-cards {
+    grid-template-columns: 1fr 1fr;
+  }
+  .export-cards.export-cards {
+    grid-template-columns: 1fr;
+  }
+  .export-card.export-card {
+    display: grid;
+    grid-template-columns: 65px 1fr auto;
+    gap: 10px 20px;
+    align-items: center;
+  }
+  .export-icon.export-icon {
+    grid-row: span 2;
+    margin: 0;
+  }
+  .export-card p {
+    grid-column: 2;
+    margin: 0 !important;
+  }
+  .export-card .button {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+  .report-filters.report-filters {
+    grid-template-columns: 1fr 1fr;
+  }
+  .report-filters .field:last-child {
+    grid-column: span 2;
+  }
+  .login-story.login-story {
+    padding: 40px;
+  }
+  .login-story h1 {
+    font-size: 45px !important;
+  }
+}
+@media (max-width: 760px) {
+  .sidebar.sidebar {
+    transform: translateX(-100%);
+    width: 240px;
+    transition: transform 200ms ease-out;
+  }
+  .sidebar.sidebar.open {
+    transform: translateX(0);
+  }
+  .sidebar-scrim.sidebar-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: #08060b99;
+    border: 0;
+    z-index: 29;
+  }
+  .workspace.workspace {
+    margin-left: 0;
+    width: 100%;
+  }
+  .mobile-menu.mobile-menu {
+    display: inline-flex;
+    margin-left: -6px;
+  }
+  .topbar.topbar {
+    height: 61px;
+    padding: 0 17px;
+  }
+  .top-actions.top-actions {
+    gap: 6px;
+  }
+  .breadcrumb.breadcrumb {
+    gap: 8px;
+    font-size: 11px;
+  }
+  .breadcrumb > span:first-of-type {
+    display: none;
+  }
+  .breadcrumb-slash.breadcrumb-slash {
+    display: none;
+  }
+  .main-content.main-content {
+    padding: 16px 17px 0;
+  }
+  .demo-ribbon.demo-ribbon {
+    margin-bottom: 22px;
+    font-size: 10px;
+  }
+  .demo-extra.demo-extra {
+    display: none;
+  }
+  .page-heading.page-heading {
+    flex-direction: column;
+    align-items: flex-start;
+    margin-bottom: 20px;
+  }
+  .page-heading h1 {
+    font-size: 27px !important;
+  }
+  .heading-actions.heading-actions {
+    padding-top: 1px;
+    width: 100%;
+  }
+  .heading-actions .button {
+    flex: 1;
+  }
+  .eyebrow.eyebrow {
+    font-size: 9px;
+  }
+  .metrics-grid.metrics-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 11px;
+  }
+  .metrics-grid.three {
+    grid-template-columns: 1fr;
+  }
+  .metric.metric {
+    min-height: 122px;
+    padding: 14px 15px;
+  }
+  .metric > strong {
+    font-size: 25px !important;
+  }
+  .metric-top.metric-top {
+    font-size: 12px;
+  }
+  .metric-bottom.metric-bottom {
+    font-size: 10px;
+  }
+  .dashboard-charts.dashboard-charts,
+  .dashboard-bottom.dashboard-bottom {
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  .panel-head.panel-head {
+    padding: 18px 16px 0;
+  }
+  .panel-head h2 {
+    font-size: 12px;
+  }
+  .chart-summary.chart-summary {
+    padding: 0 16px;
+  }
+  .chart-summary > strong {
+    font-size: 23px !important;
+  }
+  .chart-legend.chart-legend {
+    font-size: 9px;
+  }
+  .main-chart.main-chart {
+    height: 210px;
+    margin-right: 7px;
+  }
+  .chart-foot.chart-foot {
+    padding: 13px 15px;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .chart-foot > span {
+    font-size: 10px !important;
+  }
+  .chart-foot strong {
+    font-size: 11px !important;
+  }
+  .attention-column.attention-column {
+    display: flex;
+  }
+  .donut-legend.donut-legend {
+    display: block;
+    padding: 0 28px 12px;
+  }
+  .donut-legend > div {
+    display: grid !important;
+    grid-template-columns: 1fr 45px 80px !important;
+    font-size: 12px;
+  }
+  .dashboard-toolbar .filter-group {
+    gap: 8px;
+  }
+  .dashboard-toolbar .select-wrap:first-child {
+    flex: 1.5;
+  }
+  .select-wrap select {
+    font-size: 10px !important;
+    padding-right: 12px !important;
+  }
+  .table-toolbar.table-toolbar {
+    flex-wrap: wrap;
+    padding-left: 15px;
+    padding-right: 15px;
+  }
+  .search-field.search-field {
+    max-width: none;
+  }
+  .table-toolbar .filter-group {
+    width: 100%;
+  }
+  .table-toolbar .filter-group > * {
+    flex: 1;
+    min-width: 0;
+  }
+  .table-toolbar.compact {
+    flex-wrap: nowrap;
+  }
+  .table-scroll th,
+  .table-scroll td {
+    padding: 12px 13px;
+  }
+  .top-table.top-table {
+    max-height: 340px;
+  }
+  .top-table table {
+    min-width: 460px;
+  }
+  .app-footer.app-footer {
+    font-size: 9px;
+    gap: 8px;
+  }
+  .owner-rank-name.owner-rank-name {
+    width: auto;
+    flex: 1;
+  }
+  .owner-bar.owner-bar {
+    display: none;
+  }
+  .mini-stats.mini-stats {
+    gap: 13px;
+    padding: 16px;
+  }
+  .mini-stats > span {
+    font-size: 12px;
+  }
+  .modal.modal {
+    padding: 21px 19px;
+    max-height: 93dvh;
+  }
+  .modal-head h2 {
+    font-size: 18px !important;
+  }
+  .form-grid.form-grid {
+    grid-template-columns: 1fr;
+  }
+  .sale-line.sale-line {
+    grid-template-columns: minmax(0, 1fr) 72px 25px;
+    gap: 7px;
+  }
+  .sale-line .field input,
+  .sale-line .field select {
+    font-size: 11px;
+    padding: 9px 7px;
+  }
+  .sale-line .field > label {
+    font-size: 12px;
+  }
+  .sale-checkout.sale-checkout {
+    gap: 20px;
+  }
+  .sale-checkout .field > label {
+    font-size: 12px;
+  }
+  .customer-profile.customer-profile {
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .customer-profile h2 {
+    font-size: 18px !important;
+  }
+  .customer-profile p {
+    font-size: 12px;
+  }
+  .detail-stats.detail-stats {
+    grid-template-columns: 1fr 1fr;
+  }
+  .detail-stats > div:nth-child(2) {
+    border-right: 0;
+  }
+  .detail-stats > div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--border);
+  }
+  .sales-summary.sales-summary {
+    grid-template-columns: 1fr;
+  }
+  .sales-summary > div {
+    padding: 17px 20px !important;
+    border-right: 0 !important;
+    border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: center;
+  }
+  .sales-summary strong {
+    font-size: 23px !important;
+    text-align: right;
+    margin: 0 !important;
+  }
+  .sales-summary small {
+    grid-column: 1 / -1;
+    margin-top: 6px;
+  }
+  .sales-summary .status-label {
+    justify-content: flex-end;
+  }
+  .owner-cards.owner-cards {
+    grid-template-columns: 1fr;
+  }
+  .owner-card.owner-card {
+    padding: 24px;
+  }
+  .report-filters.report-filters {
+    grid-template-columns: 1fr;
+    padding-left: 18px;
+    padding-right: 18px;
+    gap: 0;
+  }
+  .report-filters .field:last-child {
+    grid-column: auto;
+  }
+  .export-card.export-card {
+    padding: 20px;
+    display: block;
+  }
+  .export-icon.export-icon {
+    margin-bottom: 15px;
+  }
+  .export-card p {
+    margin: 12px 0 20px !important;
+  }
+  .settings-tabs.settings-tabs {
+    gap: 0;
+    overflow: auto;
+  }
+  .settings-tabs button {
+    font-size: 11px !important;
+    padding: 12px 10px !important;
+    white-space: nowrap;
+    gap: 5px !important;
+  }
+  .settings-tabs svg {
+    width: 16px;
+  }
+  .settings-form.settings-form,
+  .import-content.import-content {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+  .import-steps.import-steps {
+    gap: 13px;
+    font-size: 11px;
+    flex-wrap: wrap;
+  }
+  .import-steps i {
+    width: 20px !important;
+    height: 20px !important;
+  }
+  .login-page.login-page {
+    display: block;
+    min-height: 100dvh;
+    padding: 35px 10px;
+    background: #0e0c12;
+  }
+  .login-story.login-story {
+    display: none;
+  }
+  .login-form.login-form {
+    margin: 0 auto;
+    padding: 30px 25px;
+    max-width: 450px;
+  }
+  .login-form > .brand {
+    display: flex !important;
+    margin-bottom: 60px;
+    max-width: 140px;
+  }
+  .login-form h2 {
+    font-size: 26px;
+  }
+  .retention-card.retention-card {
+    padding: 20px;
+  }
+  .boot.boot {
+    padding: 25px;
+    text-align: center;
+  }
+  .template-button.template-button {
+    margin-bottom: 15px;
+  }
+}

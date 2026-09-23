@@ -1,0 +1,18 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=raiz
+      - POSTGRES_DB=raiz
+      - POSTGRES_PASSWORD
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raiz -d raiz"]
+      interval: 5s
+      retries: 10
+volumes:
+  pgdata:

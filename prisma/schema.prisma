@@ -1,0 +1,155 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+enum Role {
+  owner
+  admin
+  responsible
+  cashier
+  viewer
+}
+model User {
+  id String @id @default(cuid())
+  name String
+  email String @unique
+  password String
+  role Role
+  color String @default("#789b84")
+  products Product[]
+  sales Sale[]
+  items SaleItem[]
+  movements Movement[] @relation("Actor")
+  transfersFrom Movement[] @relation("FromOwner")
+  transfersTo Movement[] @relation("ToOwner")
+  expenses Expense[]
+  recurring RecurringRule[]
+  closures Closure[]
+}
+model Product {
+  id String @id @default(cuid())
+  name String
+  strain String
+  type String
+  unit String @default("g")
+  lot String @unique
+  stock Int
+  minimum Int
+  cost Int
+  price Int
+  location String
+  ownerId String
+  owner User @relation(fields: [ownerId], references: [id])
+  expires String?
+  createdAt DateTime @default(now())
+  items SaleItem[]
+  movements Movement[]
+  @@index([ownerId])
+}
+model Customer {
+  id String @id @default(cuid())
+  name String
+  email String
+  phone String
+  notes String @default("")
+  points Int @default(0)
+  createdAt DateTime @default(now())
+  sales Sale[]
+}
+model Sale {
+  id String @id @default(cuid())
+  customerId String
+  customer Customer @relation(fields: [customerId], references: [id])
+  userId String
+  user User @relation(fields: [userId], references: [id])
+  date String
+  createdAt DateTime @default(now())
+  subtotal Int
+  discount Int
+  total Int
+  cost Int
+  pointsEarned Int
+  pointsUsed Int
+  payment String
+  requestId String @unique
+  items SaleItem[]
+  @@index([date])
+  @@index([customerId])
+}
+model SaleItem {
+  id String @id @default(cuid())
+  saleId String
+  sale Sale @relation(fields: [saleId], references: [id])
+  productId String
+  product Product @relation(fields: [productId], references: [id])
+  ownerId String
+  owner User @relation(fields: [ownerId], references: [id])
+  name String
+  quantity Int
+  price Int
+  cost Int
+  revenue Int
+  @@index([ownerId])
+}
+model Movement {
+  id String @id @default(cuid())
+  productId String
+  product Product @relation(fields: [productId], references: [id])
+  type String
+  quantity Int
+  beforeStock Int
+  afterStock Int
+  fromOwner String?
+  from User? @relation("FromOwner",fields: [fromOwner], references: [id])
+  toOwner String?
+  to User? @relation("ToOwner",fields: [toOwner], references: [id])
+  userId String
+  user User @relation("Actor",fields: [userId], references: [id])
+  note String
+  createdAt DateTime @default(now())
+  @@index([productId, createdAt])
+}
+model Expense {
+  id String @id @default(cuid())
+  name String
+  amount Int
+  category String
+  kind String
+  ownerId String?
+  owner User? @relation(fields: [ownerId], references: [id])
+  date String
+  recurrence String @default("none")
+  ruleId String?
+  rule RecurringRule? @relation(fields: [ruleId], references: [id])
+  @@unique([ruleId, date])
+  @@index([date])
+}
+model RecurringRule {
+  id String @id @default(cuid())
+  name String
+  amount Int
+  category String
+  ownerId String?
+  owner User? @relation(fields: [ownerId], references: [id])
+  recurrence String
+  nextDate String
+  expenses Expense[]
+}
+model Closure {
+  id String @id @default(cuid())
+  date String @unique
+  expected Int
+  counted Int
+  difference Int
+  userId String
+  user User @relation(fields: [userId], references: [id])
+  note String
+  createdAt DateTime @default(now())
+}
+model Setting {
+  id Int @id @default(1)
+  value Json
+}
