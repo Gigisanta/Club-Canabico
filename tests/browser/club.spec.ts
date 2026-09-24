@@ -47,11 +47,20 @@ test("saved products and profiles help classify new stock", async ({ page }) => 
   const dialog = page.getByRole("dialog");
   await expect(dialog.locator('[name="ownerId"]')).toHaveCount(0);
   await expect(dialog).not.toContainText(/reprogram/i);
+  await dialog.getByRole("button", { name: "Ver todos los productos guardados" }).click();
+  await expect(dialog.getByRole("listbox", { name: "Productos guardados" })).toBeVisible();
+  await expect(dialog.getByRole("listbox", { name: "Productos guardados" }).getByRole("option").first()).toBeVisible();
   await dialog.getByLabel("Nombre del producto").fill("Lemon");
-  await dialog.getByRole("button", { name: /Lemon Haze.*Flor.*Sativa/ }).click();
+  await dialog.getByRole("listbox", { name: "Productos guardados" }).getByRole("option", { name: /Lemon Haze.*Flor.*Sativa/ }).click();
   await expect(dialog.getByLabel("Nombre del producto")).toHaveValue("Lemon Haze");
   await expect(dialog.getByLabel("Perfil (opcional)")).toHaveValue("Sativa");
+  await dialog.getByLabel("Nombre del producto").fill("Lemon");
+  await expect(dialog.getByRole("listbox", { name: "Productos guardados" }).getByRole("option", { name: /Lemon Haze/ })).toBeVisible();
+  await dialog.getByLabel("Nombre del producto").press("ArrowDown");
+  await dialog.getByLabel("Nombre del producto").press("Enter");
+  await expect(dialog.getByLabel("Nombre del producto")).toHaveValue("Lemon Haze");
   await dialog.getByLabel("Nombre del producto").fill("Aceite CBD nuevo");
+  await expect(dialog.getByText("Sin coincidencias. Podés guardar este nombre nuevo.")).toBeVisible();
   await expect(dialog.getByLabel("Perfil (opcional)")).toHaveValue("CBD");
   await expect(dialog.getByLabel("Tipo", { exact: true })).toHaveValue("Aceite");
   await expect(dialog.getByLabel("Unidad")).toHaveValue("ud");
@@ -90,6 +99,26 @@ test("saved products and profiles help classify new stock", async ({ page }) => 
   await expect(editDialog.getByLabel("Precio de venta")).not.toHaveValue("");
   await expect(editDialog.getByText(/Valores anteriores: costo/)).toBeVisible();
   await editDialog.getByRole("button", { name: "Cerrar" }).click();
+});
+test("product picker can browse beyond the first catalog page", async ({ page }) => {
+  await page.goto("/inventario");
+  await page.getByRole("button", { name: "Explorar club de demostración" }).click();
+  await page.route("**/api/product-catalog?all=1*", async (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor") || "";
+    const products = (cursor ? [40, 41] : Array.from({ length: 40 }, (_, index) => index))
+      .map((index) => ({ name: `Producto ${String(index).padStart(2, "0")}`, strain: "", type: "Flor", unit: "g" }));
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      products, profiles: [], nextCursor: cursor ? null : "Producto 39", cursor,
+    }) });
+  });
+  await page.getByRole("button", { name: "Nuevo stock" }).click();
+  const dialog = page.getByRole("dialog", { name: "Nuevo stock" });
+  await dialog.getByRole("button", { name: "Ver todos los productos guardados" }).click();
+  await expect(dialog.getByRole("listbox", { name: "Productos guardados" }).getByRole("option")).toHaveCount(40);
+  await dialog.getByRole("button", { name: "Mostrar más productos" }).click();
+  await expect(dialog.getByRole("listbox", { name: "Productos guardados" }).getByRole("option")).toHaveCount(42);
+  await dialog.getByRole("option", { name: "Producto 41 Flor" }).click();
+  await expect(dialog.getByRole("combobox", { name: "Nombre del producto" })).toHaveValue("Producto 41");
 });
 test("new stock assigns the signed-in owner without an extra field", async ({ page }) => {
   await page.goto("/inventario");

@@ -134,6 +134,28 @@ test(
           await db.product.deleteMany({ where: { lot: { in: lots } } });
         }
       });
+      await t.test("product catalog browse reaches every saved name without duplicates", async () => {
+        const lots = Array.from({ length: 45 }, (_, index) => `catalog-page-${index}`);
+        try {
+          await db.product.createMany({ data: lots.map((lot, index) => ({
+            name: `Catálogo ${String(index).padStart(2, "0")}`,
+            strain: "", type: "Flor", unit: "g", lot,
+            stock: 1, minimum: 0, cost: 100, price: 200, location: "A", ownerId: "r1",
+          })) });
+          const first = await (await call("/product-catalog?all=1", "r1")).json();
+          assert.equal(first.products.length, 40);
+          assert.ok(first.nextCursor);
+          const second = await (await call(`/product-catalog?all=1&cursor=${encodeURIComponent(first.nextCursor)}`, "r1")).json();
+          const names = [...first.products, ...second.products].map((product: { name: string }) => product.name);
+          assert.equal(names.length, 46);
+          assert.equal(new Set(names).size, names.length);
+          assert.equal(names.includes("p1"), true);
+          assert.equal(names.includes("p2"), false);
+          assert.equal(second.nextCursor, null);
+        } finally {
+          await db.product.deleteMany({ where: { lot: { in: lots } } });
+        }
+      });
       await t.test("requires session and rejects foreign origins", async () => {
         assert.equal((await fetch(base + "/views/dashboard")).status, 401);
         assert.equal(

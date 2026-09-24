@@ -517,12 +517,24 @@
 }
 /* Saved supplier directory in inventory. */
 .supplier-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 12px; padding: 4px 0 8px; }
-.catalog-suggestions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
-.catalog-suggestions > span { flex-basis: 100%; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
-.catalog-choice { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 6px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised); color: var(--text); cursor: pointer; text-align: left; }
-.catalog-choice:hover, .catalog-choice:focus-visible { border-color: var(--accent); }
-.catalog-choice strong { overflow: hidden; font-size: 11px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.catalog-choice small { flex-shrink: 0; color: var(--muted); font-size: 10px; }
+.product-picker { position: relative; z-index: 4; }
+.product-picker-shell { position: relative; }
+.product-picker-control { display: flex; align-items: center; min-height: 39px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-raised); }
+.product-picker-control:focus-within { border-color: var(--accent); outline: 2px solid var(--accent-soft); outline-offset: 1px; }
+.field .product-picker-control input { flex: 1; width: 100%; min-width: 0; border: 0; background: transparent; outline: 0; box-shadow: none; }
+.field .product-picker-control input:focus { outline: 0; border: 0; }
+.product-picker-toggle { display: grid; place-items: center; flex: none; align-self: stretch; width: 40px; padding: 0; border: 0; border-left: 1px solid var(--border); border-radius: 0 6px 6px 0; background: transparent; color: var(--accent-soft); cursor: pointer; }
+.product-picker-toggle:hover, .product-picker-toggle[aria-expanded="true"] { background: var(--surface); }
+.product-picker-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.product-picker-options { position: absolute; top: calc(100% + 5px); left: 0; right: 0; z-index: 10; max-height: min(300px, 45dvh); overflow-y: auto; overscroll-behavior: contain; padding: 5px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); box-shadow: 0 18px 36px #0008; }
+.product-picker-heading { padding: 7px 9px 6px; color: var(--accent-soft); font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.product-picker-options > button:not(.product-picker-more) { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; width: 100%; padding: 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text); cursor: pointer; text-align: left; }
+.product-picker-options > button:not(.product-picker-more):hover, .product-picker-options > button.is-active { background: var(--surface); }
+.product-picker-options strong { min-width: 0; overflow: hidden; font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.product-picker-options button > span { flex: none; color: var(--muted); font-size: 10px; }
+.product-picker-options p { margin: 0; padding: 10px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.product-picker-more { width: 100%; padding: 10px; border: 0; border-top: 1px solid var(--border); background: transparent; color: var(--accent-soft); cursor: pointer; font-size: 11px; font-weight: 750; }
+.product-picker-more:hover { background: var(--surface); }
 .profile-suggestions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
 .profile-suggestions button { padding: 5px 8px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
 .profile-suggestions button:hover, .profile-suggestions button:focus-visible, .profile-suggestions button.selected { border-color: var(--accent); color: var(--text); background: var(--surface-raised); }

@@ -205,7 +205,7 @@ app.get("/api/dashboard", async (req, res) =>
 app.get("/api/list/products", async (req, res) =>
   res.json(await productPage(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined, req.query)));
 app.get("/api/product-catalog", roles("owner", "admin", "responsible"), async (req, res) =>
-  res.json(await productCatalog(req.user, req.query.q)));
+  res.json(await productCatalog(req.user, req.query.q, req.query.all, req.query.cursor)));
 app.get("/api/list/sales", async (req, res) =>
   res.json(await salesPage(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined, req.query)));
 app.get("/api/list/cash-entries", async (req, res) => res.json(await cashEntryPage(req.user, req.query)));

@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Plus,
@@ -12,6 +12,7 @@ import {
   Truck,
   Star,
   MapPin,
+  CaretDown,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import {
@@ -40,9 +41,12 @@ import {
 import { StockCard } from "./StockCard";
 
 type CatalogProduct = Pick<Product, "name" | "strain" | "type" | "unit">;
-type ProductCatalog = { products: CatalogProduct[]; profiles: string[] };
+type ProductCatalog = { products: CatalogProduct[]; profiles: string[]; nextCursor: string | null; cursor: string | null };
 
 function ProductIdentityFields({ edit }: { edit: Product | null }) {
+  const pickerId = useId();
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const [name, setName] = useState(edit?.name || "");
   const [profile, setProfile] = useState(edit?.strain || "");
   const [type, setType] = useState(edit?.type || "Flor");
@@ -50,11 +54,34 @@ function ProductIdentityFields({ edit }: { edit: Product | null }) {
   const [profileEdited, setProfileEdited] = useState(false);
   const [typeEdited, setTypeEdited] = useState(false);
   const [lookup, setLookup] = useState(name);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [browseAll, setBrowseAll] = useState(false);
+  const [browseCursor, setBrowseCursor] = useState("");
+  const [browseItems, setBrowseItems] = useState<CatalogProduct[]>([]);
+  const [browseNext, setBrowseNext] = useState<string | null>(null);
+  const [activeOption, setActiveOption] = useState(-1);
   useEffect(() => {
     const id = window.setTimeout(() => setLookup(name.trim()), 180);
     return () => window.clearTimeout(id);
   }, [name]);
   const catalog = useResource<ProductCatalog>(`/product-catalog?q=${encodeURIComponent(lookup)}`);
+  const fullCatalog = useResource<ProductCatalog>(browseAll
+    ? `/product-catalog?all=1&cursor=${encodeURIComponent(browseCursor)}` : null);
+  useEffect(() => {
+    if (!browseAll || !fullCatalog.data || fullCatalog.data.cursor !== browseCursor) return;
+    const page = fullCatalog.data;
+    setBrowseItems((current) => {
+      if (!browseCursor) return page.products;
+      const known = new Set(current.map((product) => product.name.toLocaleLowerCase()));
+      return [...current, ...page.products.filter((product) => !known.has(product.name.toLocaleLowerCase()))];
+    });
+    setBrowseNext(page.nextCursor);
+  }, [browseAll, browseCursor, fullCatalog.data]);
+  useEffect(() => {
+    if (pickerOpen && activeOption >= 0) {
+      document.getElementById(`${pickerId}-option-${activeOption}`)?.scrollIntoView({ block: "nearest" });
+    }
+  }, [activeOption, pickerId, pickerOpen]);
   useEffect(() => {
     if (edit || lookup !== name.trim()) return;
     const known = catalog.data?.products.find((p) => p.name.toLocaleLowerCase() === name.trim().toLocaleLowerCase());
@@ -72,19 +99,73 @@ function ProductIdentityFields({ edit }: { edit: Product | null }) {
     setUnit(product.unit);
     setProfileEdited(true);
     setTypeEdited(true);
+    setPickerOpen(false);
+    setBrowseAll(false);
+    setActiveOption(-1);
+  };
+  const products = browseAll ? browseItems : lookup === name.trim() ? catalog.data?.products || [] : [];
+  const pickerBusy = browseAll ? fullCatalog.loading && !browseItems.length : catalog.loading || lookup !== name.trim();
+  const startBrowse = () => {
+    if (pickerOpen && browseAll) { setPickerOpen(false); setBrowseAll(false); return; }
+    setBrowseCursor("");
+    setBrowseItems([]);
+    setBrowseNext(null);
+    setActiveOption(-1);
+    setBrowseAll(true);
+    setPickerOpen(true);
+    inputRef.current?.focus();
+  };
+  const onProductKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Escape" && pickerOpen) {
+      event.preventDefault();
+      setPickerOpen(false);
+      setBrowseAll(false);
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      setPickerOpen(true);
+      setActiveOption((current) => products.length
+        ? event.key === "ArrowDown" ? Math.min(current + 1, products.length - 1) : current < 0 ? products.length - 1 : Math.max(current - 1, 0)
+        : -1);
+    } else if (event.key === "Enter" && pickerOpen) {
+      event.preventDefault();
+      if (activeOption >= 0 && products[activeOption]) selectProduct(products[activeOption]);
+    }
   };
   return (
     <>
-      <Field label="Nombre del producto" hint="El nombre que reconocés al comprarlo: Lemon Haze, Aceite CBD 10%, etc.">
-        <input name="name" value={name} onChange={(e) => { setName(e.target.value); setProfileEdited(false); setTypeEdited(false); }} autoComplete="off" maxLength={180} required />
-        {!!catalog.data?.products.length && <div className="catalog-suggestions" aria-label="Productos guardados">
-          <span>{name ? "Coincidencias guardadas" : "Productos guardados"}</span>
-          {catalog.data.products.slice(0, name ? 6 : 4).map((product) =>
-            <button key={`${product.name}-${product.type}`} type="button" className="catalog-choice" onClick={() => selectProduct(product)}>
-              <strong>{product.name}</strong><small>{[product.type, product.strain].filter(Boolean).join(" · ")}</small>
-            </button>)}
+      <div className="field product-picker" ref={pickerRef} onBlur={(event) => {
+        if (!pickerRef.current?.contains(event.relatedTarget)) { setPickerOpen(false); setBrowseAll(false); }
+      }}>
+        <label htmlFor={`${pickerId}-input`}>Nombre del producto</label>
+        <div className="product-picker-shell"><div className="product-picker-control">
+          <input id={`${pickerId}-input`} ref={inputRef} name="name" value={name}
+            role="combobox" aria-autocomplete="list" aria-expanded={pickerOpen}
+            aria-controls={`${pickerId}-options`}
+            aria-activedescendant={pickerOpen && activeOption >= 0 ? `${pickerId}-option-${activeOption}` : undefined}
+            onFocus={() => setPickerOpen(true)}
+            onChange={(e) => { setName(e.target.value); setProfileEdited(false); setTypeEdited(false); setBrowseAll(false); setPickerOpen(true); setActiveOption(-1); }}
+            onKeyDown={onProductKeyDown} placeholder="Buscá o escribí un producto" autoComplete="off" maxLength={180} required />
+          <button type="button" className="product-picker-toggle" aria-label={pickerOpen && browseAll ? "Cerrar productos guardados" : "Ver todos los productos guardados"}
+            aria-expanded={pickerOpen && browseAll} onClick={startBrowse}><CaretDown size={16} weight="bold" /></button>
+        </div>
+        {pickerOpen && <div id={`${pickerId}-options`} className="product-picker-options" role="listbox" aria-label="Productos guardados">
+          <div className="product-picker-heading">{browseAll ? "Todos los productos" : name.trim() ? "Coincidencias guardadas" : "Productos recientes"}</div>
+          {products.map((product, index) => <button key={`${product.name}-${product.type}`} id={`${pickerId}-option-${index}`}
+            type="button" role="option" aria-selected={activeOption === index}
+            className={activeOption === index ? "is-active" : ""}
+            onMouseEnter={() => setActiveOption(index)} onClick={() => selectProduct(product)}>
+            <strong>{product.name}</strong><span>{[product.type, product.strain].filter(Boolean).join(" · ")}</span>
+          </button>)}
+          {pickerBusy && <p role="status">Buscando productos…</p>}
+          {!pickerBusy && !products.length && <p>{catalog.error || fullCatalog.error || (browseAll ? "Todavía no hay productos guardados." : name.trim() ? "Sin coincidencias. Podés guardar este nombre nuevo." : "Todavía no hay productos guardados.")}</p>}
+          {browseAll && browseNext && <button type="button" className="product-picker-more" disabled={fullCatalog.loading}
+            onClick={() => { setBrowseCursor(browseNext); setActiveOption(-1); }}>
+            {fullCatalog.loading ? "Cargando más…" : "Mostrar más productos"}
+          </button>}
         </div>}
-      </Field>
+        </div>
+        <small>Escribí para buscar; elegí uno guardado o usá un nombre nuevo.</small>
+      </div>
       <Field label="Perfil (opcional)" hint="Ej.: Sativa, Índica, Híbrida o CBD. No repitas el nombre; dejalo vacío si no aplica.">
         <input name="strain" value={profile} onChange={(e) => { setProfile(e.target.value); setProfileEdited(true); }} maxLength={180} placeholder="Sativa, CBD…" autoComplete="off" />
         {!!catalog.data?.profiles.length && <div className="profile-suggestions" aria-label="Perfiles guardados">
