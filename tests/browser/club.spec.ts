@@ -1,4 +1,22 @@
 import { test, expect } from "@playwright/test";
+test("saved products and profiles help classify new stock", async ({ page }) => {
+  await page.goto("/inventario");
+  await page.getByRole("button", { name: "Explorar club de demostración" }).click();
+  await page.getByRole("button", { name: "Nuevo stock" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Nombre del producto").fill("Lemon");
+  await dialog.getByRole("button", { name: /Lemon Haze.*Flor.*Sativa/ }).click();
+  await expect(dialog.getByLabel("Nombre del producto")).toHaveValue("Lemon Haze");
+  await expect(dialog.getByLabel("Perfil (opcional)")).toHaveValue("Sativa");
+  await dialog.getByLabel("Nombre del producto").fill("Aceite CBD nuevo");
+  await expect(dialog.getByLabel("Perfil (opcional)")).toHaveValue("CBD");
+  await expect(dialog.getByLabel("Tipo", { exact: true })).toHaveValue("Aceite");
+  await expect(dialog.getByLabel("Unidad")).toHaveValue("ud");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(dialog.getByLabel("Nombre del producto")).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await dialog.getByRole("button", { name: "Cerrar" }).click();
+});
 test("owner saves a default supplier and selects it for a new lot", async ({ page }) => {
   const suffix = Date.now().toString().slice(-8);
   const supplier = `Proveedor QA ${suffix}`;
@@ -19,7 +37,7 @@ test("owner saves a default supplier and selects it for a new lot", async ({ pag
   dialog = page.getByRole("dialog");
   await expect(dialog.getByLabel("Proveedor", { exact: true }).locator("option:checked")).toHaveText(supplier);
   await dialog.getByLabel("Nombre del producto").fill(lot);
-  await dialog.getByLabel("Cepa / strain").fill("Prueba");
+  await dialog.getByLabel("Perfil (opcional)").fill("Prueba");
   await dialog.getByLabel("Código de lote").fill(`QA-SUP-${suffix}`);
   await dialog.getByLabel("Ubicación").fill("Depósito de prueba");
   await dialog.getByLabel("Responsable de reprogram").selectOption("r1");
@@ -85,7 +103,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await page.getByRole("button", { name: "Nuevo stock" }).click();
   let dialog = page.getByRole("dialog");
   await dialog.getByLabel("Nombre del producto").fill(product);
-  await dialog.getByLabel("Cepa / strain").fill("Prueba");
+  await dialog.getByLabel("Perfil (opcional)").fill("Prueba");
   await dialog.getByLabel("Código de lote").fill(`QA-${suffix}`);
   await dialog.getByLabel("Ubicación").fill("Depósito de prueba");
   await dialog.getByLabel("Responsable de reprogram").selectOption("r1");

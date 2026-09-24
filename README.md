@@ -100,6 +100,8 @@ El esquema se encuentra en `prisma/schema.prisma`: usuarios, proveedores, produc
 
 Productos: `name,strain,type,unit,lot,supplier,stock,minimum,cost,price,location,ownerId,expires,sourceSystem,sourceId`.
 
+`name` es el nombre completo con el que identificás el producto, por ejemplo `Lemon Haze` o `Aceite CBD 10%`. `strain` funciona como perfil opcional (`Sativa`, `Índica`, `Híbrida`, `CBD`) y puede quedar vacío cuando no corresponda. Al cargar stock desde la app, los nombres y perfiles de lotes guardados aparecen como sugerencias para reutilizarlos.
+
 Socios: `name,email,phone,notes,sourceSystem,sourceId`. Los dos últimos campos son obligatorios para cada lote y socio importado. `sourceSystem` identifica la fuente (por ejemplo, `appsheet`) y `sourceId` el ID estable en esa fuente. La importación repetida omite registros iguales y bloquea los conflictivos para revisión.
 
 Movimientos financieros: `date,account,category,amount,description,sourceSystem,sourceId`. `account` es `cash` o `bank`; importes con signo en ARS, decimal punto. Categorías: `opening_balance`, `operating_expense`, `stock_purchase`, `local_investment`, `capital_contribution`, `owner_draw`, `delivery_receipt`, `other_income`, `other_outflow`, `adjustment`. Un movimiento en efectivo previo a un cierre requiere conciliación antes de importar. Los movimientos del delivery no se suman a las ventas locales del resultado preliminar.

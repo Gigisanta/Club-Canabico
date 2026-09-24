@@ -35,6 +35,75 @@ import {
   Empty,
 } from "./ui";
 import { StockCard } from "./StockCard";
+
+type CatalogProduct = Pick<Product, "name" | "strain" | "type" | "unit">;
+type ProductCatalog = { products: CatalogProduct[]; profiles: string[] };
+
+function ProductIdentityFields({ edit }: { edit: Product | null }) {
+  const [name, setName] = useState(edit?.name || "");
+  const [profile, setProfile] = useState(edit?.strain || "");
+  const [type, setType] = useState(edit?.type || "Flor");
+  const [unit, setUnit] = useState(edit?.unit || "g");
+  const [profileEdited, setProfileEdited] = useState(false);
+  const [typeEdited, setTypeEdited] = useState(false);
+  const [lookup, setLookup] = useState(name);
+  useEffect(() => {
+    const id = window.setTimeout(() => setLookup(name.trim()), 180);
+    return () => window.clearTimeout(id);
+  }, [name]);
+  const catalog = useResource<ProductCatalog>(`/product-catalog?q=${encodeURIComponent(lookup)}`);
+  useEffect(() => {
+    if (edit || lookup !== name.trim()) return;
+    const known = catalog.data?.products.find((p) => p.name.toLocaleLowerCase() === name.trim().toLocaleLowerCase());
+    if (!profileEdited) setProfile(known?.strain || (/\bcbd\b/i.test(name) ? "CBD" : ""));
+    if (!typeEdited) {
+      if (known) { setType(known.type); setUnit(known.unit); }
+      else if (/\baceite\b/i.test(name)) { setType("Aceite"); setUnit("ud"); }
+      else { setType("Flor"); setUnit("g"); }
+    }
+  }, [catalog.data, edit, lookup, name, profileEdited, typeEdited]);
+  const selectProduct = (product: CatalogProduct) => {
+    setName(product.name);
+    setProfile(product.strain);
+    setType(product.type);
+    setUnit(product.unit);
+    setProfileEdited(true);
+    setTypeEdited(true);
+  };
+  return (
+    <>
+      <Field label="Nombre del producto" hint="El nombre que reconocés al comprarlo: Lemon Haze, Aceite CBD 10%, etc.">
+        <input name="name" value={name} onChange={(e) => { setName(e.target.value); setProfileEdited(false); setTypeEdited(false); }} autoComplete="off" maxLength={180} required />
+        {!!catalog.data?.products.length && <div className="catalog-suggestions" aria-label="Productos guardados">
+          <span>{name ? "Coincidencias guardadas" : "Productos guardados"}</span>
+          {catalog.data.products.slice(0, name ? 6 : 4).map((product) =>
+            <button key={`${product.name}-${product.type}`} type="button" className="catalog-choice" onClick={() => selectProduct(product)}>
+              <strong>{product.name}</strong><small>{[product.type, product.strain].filter(Boolean).join(" · ")}</small>
+            </button>)}
+        </div>}
+      </Field>
+      <Field label="Perfil (opcional)" hint="Ej.: Sativa, Índica, Híbrida o CBD. No repitas el nombre; dejalo vacío si no aplica.">
+        <input name="strain" value={profile} onChange={(e) => { setProfile(e.target.value); setProfileEdited(true); }} maxLength={180} placeholder="Sativa, CBD…" autoComplete="off" />
+        {!!catalog.data?.profiles.length && <div className="profile-suggestions" aria-label="Perfiles guardados">
+          {catalog.data.profiles.slice(0, 5).map((saved) =>
+            <button key={saved} type="button" className={profile === saved ? "selected" : ""} onClick={() => { setProfile(saved); setProfileEdited(true); }}>{saved}</button>)}
+        </div>}
+      </Field>
+      <Field label="Tipo">
+        <select name="type" value={type} onChange={(e) => { setType(e.target.value); setTypeEdited(true); if (!edit) setUnit(["Aceite", "Accesorio"].includes(e.target.value) ? "ud" : "g"); }}>
+          {["Flor", "Extracto", "Aceite", "Accesorio"].map((t) => <option key={t}>{t}</option>)}
+        </select>
+      </Field>
+      <Field label="Unidad">
+        <select name="unit" value={unit} onChange={(e) => { setUnit(e.target.value); setTypeEdited(true); }}>
+          <option value="g">Gramos</option>
+          <option value="ud">Unidades</option>
+        </select>
+      </Field>
+    </>
+  );
+}
+
 export default function Inventory() {
   const { state, money, canManage, isManager, reload, user, owner } = useClub();
   const [params, setParams] = useSearchParams();
@@ -311,7 +380,7 @@ export default function Inventory() {
                           <div>
                             <strong>{p.name}</strong>
                             <small>
-                              {p.lot} · {p.strain} · {p.type}
+                              {[p.lot, p.strain, p.type].filter(Boolean).join(" · ")}
                             </small>
                           </div>
                         </div>
@@ -423,25 +492,7 @@ export default function Inventory() {
       >
         <Form onSubmit={save} onCancel={() => setEditor(null)}>
           <div className="form-grid">
-            <Field label="Nombre del producto">
-              <input name="name" defaultValue={edit?.name} required />
-            </Field>
-            <Field label="Cepa / strain">
-              <input name="strain" defaultValue={edit?.strain} required />
-            </Field>
-            <Field label="Tipo">
-              <select name="type" defaultValue={edit?.type || "Flor"}>
-                {["Flor", "Extracto", "Aceite", "Accesorio"].map((t) => (
-                  <option key={t}>{t}</option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Unidad">
-              <select name="unit" defaultValue={edit?.unit || "g"}>
-                <option value="g">Gramos</option>
-                <option value="ud">Unidades</option>
-              </select>
-            </Field>
+            <ProductIdentityFields key={edit?.id || "new"} edit={edit} />
             <Field label="Código de lote">
               <input
                 name="lot"

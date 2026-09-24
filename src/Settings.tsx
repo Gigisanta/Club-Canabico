@@ -64,7 +64,7 @@ export default function Settings() {
   function template() {
     const content =
       kind === "products"
-        ? "name,strain,type,unit,lot,supplier,stock,minimum,cost,price,location,ownerId,expires,sourceSystem,sourceId\nProducto ejemplo,Híbrida,Flor,g,LOTE-EJEMPLO,Proveedor ejemplo,100,20,4.50,12.00,Almacén A," +
+        ? "name,strain,type,unit,lot,supplier,stock,minimum,cost,price,location,ownerId,expires,sourceSystem,sourceId\nLemon Haze,Sativa,Flor,g,LOTE-EJEMPLO,Proveedor ejemplo,100,20,4.50,12.00,Almacén A," +
           (state.users.find((u) => u.role === "responsible")?.id || user.id) +
           ",,appsheet,lote-ejemplo-001\n"
         : kind === "customers"

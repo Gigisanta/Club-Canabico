@@ -36,6 +36,7 @@ import {
 } from "./validation.js";
 import { resolveSupplier, supplierKey, supplierName } from "./suppliers.js";
 import { exportReport } from "./reports.js";
+import { productCatalog } from "./product-catalog.js";
 declare global {
   namespace Express {
     interface Request {
@@ -200,6 +201,8 @@ app.get("/api/dashboard", async (req, res) =>
   res.json(await dashboardMetrics(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined, req.query)));
 app.get("/api/list/products", async (req, res) =>
   res.json(await productPage(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined, req.query)));
+app.get("/api/product-catalog", roles("owner", "admin", "responsible"), async (req, res) =>
+  res.json(await productCatalog(req.user, req.query.q)));
 app.get("/api/list/sales", async (req, res) =>
   res.json(await salesPage(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined, req.query)));
 app.get("/api/list/cash-entries", async (req, res) => res.json(await cashEntryPage(req.user, req.query)));

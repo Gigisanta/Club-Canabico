@@ -4,7 +4,7 @@ const money = z.number().int().min(0).max(1_000_000_000);
 export const date = z.iso.date();
 export const productSchema = z.object({
   name: text,
-  strain: text,
+  strain: z.string().trim().max(180).default(""),
   type: z.enum(["Flor", "Extracto", "Aceite", "Accesorio"]),
   unit: z.enum(["g", "ud"]),
   lot: text,

@@ -106,6 +106,34 @@ test(
       });
     }
     try {
+      await t.test("product catalog remembers saved names and optional profiles within each role's scope", async () => {
+        const lots = ["catalog-lot-1", "catalog-lot-2", "catalog-lot-3"];
+        try {
+          assert.equal((await call("/product-catalog", "viewer")).status, 403);
+          const original = await db.product.findUniqueOrThrow({ where: { id: "p1" } });
+          for (const lot of lots.slice(0, 2)) {
+            const created = await call("/products", "owner", { ...original, name: "Lemon Haze", strain: "", lot });
+            assert.equal(created.status, 201, await created.clone().text());
+          }
+          const cbd = await call("/products", "owner", { ...original, name: "Aceite CBD 10%", strain: "CBD", type: "Aceite", unit: "ud", lot: lots[2] });
+          assert.equal(cbd.status, 201, await cbd.clone().text());
+          const ownerCatalog = await (await call("/product-catalog?q=lemon", "owner")).json();
+          assert.deepEqual(ownerCatalog.products.map((p: { name: string }) => p.name), ["Lemon Haze"]);
+          assert.equal(ownerCatalog.products[0].strain, "");
+          assert.equal(ownerCatalog.profiles.includes("Test"), true);
+          assert.equal(ownerCatalog.profiles.includes("CBD"), true);
+          assert.equal(ownerCatalog.profiles.includes(""), false);
+          const responsibleCatalog = await (await call("/product-catalog?q=p2", "r1")).json();
+          assert.deepEqual(responsibleCatalog.products, []);
+          const scopedCatalog = await (await call("/product-catalog?q=lemon", "r1")).json();
+          assert.equal(scopedCatalog.products.length, 1);
+          assert.deepEqual((await (await call("/product-catalog?q=_", "owner")).json()).products, []);
+        } finally {
+          const products = await db.product.findMany({ where: { lot: { in: lots } }, select: { id: true } });
+          await db.movement.deleteMany({ where: { productId: { in: products.map((p) => p.id) } } });
+          await db.product.deleteMany({ where: { lot: { in: lots } } });
+        }
+      });
       await t.test("requires session and rejects foreign origins", async () => {
         assert.equal((await fetch(base + "/views/dashboard")).status, 401);
         assert.equal(

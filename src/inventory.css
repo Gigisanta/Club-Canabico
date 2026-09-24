@@ -517,6 +517,15 @@
 }
 /* Saved supplier directory in inventory. */
 .supplier-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 12px; padding: 4px 0 8px; }
+.catalog-suggestions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.catalog-suggestions > span { flex-basis: 100%; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.catalog-choice { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 6px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised); color: var(--text); cursor: pointer; text-align: left; }
+.catalog-choice:hover, .catalog-choice:focus-visible { border-color: var(--accent); }
+.catalog-choice strong { overflow: hidden; font-size: 11px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.catalog-choice small { flex-shrink: 0; color: var(--muted); font-size: 10px; }
+.profile-suggestions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.profile-suggestions button { padding: 5px 8px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
+.profile-suggestions button:hover, .profile-suggestions button:focus-visible, .profile-suggestions button.selected { border-color: var(--accent); color: var(--text); background: var(--surface-raised); }
 .supplier-card { min-width: 0; padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-raised); }
 .supplier-card.is-archived { opacity: .65; }
 .supplier-card-top { display: flex; align-items: flex-start; gap: 11px; }
