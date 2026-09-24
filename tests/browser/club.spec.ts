@@ -4,6 +4,8 @@ test("saved products and profiles help classify new stock", async ({ page }) => 
   await page.getByRole("button", { name: "Explorar club de demostración" }).click();
   await page.getByRole("button", { name: "Nuevo stock" }).click();
   const dialog = page.getByRole("dialog");
+  await expect(dialog.locator('[name="ownerId"]')).toHaveCount(0);
+  await expect(dialog).not.toContainText(/reprogram/i);
   await dialog.getByLabel("Nombre del producto").fill("Lemon");
   await dialog.getByRole("button", { name: /Lemon Haze.*Flor.*Sativa/ }).click();
   await expect(dialog.getByLabel("Nombre del producto")).toHaveValue("Lemon Haze");
@@ -48,6 +50,26 @@ test("saved products and profiles help classify new stock", async ({ page }) => 
   await expect(editDialog.getByText(/Valores anteriores: costo/)).toBeVisible();
   await editDialog.getByRole("button", { name: "Cerrar" }).click();
 });
+test("new stock assigns the signed-in owner without an extra field", async ({ page }) => {
+  await page.goto("/inventario");
+  await page.getByRole("button", { name: "Explorar club de demostración" }).click();
+  let payload: Record<string, unknown> | null = null;
+  await page.route("**/api/products", async (route) => {
+    payload = route.request().postDataJSON();
+    await route.fulfill({ status: 201, contentType: "application/json", body: "{}" });
+  });
+  await page.getByRole("button", { name: "Nuevo stock" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.locator('[name="ownerId"]')).toHaveCount(0);
+  await dialog.getByLabel("Nombre del producto").fill("Lote de prueba sin guardar");
+  await dialog.getByLabel("Código de lote").fill("QA-SIN-GUARDAR");
+  await dialog.getByLabel("Ubicación").selectOption({ index: 1 });
+  await dialog.getByLabel("Precio de costo").fill("100");
+  await dialog.getByLabel("Precio de venta").fill("200");
+  await dialog.getByRole("button", { name: "Guardar", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(payload).toMatchObject({ ownerId: "owner", name: "Lote de prueba sin guardar" });
+});
 test("owner saves a default supplier and selects it for a new lot", async ({ page }) => {
   const suffix = Date.now().toString().slice(-8);
   const supplier = `Proveedor QA ${suffix}`;
@@ -75,7 +97,6 @@ test("owner saves a default supplier and selects it for a new lot", async ({ pag
   await dialog.locator(".location-quick-add .button").filter({ hasText: "Guardar" }).click();
   await expect(dialog.getByLabel("Ubicación")).toHaveValue(/.+/);
   await expect(dialog.getByLabel("Ubicación").locator("option:checked")).toHaveText(`Depósito QA ${suffix}`);
-  await dialog.getByLabel("Responsable de reprogram").selectOption("r1");
   await dialog.getByLabel("Stock inicial").fill("20");
   await dialog.getByLabel("Precio de costo").fill("100");
   await dialog.getByLabel("Precio de venta").fill("200");
@@ -155,7 +176,6 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await dialog.getByLabel("Perfil (opcional)").fill("Prueba");
   await dialog.getByLabel("Código de lote").fill(`QA-${suffix}`);
   await dialog.getByLabel("Ubicación").selectOption({ index: 1 });
-  await dialog.getByLabel("Responsable de reprogram").selectOption("r1");
   await dialog.getByLabel("Stock inicial").fill("10");
   await dialog.getByLabel("Stock mínimo").fill("2");
   await dialog.getByLabel("Precio de costo").fill("4000");
@@ -226,7 +246,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   for (const [label, heading] of [
     ["Gastos", "Gastos registrados"],
     ["Caja y planificación", "Caja y planificación"],
-    ["Responsables", "Responsables de reprogram"],
+    ["Responsables", "Responsables"],
     ["Reportes", "Reportes y liquidaciones"],
   ] as const) {
     await page.getByRole("link", { name: label, exact: true }).click();
@@ -262,7 +282,7 @@ test("responsible: scope cannot be switched; foreign lots and settings actions a
     .getByRole("button", { name: "Explorar club de demostración" })
     .click();
   await page.getByRole("button", { name: "Probar otro rol" }).click();
-  await page.getByRole("button", { name: "Lucía · solo su reprogram" }).click();
+  await page.getByRole("button", { name: "Lucía · sus lotes y ventas" }).click();
   await expect(
     page.getByRole("heading", { name: "Hola, Lucía." }),
   ).toBeVisible();

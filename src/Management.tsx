@@ -322,7 +322,7 @@ export function Responsibles() {
     <>
       <PageHeader
         eyebrow="CADA RESPONSABLE, SU APORTE"
-        title="Responsables de reprogram"
+        title="Responsables"
         description="Asignación clara, historial intacto y una visión compartida del club."
         actions={
           <select
@@ -343,7 +343,7 @@ export function Responsibles() {
               <span className="rank-badge">#{i + 1} del mes</span>
             </div>
             <h2>{o.name}</h2>
-            <p>Responsable de reprogram</p>
+            <p>Responsable del stock</p>
             <div className="owner-card-numbers">
               <div>
                 <span>Ventas del mes</span>

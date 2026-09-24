@@ -507,7 +507,7 @@ app.post(
           !p ||
           (req.user.role === "responsible" && p.ownerId !== req.user.id)
         )
-          throw new HttpError(403, "Producto fuera de tu reprogram");
+          throw new HttpError(403, "Producto fuera de tus lotes asignados");
         if (p.stock < line.quantity)
           throw new HttpError(409, `Stock insuficiente: ${p.name}`);
         if (p.expires && p.expires < today)
@@ -621,7 +621,7 @@ app.post(
   async (req, res) => {
     const v = expenseSchema.parse(req.body);
     if (req.user.role === "responsible" && v.ownerId !== req.user.id)
-      throw new HttpError(403, "Asigná el gasto a tu reprogram");
+      throw new HttpError(403, "Solo podés asignar gastos a tu usuario");
     if (v.ownerId) await validOwner(v.ownerId);
     res.status(201).json(
       await atomic(async (tx) => {

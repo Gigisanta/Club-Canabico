@@ -479,7 +479,7 @@ export default function Settings() {
           </Field>
           <Field label="Rol">
             <select name="role">
-              <option value="responsible">Responsable de reprogram</option>
+              <option value="responsible">Responsable de stock</option>
               <option value="admin">Gerente</option>
               <option value="cashier">Cajero</option>
               <option value="viewer">Solo lectura</option>

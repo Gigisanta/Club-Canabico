@@ -2,7 +2,7 @@
 
 **Apertura 2026:** el plan de diagnóstico, conciliación, base financiera y salida gradual está en [docs/implementacion-octubre-2026.md](docs/implementacion-octubre-2026.md). En bases reales las operaciones con cannabis están deshabilitadas por defecto; `CLUB_OPERATIONS_APPROVED=true` requiere validación documentada por el profesional del club. Los datos reales de AppSheet, Sheets y caja siguen pendientes de recibir y conciliar.
 
-Aplicación full-stack de gestión de inventario, socios, fidelización, caja, gastos y responsables de reprogram. Interfaz en español, responsive, con persistencia real en PostgreSQL. No usa localStorage como base de datos ni respuestas simuladas de API.
+Aplicación full-stack de gestión de inventario, socios, fidelización, caja, gastos y responsables de stock. Interfaz en español, responsive, con persistencia real en PostgreSQL. No usa localStorage como base de datos ni respuestas simuladas de API.
 
 Paleta violeta y negra. Inventario visual con tarjetas por lote, indicadores de stock mínimo, alertas de vencimiento, responsable visible y detalle expandible; también dispone de vista de tabla. Componentes Minimal Card y Expandable adaptados del código oficial de [Cult UI](https://www.cult-ui.com/docs/components/expandable) a CSS propio y Motion, con licencia en [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
@@ -57,7 +57,7 @@ El seed nunca borra datos: si ya existen usuarios, termina sin modificar la base
 - **Caja:** libro de movimientos reales por efectivo/banco y categoría, con aportes, retiros, compras de stock e inversiones separados. Venta local crea un movimiento automáticamente. El cierre suma saldo anterior y movimientos de efectivo desde el cierre previo; registra esperado, contado y diferencia. El saldo inicial debe cargarse y conciliarse.
 - **Planificación:** partidas manuales por escenario, proyección semanal de 13 semanas y resumen mensual 2027. Sin partidas cargadas no se infieren ingresos ni gastos futuros.
 - **Gastos:** fijos/variables, categorías, asignación opcional, recurrencia semanal/mensual, ingresos menos gastos y presupuesto. «Procesar recurrencias» materializa los vencimientos pendientes de forma idempotente; no se generan cargos bancarios ni se ejecutan pagos externos.
-- **Reprogram:** vista consolidada y por responsable, costos/margen por producto, ventas históricas atribuidas al responsable original, ranking y rotación.
+- **Responsables:** vista consolidada y por responsable, costos/margen por producto, ventas históricas atribuidas al responsable original, ranking y rotación.
 - **Reportes:** ventas detalladas en CSV/XLSX y resumen de liquidación por responsable en PDF; filtros de fecha y ámbito aplicados en servidor.
 - **Migración:** productos, socios y movimientos de caja/banco mediante CSV exportado de Sheets/AppSheet, identificadores de origen, validación por fila, omitidos y conflictos, vista previa y confirmación atómica. Los cobros del delivery importados no crean ventas ni descuentan stock local. No requiere acceso a la cuenta de Google.
 - **Equipo:** creación de usuarios con rol desde la cuenta del dueño. Los permisos no dependen de ocultar botones.

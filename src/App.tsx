@@ -455,7 +455,7 @@ function Workspace({
             {(owner || user.role === "responsible") && (
               <div className="scope-banner">
                 <span>
-                  Vista de reprogram:{" "}
+                  Vista de:{" "}
                   <strong>
                     {user.role === "responsible"
                       ? user.name
@@ -632,7 +632,7 @@ function Workspace({
               {[
                 { id: "owner", name: "Dueño · vista consolidada" },
                 { id: "admin", name: "Gerente · operación del club" },
-                { id: "r1", name: "Lucía · solo su reprogram" },
+                { id: "r1", name: "Lucía · sus lotes y ventas" },
                 { id: "cashier", name: "Cajero · ventas y stock" },
                 { id: "viewer", name: "Solo lectura" },
               ].map((r) => (

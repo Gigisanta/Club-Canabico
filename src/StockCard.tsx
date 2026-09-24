@@ -119,7 +119,7 @@ export function StockCard({
               size={32}
             />
             <div>
-              <small>RESPONSABLE DE REPROGRAM</small>
+              <small>RESPONSABLE DEL LOTE</small>
               <strong>{responsible?.name || p.ownerId}</strong>
             </div>
           </div>

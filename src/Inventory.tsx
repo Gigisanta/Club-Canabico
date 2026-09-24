@@ -229,6 +229,7 @@ export default function Inventory() {
     const existing = editor !== "new" ? editor : null;
     const data = {
       ...Object.fromEntries(fd),
+      ...(existing ? {} : { ownerId: user.id }),
       supplier: "",
       supplierId: lotSupplierId || null,
       locationId: lotLocationId || null,
@@ -649,37 +650,17 @@ export default function Inventory() {
               </div>}
             </Field>
             {!edit && (
-              <>
-                <Field label="Responsable de reprogram">
-                  <select
-                    name="ownerId"
-                    defaultValue={
-                      user.role === "responsible" ? user.id : undefined
-                    }
-                  >
-                    {state.users
-                      .filter((u) =>
-                        ["responsible", "owner", "admin"].includes(u.role),
-                      )
-                      .map((u) => (
-                        <option key={u.id} value={u.id}>
-                          {u.name}
-                        </option>
-                      ))}
-                  </select>
-                </Field>
-                <Field label="Stock inicial">
-                  <input
-                    name="stock"
-                    type="number"
-                    min="0"
-                    max="100000"
-                    step="0.001"
-                    defaultValue="0"
-                    required
-                  />
-                </Field>
-              </>
+              <Field label="Stock inicial">
+                <input
+                  name="stock"
+                  type="number"
+                  min="0"
+                  max="100000"
+                  step="0.001"
+                  defaultValue="0"
+                  required
+                />
+              </Field>
             )}
             <Field label="Stock mínimo">
               <input
