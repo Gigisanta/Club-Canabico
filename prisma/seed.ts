@@ -39,7 +39,7 @@ async function seed() {
     throw new Error("Seed demo deshabilitado en producción");
   const password = await bcrypt.hash("Demo-Raiz-2026!", 12);
   const people: [string, string, Role, string][] = [
-    ["owner", "Tomás García", "owner", "#9b78e6"],
+    ["owner", "Tiziano", "owner", "#9b78e6"],
     ["r1", "Lucía Fernández", "responsible", "#b39cc9"],
     ["r2", "Martín López", "responsible", "#d3b27e"],
     ["r3", "Sofía Rodríguez", "responsible", "#86a5be"],

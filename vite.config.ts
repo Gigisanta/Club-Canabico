@@ -4,6 +4,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   return {
     plugins: [react()],
+    optimizeDeps: { include: ["recharts"] },
     server: {
       host: "127.0.0.1",
       port: Number(env.VITE_PORT || 5173),

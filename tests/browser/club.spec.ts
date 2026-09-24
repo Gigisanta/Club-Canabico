@@ -9,7 +9,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
     .getByRole("button", { name: "Explorar club de demostración" })
     .click();
   await expect(
-    page.getByRole("heading", { name: "Hola, Tomás." }),
+    page.getByRole("heading", { name: "Hola, Tiziano." }),
   ).toBeVisible();
   await page
     .getByRole("combobox", { name: "Período del dashboard" })
@@ -189,7 +189,7 @@ test("mobile: navigation, filters and sale modal fit the viewport", async ({
     .getByRole("button", { name: "Explorar club de demostración" })
     .click();
   await expect(
-    page.getByRole("heading", { name: "Hola, Tomás." }),
+    page.getByRole("heading", { name: "Hola, Tiziano." }),
   ).toBeVisible();
   expect(
     await page.evaluate(
