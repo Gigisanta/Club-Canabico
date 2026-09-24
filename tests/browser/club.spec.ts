@@ -1,4 +1,22 @@
 import { test, expect } from "@playwright/test";
+test("purchase history helps service without extra entry", async ({ page }) => {
+  await page.goto("/socios");
+  await page.getByRole("button", { name: "Explorar club de demostración" }).click();
+  await page.getByRole("button", { name: "Ver ficha" }).first().click();
+  const profile = page.getByRole("dialog", { name: "Ficha del socio" });
+  const profileInsight = profile.getByRole("region", { name: "Lectura automática del socio" });
+  await expect(profileInsight).toContainText("Ticket promedio");
+  await expect(profileInsight).toContainText("Más elegido");
+  await expect(profileInsight).toContainText("Ritmo reciente");
+  await profile.getByRole("button", { name: "Cerrar" }).click();
+  await page.goto("/ventas");
+  await page.getByRole("button", { name: "Nueva venta" }).click();
+  const checkout = page.getByRole("dialog", { name: "Nueva venta" });
+  await checkout.getByRole("combobox", { name: "Socio" }).selectOption({ index: 1 });
+  await expect(checkout.getByRole("region", { name: "Lectura automática del socio" })).toContainText("Última compra");
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
 test("dashboard separates actuals, projections and recommended actions", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));

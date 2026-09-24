@@ -12,6 +12,8 @@ import {
 import { toast } from "sonner";
 import { useClub, send, useResource, number, shortDate, type Sale } from "./lib";
 import type { Customer, Product, Page } from "../shared/types";
+import type { CustomerInsights } from "../shared/customer-insights";
+import { CustomerInsightsPanel } from "./CustomerInsights";
 import {
   PageHeader,
   Panel,
@@ -268,6 +270,7 @@ export function SaleModal({
   const [selectedCustomer, setSelectedCustomer] = useState<CheckoutCustomer | null>(null);
   useEffect(() => { const id = window.setTimeout(() => setSearched(customerSearch), 250); return () => clearTimeout(id); }, [customerSearch]);
   const customerData = useResource<{ items: CheckoutCustomer[] }>(open ? `/checkout/customers?q=${encodeURIComponent(searched)}` : null);
+  const insights = useResource<CustomerInsights>(open && customerId ? `/customers/${encodeURIComponent(customerId)}/insights` : null);
   const productData = useResource<{ items: CheckoutProduct[] }>(open ? `/checkout/products${owner ? `?owner=${encodeURIComponent(owner)}` : ""}` : null);
   const products = productData.data?.items || [];
   const customerOptions = selectedCustomer
@@ -381,6 +384,9 @@ export function SaleModal({
               </select>
             </Field>
           </div>
+          {insights.data && <CustomerInsightsPanel insights={insights.data} today={state.today} money={money} compact />}
+          {insights.loading && customerId && <p role="status" className="table-note">Leyendo historial del socio…</p>}
+          {insights.error && customerId && <p role="alert" className="table-note">{insights.error}</p>}
           <div className="sale-lines">
             {lines.map((l, i) => {
               const product = products.find((p) => p.id === l.productId);

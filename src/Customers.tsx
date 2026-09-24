@@ -19,6 +19,8 @@ import {
   type Customer,
 } from "./lib";
 import type { Page, Sale } from "../shared/types";
+import type { CustomerInsights } from "../shared/customer-insights";
+import { CustomerInsightsPanel } from "./CustomerInsights";
 import {
   PageHeader,
   Panel,
@@ -35,6 +37,8 @@ export default function Customers() {
   const [params, setParams] = useSearchParams();
   const [query, setQuery] = useState(params.get("q") || "");
   const [segment, setSegment] = useState(params.get("segment") || "all");
+  const canReviewPermits = ["owner", "admin"].includes(user.role);
+  const selectedSegment = segment === "permits" && !canReviewPermits ? "all" : segment;
   const [days, setDays] = useState(
     Number(params.get("days")) || state.settings.inactiveDays,
   );
@@ -57,14 +61,17 @@ export default function Customers() {
     else next.delete(key);
     setParams(next, { replace: true });
   };
-  useEffect(() => { setCursor(null); setPrevious([]); }, [debouncedQuery, segment, days, owner]);
+  useEffect(() => { setCursor(null); setPrevious([]); }, [debouncedQuery, selectedSegment, days, owner]);
   useEffect(() => { setHistoryCursor(null); setHistoryPrevious([]); }, [detail?.id]);
+  useEffect(() => { setHistoryCursor(null); setHistoryPrevious([]); }, [owner]);
   const listData = useResource<Page<Customer, { total: number; gold: number; inactive: number }>>(
-    `/list/customers?q=${encodeURIComponent(debouncedQuery)}&segment=${segment}&days=${days}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`,
+    `/list/customers?q=${encodeURIComponent(debouncedQuery)}&segment=${selectedSegment}&days=${days}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`,
   );
+  const historyParams = new URLSearchParams({ ...(historyCursor ? { cursor: historyCursor } : {}), ...(owner ? { owner } : {}) });
   const historyData = useResource<Page<Sale>>(
-    detail ? `/customers/${encodeURIComponent(detail.id)}/history${historyCursor ? `?cursor=${encodeURIComponent(historyCursor)}` : ""}` : null,
+    detail ? `/customers/${encodeURIComponent(detail.id)}/history?${historyParams}` : null,
   );
+  const insights = useResource<CustomerInsights>(detail ? `/customers/${encodeURIComponent(detail.id)}/insights${owner ? `?owner=${encodeURIComponent(owner)}` : ""}` : null);
   const inactive = (c: Customer) =>
     daysBetween(state.today, c.lastPurchase || c.createdAt) >= days;
   const risk = (c: Customer) =>
@@ -115,13 +122,14 @@ export default function Customers() {
           <div className="filter-group">
             <select
               aria-label="Segmento de socios"
-              value={segment}
+              value={selectedSegment}
               onChange={(e) => { setSegment(e.target.value); updateParams("segment", e.target.value); }}
             >
               <option value="all">Todos los socios</option>
               <option value="top">Top por volumen</option>
               <option value="inactive">Inactivos</option>
               <option value="risk">En riesgo de abandono</option>
+              {canReviewPermits && <option value="permits">Permisos para revisar</option>}
             </select>
             <select
               aria-label="Umbral de inactividad"
@@ -313,7 +321,7 @@ export default function Customers() {
                 <strong>{money(detail.totalSpent)}</strong>
               </div>
               <div>
-                <small>Frecuencia</small>
+                <small>Frecuencia histórica</small>
                 <strong>
                   {detail.purchases
                     ? `${(detail.purchases / Math.max(1, daysBetween(state.today, detail.createdAt) / 30)).toFixed(1)}/mes`
@@ -321,6 +329,9 @@ export default function Customers() {
                 </strong>
               </div>
             </div>
+            {insights.data && <CustomerInsightsPanel insights={insights.data} today={state.today} money={money} />}
+            {insights.loading && <p role="status" className="table-note">Leyendo historial del socio…</p>}
+            {insights.error && <p role="alert" className="table-note">{insights.error}</p>}
             {detail.notes && (
               <div className="note-box">
                 <strong>Notas internas</strong>

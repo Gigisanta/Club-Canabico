@@ -28,7 +28,7 @@ export async function dashboardMetrics(user: User, requested: string | undefined
   const restricted = user.role === "cashier";
   type Day = { date: string; total: bigint; cost: bigint; count: bigint };
   type CustomerRow = { customerId: string; amount: bigint; count: bigint };
-  type CustomerSummary = { total: bigint; inactive: bigint; firstSaleDate: string | null; buyers28: bigint; repeatBuyers28: bigint; buyersPrevious28: bigint; repeatBuyersPrevious28: bigint };
+  type CustomerSummary = { total: bigint; inactive: bigint; permitsToReview: bigint; firstSaleDate: string | null; buyers28: bigint; repeatBuyers28: bigint; buyersPrevious28: bigint; repeatBuyersPrevious28: bigint };
   const [daily, customerRows, expenseRows, ownerRows, customerSummary] = await Promise.all([
     ownerId
       ? db.$queryRaw<Day[]>`SELECT s.date, SUM(i.revenue)::bigint AS total, SUM(i.cost)::bigint AS cost,
@@ -55,6 +55,8 @@ export async function dashboardMetrics(user: User, requested: string | undefined
     db.$queryRaw<CustomerSummary[]>`
       SELECT COUNT(*)::bigint AS total,
         COUNT(*) FILTER (WHERE COALESCE(last_sale.date, to_char(c."createdAt", 'YYYY-MM-DD')) <= ${offset(today, -inactiveDays)})::bigint AS inactive,
+        COUNT(*) FILTER (WHERE c."permitStatus" IN ('pending', 'expired') OR
+          (c."permitStatus" = 'verified' AND c."permitValidUntil" <= ${offset(today, 14)}))::bigint AS "permitsToReview",
         MIN(last_sale.first_date) AS "firstSaleDate",
         COUNT(*) FILTER (WHERE last_sale.bought_recent)::bigint AS "buyers28",
         COUNT(*) FILTER (WHERE last_sale.bought_recent AND last_sale.first_date < ${recent28Start})::bigint AS "repeatBuyers28",
@@ -109,6 +111,7 @@ export async function dashboardMetrics(user: User, requested: string | undefined
     monthlyExpenses,
     active: customerRows.length, returning: customerRows.filter((row) => Number(row.count) > 1).length,
     customerTotal: Number(customerSummary[0]?.total || 0), inactive: Number(customerSummary[0]?.inactive || 0),
+    permitsToReview: ["owner", "admin"].includes(user.role) ? Number(customerSummary[0]?.permitsToReview || 0) : 0,
     chart: Array.from({ length }, (_, i) => {
       const date = offset(start, i);
       return { date, revenue: Number(days.get(date)?.total || 0) / 100,

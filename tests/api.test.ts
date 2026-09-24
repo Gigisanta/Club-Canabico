@@ -372,6 +372,31 @@ test(
           assert.equal(dashboard.outlook.repeatBuyers28, 0);
           assert.equal(dashboard.outlook.revenue7, null);
           assert.equal(dashboard.outlook.buyers30, null);
+          const insight = await (await call("/customers/customer/insights", "r1")).json();
+          assert.equal(insight.purchases, 1);
+          assert.equal(insight.averageTicket, 1900);
+          assert.equal(insight.favoriteProduct.name, "p1");
+          assert.equal(insight.nextExpectedDate, null);
+          const otherScopeInsight = await (await call("/customers/customer/insights?owner=r2", "owner")).json();
+          const otherScopeHistory = await (await call("/customers/customer/history?owner=r2", "owner")).json();
+          assert.equal(otherScopeInsight.purchases, otherScopeHistory.total);
+          assert.equal(otherScopeInsight.averageTicket, Math.round(otherScopeHistory.items.reduce((sum: number, sale: { total: number }) => sum + sale.total, 0) / otherScopeHistory.total));
+          assert.equal((await call("/list/customers?segment=permits", "r1")).status, 403);
+          await db.customer.create({ data: { id: "other-insight", name: "Otro socio", email: "", phone: "", permitStatus: "pending" } });
+          try {
+            assert.equal((await call("/customers/other-insight/insights", "r1")).status, 404);
+            const emptyInsight = await (await call("/customers/other-insight/insights", "owner")).json();
+            assert.equal(emptyInsight.purchases, 0);
+            const emptyScoped = await (await call("/customers/other-insight/insights?owner=r2", "owner")).json();
+            assert.equal(emptyScoped.purchases, 0);
+            const ownerDashboard = await (await call("/dashboard", "owner")).json();
+            assert.equal(ownerDashboard.permitsToReview, 1);
+            const permits = await (await call("/list/customers?segment=permits", "owner")).json();
+            assert.equal(permits.total, 1);
+            assert.equal(permits.items[0].id, "other-insight");
+          } finally {
+            await db.customer.delete({ where: { id: "other-insight" } });
+          }
           const ledger=await(await call('/movements?owner=r2','r1')).json();
           assert(ledger.items.every((m:{fromOwner:string;toOwner:string})=>m.fromOwner==='r1'||m.toOwner==='r1'));
           const cashier = await (await call("/views/dashboard", "cashier")).json();

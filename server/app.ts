@@ -39,6 +39,7 @@ import { resolveSupplier, supplierKey, supplierName } from "./suppliers.js";
 import { resolveLocation, locationKey, locationName } from "./locations.js";
 import { exportReport } from "./reports.js";
 import { productCatalog } from "./product-catalog.js";
+import { customerInsights } from "./customer-insights.js";
 declare global {
   namespace Express {
     interface Request {
@@ -215,6 +216,8 @@ app.get("/api/checkout/products", roles("owner", "admin", "cashier", "responsibl
   res.json(await checkoutProducts(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined)));
 app.get("/api/customers/:id/history", async (req, res) =>
   res.json(await customerHistory(req.user, String(req.params.id), req.query)));
+app.get("/api/customers/:id/insights", async (req, res) =>
+  res.json(await customerInsights(req.user, String(req.params.id), typeof req.query.owner === "string" ? req.query.owner : undefined)));
 app.get("/api/search", async (req, res) =>
   res.json(await globalSearch(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined, req.query.q)));
 app.get("/api/movements", async (req, res) =>

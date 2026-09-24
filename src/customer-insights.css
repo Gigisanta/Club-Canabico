@@ -1,0 +1,17 @@
+.customer-insights { margin: 0 0 22px; border: 1px solid #d7e4d3; border-radius: 10px; background: #f3f7ee; overflow: hidden; }
+.customer-insights-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 14px 16px 11px; }
+.customer-insights-head > span { display: inline-flex; align-items: center; gap: 7px; color: var(--accent); font-size: 10px; font-weight: 850; letter-spacing: .08em; }
+.customer-insights-head small { color: var(--muted); font-size: 10px; }
+.customer-insights-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 3px 16px 15px; }
+.customer-insights-grid > div { min-width: 0; padding: 3px 12px; border-left: 1px solid #d8e4d3; }
+.customer-insights-grid > div:first-child { padding-left: 0; border-left: 0; }
+.customer-insights-grid span { display: block; color: var(--muted); font-size: 10px; margin-bottom: 5px; }
+.customer-insights-grid strong { display: block; color: var(--text); font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
+.customer-insights-next { display: flex; align-items: flex-start; gap: 8px; padding: 11px 16px; border-top: 1px solid #dce8d7; color: var(--accent); font-size: 11px; font-weight: 700; line-height: 1.45; }
+.customer-insights-next svg { flex: none; }
+.customer-insights-method { margin: 0; padding: 9px 16px 12px; border-top: 1px solid #e4ebdf; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.customer-insights-empty { margin: 0; padding: 2px 16px 16px; color: var(--muted); font-size: 11px; }
+.customer-insights.compact { margin-top: 4px; margin-bottom: 18px; }
+.customer-insights.compact .customer-insights-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.customer-insights.compact .customer-insights-grid > div:last-child { display: none; }
+@media (max-width: 680px) { .customer-insights-grid, .customer-insights.compact .customer-insights-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px 0; } .customer-insights-grid > div:nth-child(3) { padding-left: 0; border-left: 0; } .customer-insights.compact .customer-insights-grid > div:last-child { display: block; } }

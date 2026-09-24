@@ -58,6 +58,7 @@ interface DashboardMetrics {
   returning: number;
   customerTotal: number;
   inactive: number;
+  permitsToReview: number;
   chart: { date: string; revenue: number; previous: number; expenses: number }[];
   owners: { ownerId: string; revenue: number; cost: number }[];
   topVolume: { id: string; name: string; tier: string; amount: number; count: number }[];
@@ -86,7 +87,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
   );
   const low = state.products.filter((p) => p.stock <= p.minimum);
   if (!data) return <div className="page-loading" role="status">{metrics.error || "Calculando panorama del club…"}</div>;
-  const { start, total, before, cost, count, expenses, active, returning, inactive, customerTotal, monthlyExpenses } = data;
+  const { start, total, before, cost, count, expenses, active, returning, inactive, customerTotal, monthlyExpenses, permitsToReview } = data;
   const chart = data.chart.map((row) => ({ ...row, label: shortDate(row.date) }));
   const owners = state.users
     .filter(
@@ -121,6 +122,11 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
   const firstBuyers = outlook.buyers28 - outlook.repeatBuyers28;
   const previousFirstBuyers = outlook.buyersPrevious28 - outlook.repeatBuyersPrevious28;
   const decisions: DashboardDecision[] = [];
+  if (["owner", "admin"].includes(user.role) && permitsToReview > 0) decisions.push({
+    title: `Revisar ${permitsToReview} ${permitsToReview === 1 ? "permiso" : "permisos"} de socios`,
+    detail: "Hay verificaciones pendientes, vencidas o próximas a vencer en 14 días.",
+    action: "Ver pendientes", path: "/socios?segment=permits",
+  });
   if (low.length) decisions.push({
     title: `Reponer ${low.length} ${low.length === 1 ? "lote" : "lotes"} con stock bajo`,
     detail: `Empezá por ${low[0].name}. ${low.length > 1 ? `Hay ${low.length - 1} ${low.length === 2 ? "lote más" : "lotes más"} debajo del mínimo.` : "Revisá cantidad disponible y próxima compra."}`,

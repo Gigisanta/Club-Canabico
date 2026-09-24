@@ -5,7 +5,7 @@ import { ownerScope } from "./state.js";
 
 export interface CustomerFilters {
   q: string;
-  segment: "all" | "top" | "inactive" | "risk";
+  segment: "all" | "top" | "inactive" | "risk" | "permits";
   days: number;
   cursor: { id: string; name?: string; spent?: number } | null;
 }
@@ -14,6 +14,9 @@ export async function customerDirectoryPage(user: User, requested: string | unde
   const ownerId = ownerScope(user, requested);
   const settings = await getSettings();
   const today = businessDate(settings);
+  const deadline = new Date(`${today}T12:00:00Z`);
+  deadline.setUTCDate(deadline.getUTCDate() + 14);
+  const permitDeadline = deadline.toISOString().slice(0, 10);
   const history = ownerId ? Prisma.sql`
     scoped AS (
       SELECT s."customerId", SUM(i.revenue)::bigint AS total,
@@ -65,6 +68,8 @@ export async function customerDirectoryPage(user: User, requested: string | unde
   const segment = filters.segment === "top" ? Prisma.sql`d.purchases > 0`
     : filters.segment === "inactive" ? Prisma.sql`d."inactiveDays" >= ${filters.days}`
     : filters.segment === "risk" ? Prisma.sql`d."inactiveDays" >= ${threshold} AND d."inactiveDays" < ${filters.days}`
+    : filters.segment === "permits" ? Prisma.sql`(d."permitStatus" IN ('pending', 'expired') OR
+      (d."permitStatus" = 'verified' AND d."permitValidUntil" <= ${permitDeadline}))`
     : Prisma.sql`TRUE`;
   const selected = Prisma.sql`${searched} AND ${segment}`;
   const cursor = filters.cursor;

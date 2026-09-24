@@ -26,9 +26,10 @@ const encodeCursor = (value: object) => Buffer.from(JSON.stringify(value)).toStr
 
 export async function customerPage(user: User, requested: string | undefined, raw: unknown) {
   const v = pageQuery.extend({
-    segment: z.enum(["all", "top", "inactive", "risk"]).default("all"),
+    segment: z.enum(["all", "top", "inactive", "risk", "permits"]).default("all"),
     days: z.coerce.number().int().min(1).max(3650).default(60),
   }).parse(raw);
+  if (v.segment === "permits" && !["owner", "admin"].includes(user.role)) throw new HttpError(403, "Segmento restringido");
   const cursor = decodeCursor(v.cursor);
   if (cursor && (v.segment === "top" ? cursor.spent === undefined : !cursor.name))
     throw new HttpError(400, "Cursor inválido");
@@ -164,11 +165,11 @@ export async function salesPage(user: User, requested: string | undefined, raw: 
 }
 
 export async function customerHistory(user: User, id: string, raw: unknown) {
-  const v = pageQuery.pick({ cursor: true }).parse(raw);
+  const v = pageQuery.pick({ cursor: true }).extend({ owner: z.string().max(100).optional() }).parse(raw);
   const cursor = decodeCursor(v.cursor);
   if (cursor && !cursor.createdAt) throw new HttpError(400, "Cursor inválido");
-  const ownerId = ownerScope(user);
-  const customer = await db.customer.findFirst({ where: { id, ...(ownerId ? { sales: { some: { items: { some: { ownerId } } } } } : {}) }, select: { id: true } });
+  const ownerId = ownerScope(user, v.owner);
+  const customer = await db.customer.findFirst({ where: { id, ...(user.role === "responsible" ? { sales: { some: { items: { some: { ownerId: user.id } } } } } : {}) }, select: { id: true } });
   if (!customer) throw new HttpError(404, "Socio no encontrado");
   const where: Prisma.SaleWhereInput = { customerId: id, ...(ownerId ? { items: { some: { ownerId } } } : {}) };
   const rows = await db.sale.findMany({
