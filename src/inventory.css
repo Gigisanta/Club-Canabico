@@ -545,3 +545,17 @@
 .location-quick-add { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .location-quick-add input { flex: 1 1 180px; min-width: 0; }
 .location-quick-add .button { min-height: 34px; padding: 6px 10px; font-size: 11px; }
+.price-section { grid-column: 1 / -1; min-width: 0; margin: 2px 0 18px; padding: 13px 18px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-raised); }
+.price-section legend { padding: 0 6px; color: var(--text); font-size: 14px; font-weight: 800; }
+.price-section > p { margin: 0 0 14px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.price-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.price-pair .field { min-width: 0; margin-bottom: 0; }
+.price-input-shell { position: relative; min-width: 0; }
+.price-input-shell > span { position: absolute; top: 50%; left: 11px; z-index: 1; transform: translateY(-50%); color: var(--muted); font-size: 14px; font-weight: 800; pointer-events: none; }
+.price-input-shell input { min-width: 0; padding-left: 29px; font-size: 17px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.price-input-shell input::-webkit-outer-spin-button, .price-input-shell input::-webkit-inner-spin-button { margin: 0; -webkit-appearance: none; }
+.price-input-shell input[type="number"] { appearance: textfield; }
+.price-pair .field small { min-height: 18px; overflow-wrap: anywhere; font-size: 11px; font-variant-numeric: tabular-nums; }
+.price-section > .price-warning { margin: 13px 0 0; padding: 9px 11px; border: 1px solid #e7d29d; border-radius: 7px; background: #fff4dc; color: #765625; font-size: 11px; font-weight: 700; }
+.price-section > .price-previous { margin: 13px 0 0; padding-top: 10px; border-top: 1px solid var(--border); font-size: 11px; font-variant-numeric: tabular-nums; }
+@media (max-width: 520px) { .price-section { padding: 12px; } .price-pair { gap: 9px; } .price-input-shell input { font-size: 15px; } }

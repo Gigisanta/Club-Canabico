@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState, type KeyboardEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Plus,
@@ -19,6 +19,7 @@ import {
   send,
   useResource,
   number,
+  money as formatMoney,
   shortDate,
   type Product,
   type Supplier,
@@ -103,6 +104,60 @@ function ProductIdentityFields({ edit }: { edit: Product | null }) {
         </select>
       </Field>
     </>
+  );
+}
+
+function PriceFields({ edit }: { edit: Product | null }) {
+  const id = useId();
+  const [cost, setCost] = useState(edit ? String(edit.cost / 100) : "");
+  const [price, setPrice] = useState(edit ? String(edit.price / 100) : "");
+  const cents = (value: string) => value && Number.isFinite(Number(value))
+    ? Math.round(Number(value) * 100) : null;
+  const costCents = cents(cost);
+  const priceCents = cents(price);
+  const preventExponent = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (["e", "E", "+", "-"].includes(event.key)) event.preventDefault();
+  };
+  const warning = costCents !== null && priceCents !== null && priceCents > 0 && costCents > 0
+    ? priceCents < costCents
+      ? `Revisá los importes: la venta queda ${formatMoney(costCents - priceCents)} por debajo del costo.`
+      : priceCents >= costCents * 10
+        ? "Revisá los importes: la venta supera diez veces el costo."
+        : ""
+    : "";
+  return (
+    <fieldset className="price-section">
+      <legend>Precios</legend>
+      <p>Importes en ARS por g o unidad. Sin separador de miles; usá punto para centavos.</p>
+      <div className="price-pair">
+        <div className="field">
+          <label htmlFor={`${id}-cost`}>Precio de costo</label>
+          <div className="price-input-shell">
+            <span aria-hidden="true">$</span>
+            <input id={`${id}-cost`} name="cost" type="number" inputMode="decimal"
+              min="0" max="10000000" step="0.01" value={cost}
+              onChange={(e) => { if (!/[eE+-]/.test(e.target.value)) setCost(e.target.value); }}
+              onFocus={(e) => e.currentTarget.select()} onKeyDown={preventExponent}
+              onWheel={(e) => e.currentTarget.blur()} placeholder="0.00" required />
+          </div>
+          <small>{costCents === null ? "Ingresá el costo" : `Vas a guardar ${formatMoney(costCents)}`}</small>
+        </div>
+        <div className="field">
+          <label htmlFor={`${id}-price`}>Precio de venta</label>
+          <div className="price-input-shell">
+            <span aria-hidden="true">$</span>
+            <input id={`${id}-price`} name="price" type="number" inputMode="decimal"
+              min="0.01" max="10000000" step="0.01" value={price}
+              onChange={(e) => { if (!/[eE+-]/.test(e.target.value)) setPrice(e.target.value); }}
+              onFocus={(e) => e.currentTarget.select()} onKeyDown={preventExponent}
+              onWheel={(e) => e.currentTarget.blur()} placeholder="0.00" required />
+          </div>
+          <small>{priceCents === null ? "Ingresá el precio de venta" : `Vas a guardar ${formatMoney(priceCents)}`}</small>
+        </div>
+      </div>
+      {warning && <p className="price-warning" role="status">{warning}</p>}
+      {edit && <p className="price-previous">Valores anteriores: costo {formatMoney(edit.cost)} · venta {formatMoney(edit.price)}</p>}
+    </fieldset>
   );
 }
 
@@ -643,26 +698,7 @@ export default function Inventory() {
                 defaultValue={edit?.expires || ""}
               />
             </Field>
-            <Field label="Precio de costo">
-              <input
-                name="cost"
-                type="number"
-                min="0"
-                step="0.01"
-                defaultValue={edit ? edit.cost / 100 : 0}
-                required
-              />
-            </Field>
-            <Field label="Precio de venta">
-              <input
-                name="price"
-                type="number"
-                min="0.01"
-                step="0.01"
-                defaultValue={edit ? edit.price / 100 : 0}
-                required
-              />
-            </Field>
+            <PriceFields key={edit?.id || "new"} edit={edit} />
           </div>
         </Form>
       </Modal>
