@@ -11,6 +11,7 @@ import {
   WarningCircle,
   Truck,
   Star,
+  MapPin,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import {
@@ -21,6 +22,7 @@ import {
   shortDate,
   type Product,
   type Supplier,
+  type Location,
 } from "./lib";
 import type { Movement, Page } from "../shared/types";
 import {
@@ -115,6 +117,13 @@ export default function Inventory() {
   const [showSuppliers, setShowSuppliers] = useState(false);
   const [supplierEditor, setSupplierEditor] = useState<Supplier | "new" | null>(null);
   const [lotSupplierId, setLotSupplierId] = useState("");
+  const [showLocations, setShowLocations] = useState(false);
+  const [locationEditor, setLocationEditor] = useState<Location | "new" | null>(null);
+  const [lotLocationId, setLotLocationId] = useState("");
+  const [locationTouched, setLocationTouched] = useState(false);
+  const [quickLocation, setQuickLocation] = useState(false);
+  const [quickLocationName, setQuickLocationName] = useState("");
+  const [savingQuickLocation, setSavingQuickLocation] = useState(false);
   const [editor, setEditor] = useState<Product | "new" | null>(null);
   const [movement, setMovement] = useState<Product | null>(null);
   const [history, setHistory] = useState(false);
@@ -142,11 +151,19 @@ export default function Inventory() {
     `/list/products?q=${encodeURIComponent(debouncedQuery)}&filter=${filter}&type=${encodeURIComponent(type)}&supplier=${encodeURIComponent(supplierFilter)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`,
   );
   const suppliers = useResource<{ items: Supplier[]; total: number }>(canManage ? "/suppliers" : null);
+  const locations = useResource<{ items: Location[]; total: number }>(canManage ? "/locations" : null);
   useEffect(() => {
     if (editor) setLotSupplierId(editor === "new"
       ? suppliers.data?.items.find((s) => s.active && s.isDefault)?.id || ""
       : editor.supplierId || "");
   }, [editor, suppliers.data]);
+  useEffect(() => { setLocationTouched(false); setLotLocationId(""); setQuickLocation(false); setQuickLocationName(""); }, [editor]);
+  useEffect(() => {
+    if (!editor || locationTouched || !locations.data) return;
+    setLotLocationId(editor === "new"
+      ? locations.data.items.find((l) => l.active && l.isDefault)?.id || ""
+      : editor.locationId || locations.data.items.find((l) => l.name === editor.location)?.id || "");
+  }, [editor, locationTouched, locations.data]);
   const historyData = useResource<Page<Movement>>(
     history
       ? `/movements?${new URLSearchParams({ ...(historyCursor ? { cursor: historyCursor } : {}), ...(owner ? { owner } : {}) })}`
@@ -159,6 +176,8 @@ export default function Inventory() {
       ...Object.fromEntries(fd),
       supplier: "",
       supplierId: lotSupplierId || null,
+      locationId: lotLocationId || null,
+      location: locations.data?.items.find((l) => l.id === lotLocationId)?.name || existing?.location || "",
       stock: Math.round(Number(fd.get("stock")) * 1000),
       minimum: Math.round(Number(fd.get("minimum")) * 1000),
       cost: Math.round(Number(fd.get("cost")) * 100),
@@ -172,7 +191,7 @@ export default function Inventory() {
     );
     toast.success(existing ? "Producto actualizado" : "Lote creado");
     setEditor(null);
-    await Promise.all([reload(), page.reload(), suppliers.reload()]);
+    await Promise.all([reload(), page.reload(), suppliers.reload(), locations.reload()]);
   }
   async function saveSupplier(fd: FormData) {
     const existing = supplierEditor !== "new" ? supplierEditor : null;
@@ -190,6 +209,33 @@ export default function Inventory() {
     toast.success(supplier.active ? "Proveedor archivado" : "Proveedor activado");
     await suppliers.reload();
   }
+  async function saveLocation(fd: FormData) {
+    const existing = locationEditor !== "new" ? locationEditor : null;
+    await send(existing ? `/locations/${existing.id}` : "/locations",
+      { name: fd.get("name"), isDefault: fd.get("isDefault") === "on" }, existing ? "PATCH" : "POST");
+    toast.success(existing ? "Ubicación actualizada" : "Ubicación guardada");
+    setLocationEditor(null);
+    await Promise.all([locations.reload(), page.reload(), reload()]);
+  }
+  async function toggleLocation(location: Location) {
+    await send(`/locations/${location.id}/status`, { active: !location.active }, "PATCH");
+    toast.success(location.active ? "Ubicación archivada" : "Ubicación activada");
+    await locations.reload();
+  }
+  async function addQuickLocation() {
+    if (!quickLocationName.trim() || savingQuickLocation) return;
+    setSavingQuickLocation(true);
+    try {
+      const created = await send<Location>("/locations", { name: quickLocationName.trim(), isDefault: false });
+      setLocationTouched(true);
+      setLotLocationId(created.id);
+      setQuickLocation(false);
+      setQuickLocationName("");
+      await locations.reload();
+      toast.success("Ubicación guardada y seleccionada");
+    } catch (error) { toast.error((error as Error).message); }
+    finally { setSavingQuickLocation(false); }
+  }
   const edit = editor && editor !== "new" ? editor : null;
   return (
     <>
@@ -206,6 +252,11 @@ export default function Inventory() {
             {user.role === "owner" && (
               <button className="button" onClick={() => setShowSuppliers((v) => !v)} aria-expanded={showSuppliers}>
                 <Truck size={18} /> Proveedores
+              </button>
+            )}
+            {user.role === "owner" && (
+              <button className="button" onClick={() => setShowLocations((v) => !v)} aria-expanded={showLocations}>
+                <MapPin size={18} /> Ubicaciones
               </button>
             )}
             {canManage && (
@@ -258,6 +309,28 @@ export default function Inventory() {
                 <div className="supplier-actions">
                   <button className="button" onClick={() => setSupplierEditor(supplier)}>Editar</button>
                   <button className="button" onClick={() => void toggleSupplier(supplier).catch((e) => toast.error(e.message))}>{supplier.active ? "Archivar" : "Activar"}</button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </Panel>
+      )}
+      {showLocations && user.role === "owner" && (
+        <Panel title="Ubicaciones guardadas" sub="Organizá depósitos, estantes o sectores. Elegí una predeterminada para el stock nuevo."
+          action={<button className="button primary" onClick={() => setLocationEditor("new")}><Plus size={17} /> Nueva ubicación</button>}>
+          {locations.loading && <p role="status" className="table-note">Cargando ubicaciones…</p>}
+          {locations.error && <p role="alert" className="form-error">{locations.error}</p>}
+          {!locations.loading && !locations.data?.items.length && <Empty title="Todavía no hay ubicaciones" description="Guardá la primera para seleccionarla al crear stock." />}
+          <div className="supplier-grid">
+            {locations.data?.items.map((location) => (
+              <article className={`supplier-card${location.active ? "" : " is-archived"}`} key={location.id}>
+                <div className="supplier-card-top"><span className="supplier-icon"><MapPin size={19} /></span>
+                  <div><strong>{location.name}</strong><small>{location.active ? `${location.lotCount} ${location.lotCount === 1 ? "lote vinculado" : "lotes vinculados"}` : "Archivada"}</small></div>
+                  {location.isDefault && <span className="supplier-default"><Star size={13} weight="fill" /> Predeterminada</span>}
+                </div>
+                <div className="supplier-actions">
+                  <button className="button" onClick={() => setLocationEditor(location)}>Editar</button>
+                  <button className="button" onClick={() => void toggleLocation(location).catch((e) => toast.error(e.message))}>{location.active ? "Archivar" : "Activar"}</button>
                 </div>
               </article>
             ))}
@@ -507,13 +580,18 @@ export default function Inventory() {
                 {suppliers.data?.items.filter((s) => s.active || s.id === edit?.supplierId).map((s) => <option key={s.id} value={s.id}>{s.name}{s.active ? "" : " (archivado)"}</option>)}
               </select>
             </Field>
-            <Field label="Ubicación">
-              <input
-                name="location"
-                defaultValue={edit?.location}
-                placeholder="Almacén A"
-                required
-              />
+            <Field label="Ubicación" hint={locations.error || (locations.loading ? "Cargando ubicaciones…" : !locations.data?.items.some((l) => l.active) ? "Guardá una ubicación para poder registrar el stock." : "Elegí dónde se guarda este stock.")}>
+              <select name="locationId" value={lotLocationId} onChange={(e) => { setLotLocationId(e.target.value); setLocationTouched(true); }} required>
+                <option value="">Elegí una ubicación</option>
+                {locations.data?.items.filter((l) => l.active || l.id === edit?.locationId).map((l) =>
+                  <option key={l.id} value={l.id}>{l.name}{l.active ? "" : " (archivada)"}</option>)}
+              </select>
+              {user.role === "owner" && !quickLocation && <button type="button" className="location-add-link" onClick={() => setQuickLocation(true)}><Plus size={14} /> Agregar ubicación</button>}
+              {user.role === "owner" && quickLocation && <div className="location-quick-add">
+                <input aria-label="Nombre de la nueva ubicación" value={quickLocationName} onChange={(e) => setQuickLocationName(e.target.value)} placeholder="Ej.: Depósito · Estante A" maxLength={180} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void addQuickLocation(); } }} />
+                <button type="button" className="button" disabled={!quickLocationName.trim() || savingQuickLocation} onClick={() => void addQuickLocation()}>Guardar</button>
+                <button type="button" className="button" onClick={() => { setQuickLocation(false); setQuickLocationName(""); }}>Cancelar</button>
+              </div>}
             </Field>
             {!edit && (
               <>
@@ -600,6 +678,14 @@ export default function Inventory() {
             <Field label="Notas"><textarea name="notes" defaultValue={supplierEditor !== "new" ? supplierEditor?.notes : ""} maxLength={2000} rows={3} /></Field>
             <label className="supplier-default-choice"><input name="isDefault" type="checkbox" defaultChecked={supplierEditor !== "new" ? !!supplierEditor?.isDefault : false} /> Seleccionar por defecto en lotes nuevos</label>
           </div>
+        </Form>
+      </Modal>
+      <Modal title={locationEditor === "new" ? "Nueva ubicación" : "Editar ubicación"}
+        description="Se guarda para los próximos lotes. Si cambiás el nombre, también se actualizan los lotes vinculados."
+        open={!!locationEditor} onClose={() => setLocationEditor(null)}>
+        <Form onSubmit={saveLocation} onCancel={() => setLocationEditor(null)}>
+          <Field label="Nombre de la ubicación"><input name="name" defaultValue={locationEditor !== "new" ? locationEditor?.name : ""} required maxLength={180} placeholder="Ej.: Depósito · Estante A" /></Field>
+          <label className="supplier-default-choice"><input name="isDefault" type="checkbox" disabled={locationEditor !== "new" && !locationEditor?.active} defaultChecked={locationEditor !== "new" ? !!locationEditor?.isDefault : false} /> Seleccionar por defecto al crear stock</label>
         </Form>
       </Modal>
       <Modal

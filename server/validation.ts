@@ -17,6 +17,7 @@ export const productSchema = z.object({
   cost: money,
   price: money,
   location: text,
+  locationId: z.string().trim().min(1).max(100).nullable().default(null),
   ownerId: text,
   expires: date.nullable().default(null),
 });
@@ -26,6 +27,10 @@ export const supplierSchema = z.object({
   phone: z.string().trim().max(40).default(""),
   email: z.union([z.email(), z.literal("")]).default(""),
   notes: z.string().trim().max(2000).default(""),
+  isDefault: z.boolean().default(false),
+});
+export const locationSchema = z.object({
+  name: text,
   isDefault: z.boolean().default(false),
 });
 export const customerSchema = z.object({

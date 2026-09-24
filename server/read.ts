@@ -58,10 +58,10 @@ export async function productPage(user: User, requested: string | undefined, raw
   const cursorFilter = cursor ? Prisma.sql`AND (p.name, p.id) > (${cursor.name}, ${cursor.id})` : Prisma.empty;
   const pageFilters = clauses.length ? Prisma.sql`${filters} ${cursorFilter}` : cursor ? Prisma.sql`WHERE (p.name, p.id) > (${cursor.name}, ${cursor.id})` : Prisma.empty;
   const [rows, countRows, summaryRows] = await Promise.all([
-    db.$queryRaw<Array<{ id: string; name: string; strain: string; type: string; unit: string; lot: string; supplier: string; supplierId: string | null; sourceSystem: string | null; sourceId: string | null; stock: number; minimum: number; cost: number; price: number; location: string; ownerId: string; expires: string | null; createdAt: Date }>>`
+    db.$queryRaw<Array<{ id: string; name: string; strain: string; type: string; unit: string; lot: string; supplier: string; supplierId: string | null; sourceSystem: string | null; sourceId: string | null; stock: number; minimum: number; cost: number; price: number; location: string; locationId: string | null; ownerId: string; expires: string | null; createdAt: Date }>>`
       SELECT p.id, p.name, p.strain, p.type, p.unit, p.lot, COALESCE(s.name, p.supplier) AS supplier,
              p."supplierId", p."sourceSystem", p."sourceId", p.stock, p.minimum, p.cost, p.price,
-             p.location, p."ownerId", p.expires, p."createdAt"
+             p.location, p."locationId", p."ownerId", p.expires, p."createdAt"
       FROM "Product" p JOIN "User" u ON u.id = p."ownerId"
       LEFT JOIN "Supplier" s ON s.id = p."supplierId" ${pageFilters}
       ORDER BY p.name ASC, p.id ASC LIMIT ${pageSize + 1}`,

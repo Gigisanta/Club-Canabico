@@ -35,6 +35,7 @@ export interface Product {
   cost: number;
   price: number;
   location: string;
+  locationId: string | null;
   ownerId: string;
   expires: string | null;
   createdAt: string;
@@ -46,6 +47,13 @@ export interface Supplier {
   phone: string;
   email: string;
   notes: string;
+  active: boolean;
+  isDefault: boolean;
+  lotCount: number;
+}
+export interface Location {
+  id: string;
+  name: string;
   active: boolean;
   isDefault: boolean;
   lotCount: number;

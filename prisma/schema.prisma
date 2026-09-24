@@ -45,6 +45,16 @@ model Supplier {
   products Product[]
   @@index([active, name])
 }
+model Location {
+  id String @id @default(cuid())
+  name String
+  key String @unique
+  active Boolean @default(true)
+  isDefault Boolean @default(false)
+  createdAt DateTime @default(now())
+  products Product[]
+  @@index([active, name])
+}
 model Product {
   id String @id @default(cuid())
   name String
@@ -62,6 +72,8 @@ model Product {
   cost Int
   price Int
   location String
+  locationId String?
+  locationRef Location? @relation(fields: [locationId], references: [id], onDelete: Restrict)
   ownerId String
   owner User @relation(fields: [ownerId], references: [id])
   expires String?
@@ -70,6 +82,7 @@ model Product {
   movements Movement[]
   @@index([ownerId])
   @@index([supplierId])
+  @@index([locationId])
   @@index([name, id])
   @@index([ownerId, name, id])
   @@unique([sourceSystem, sourceId])

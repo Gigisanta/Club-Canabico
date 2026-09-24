@@ -126,6 +126,9 @@ async function seed() {
         ["Orange Cookies", "Híbrida", "Flor", 168, 30, 440, 1200, "r1"],
         ["Aceite CBD 10%", "CBD", "Aceite", 38, 8, 1100, 2800, "r3"],
       ];
+      const stockLocations = [];
+      for (const [index, name] of ["Almacén A", "Almacén B"].entries())
+        stockLocations.push(await tx.location.create({ data: { name, key: name.toLowerCase(), isDefault: index === 0 } }));
       for (const [i, p] of list.entries())
         await tx.product.create({
           data: {
@@ -141,6 +144,7 @@ async function seed() {
             unit: p[2] === "Aceite" ? "ud" : "g",
             lot: `RC-26-${String(i + 1).padStart(3, "0")}`,
             location: `Almacén ${i % 2 ? "B" : "A"}`,
+            locationId: stockLocations[i % 2].id,
             expires: i === 8 ? ago(-20) : null,
             createdAt: new Date(`${ago(100)}T09:00:00Z`),
           },

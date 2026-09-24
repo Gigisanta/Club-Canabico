@@ -24,6 +24,7 @@ import { dashboardMetrics } from "./dashboard.js";
 import {
   productSchema,
   supplierSchema,
+  locationSchema,
   customerSchema,
   saleSchema,
   expenseSchema,
@@ -35,6 +36,7 @@ import {
   HttpError,
 } from "./validation.js";
 import { resolveSupplier, supplierKey, supplierName } from "./suppliers.js";
+import { resolveLocation, locationKey, locationName } from "./locations.js";
 import { exportReport } from "./reports.js";
 import { productCatalog } from "./product-catalog.js";
 declare global {
@@ -258,6 +260,45 @@ app.patch("/api/suppliers/:id/status", roles("owner"), async (req, res) => {
   });
   res.json(result);
 });
+app.get("/api/locations", roles("owner", "admin", "responsible"), async (_req, res) => {
+  const items = await db.location.findMany({
+    orderBy: [{ active: "desc" }, { name: "asc" }, { id: "asc" }],
+    include: { _count: { select: { products: true } } },
+  });
+  res.json({ items: items.map(({ _count, ...location }) => ({ ...location, lotCount: _count.products })), total: items.length });
+});
+app.post("/api/locations", roles("owner"), async (req, res) => {
+  const v = locationSchema.parse(req.body);
+  const name = locationName(v.name);
+  const result = await atomic(async (tx) => {
+    const first = !(await tx.location.count({ where: { active: true } }));
+    if (v.isDefault) await tx.location.updateMany({ data: { isDefault: false } });
+    return tx.location.create({ data: { name, key: locationKey(name), isDefault: v.isDefault || first } });
+  });
+  res.status(201).json(result);
+});
+app.patch("/api/locations/:id", roles("owner"), async (req, res) => {
+  const v = locationSchema.parse(req.body);
+  const name = locationName(v.name);
+  const result = await atomic(async (tx) => {
+    const current = await tx.location.findUnique({ where: { id: String(req.params.id) } });
+    if (!current) throw new HttpError(404, "Ubicación no encontrada");
+    if (!current.active && v.isDefault) throw new HttpError(400, "Activá la ubicación antes de marcarla como predeterminada");
+    if (v.isDefault) await tx.location.updateMany({ where: { id: { not: current.id } }, data: { isDefault: false } });
+    const updated = await tx.location.update({ where: { id: current.id }, data: { name, key: locationKey(name), isDefault: v.isDefault } });
+    if (current.name !== name) await tx.product.updateMany({ where: { locationId: current.id }, data: { location: name } });
+    return updated;
+  });
+  res.json(result);
+});
+app.patch("/api/locations/:id/status", roles("owner"), async (req, res) => {
+  const { active } = z.object({ active: z.boolean() }).parse(req.body);
+  const result = await db.location.update({
+    where: { id: String(req.params.id) },
+    data: { active, ...(!active ? { isDefault: false } : {}) },
+  });
+  res.json(result);
+});
 function validateCashDirection(category: string, amount: number) {
   if (["opening_balance", "capital_contribution", "delivery_receipt", "other_income"].includes(category) && amount < 0)
     throw new HttpError(400, "Este tipo de ingreso requiere importe positivo");
@@ -277,7 +318,8 @@ app.post(
     await validOwner(v.ownerId);
     const product = await atomic(async (tx) => {
       const selected = await resolveSupplier(tx, v.supplierId, v.supplier);
-      const p = await tx.product.create({ data: { ...v, ...selected, sourceSystem: v.sourceSystem || "local", sourceId: v.sourceId || randomUUID() } });
+      const located = await resolveLocation(tx, v.locationId, v.location, null, req.user.role === "owner");
+      const p = await tx.product.create({ data: { ...v, ...selected, ...located, sourceSystem: v.sourceSystem || "local", sourceId: v.sourceId || randomUUID() } });
       await tx.movement.create({
         data: {
           productId: p.id,
@@ -318,12 +360,13 @@ app.patch(
       throw new HttpError(400, "El mínimo de unidades debe ser entero");
     const result = await atomic(async (tx) => {
       const selected = await resolveSupplier(tx, v.supplierId, v.supplier, existing.supplierId);
+      const located = await resolveLocation(tx, v.locationId, v.location, existing.locationId, req.user.role === "owner");
       return tx.product.updateMany({
         where: {
           id: String(req.params.id),
           ...(req.user.role === "responsible" ? { ownerId: req.user.id } : {}),
         },
-        data: { ...v, ...selected },
+        data: { ...v, ...selected, ...located },
       });
     });
     if (!result.count) throw new HttpError(404, "Lote no encontrado");
@@ -885,6 +928,7 @@ app.post("/api/import", roles("owner", "admin"), async (req, res) => {
   if (v.commit)
     await atomic(async (tx) => {
       const importedSuppliers = new Map<string, string>();
+      const importedLocations = new Map<string, { id: string; name: string }>();
       for (const row of data) {
         if ("lot" in row) {
           let supplierId: string | null = null;
@@ -901,7 +945,18 @@ app.post("/api/import", roles("owner", "admin"), async (req, res) => {
               importedSuppliers.set(key, supplierId);
             }
           }
-          const p = await tx.product.create({ data: { ...row, supplierId } });
+          const key = locationKey(row.location);
+          let location = importedLocations.get(key);
+          if (!location) {
+            location = await tx.location.upsert({
+              where: { key },
+              create: { name: locationName(row.location), key },
+              update: {},
+              select: { id: true, name: true },
+            });
+            importedLocations.set(key, location);
+          }
+          const p = await tx.product.create({ data: { ...row, supplierId, location: location.name, locationId: location.id } });
           await tx.movement.create({
             data: {
               productId: p.id,

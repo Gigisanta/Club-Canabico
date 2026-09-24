@@ -185,6 +185,49 @@ test(
         await db.movement.deleteMany({ where: { productId: added.id } });
         await db.product.delete({ where: { id: added.id } });
       });
+      await t.test("owner manages locations and linked lots keep a stable location", async () => {
+        assert.equal((await call("/locations", "viewer")).status, 403);
+        assert.equal((await call("/locations", "r1", { name: "Sin permiso" })).status, 403);
+        const body = { name: " Depósito   Central ", isDefault: true };
+        const created = await call("/locations", "owner", body);
+        assert.equal(created.status, 201, await created.clone().text());
+        const first = await created.json();
+        assert.equal(first.name, "Depósito Central");
+        assert.equal((await call("/locations", "owner", { name: "depósito central" })).status, 409);
+        const secondResponse = await call("/locations", "owner", { name: "Estante B", isDefault: false });
+        assert.equal(secondResponse.status, 201);
+        const second = await secondResponse.json();
+        assert.equal(second.isDefault, false);
+        assert.equal((await call(`/locations/${second.id}`, "r1", { name: "Estante B", isDefault: true }, "PATCH")).status, 403);
+        assert.equal((await call(`/locations/${second.id}`, "owner", { name: "Estante B", isDefault: true }, "PATCH")).status, 200);
+        const catalog = await (await call("/locations", "r1")).json();
+        assert.equal(catalog.items.find((l: { id: string }) => l.id === first.id).isDefault, false);
+        assert.equal(catalog.items.find((l: { id: string }) => l.id === second.id).isDefault, true);
+        const original = await db.product.findUniqueOrThrow({ where: { id: "p1" } });
+        try {
+          assert.equal((await call("/products", "r1", { ...original, lot: "unknown-location-lot", location: "Ubicación ajena", locationId: null })).status, 400);
+          assert.equal((await call("/products/p1", "owner", { ...original, locationId: first.id }, "PATCH")).status, 200);
+          assert.equal((await db.product.findUniqueOrThrow({ where: { id: "p1" } })).location, "Depósito Central");
+          const linked = await (await call("/locations")).json();
+          assert.equal(linked.items.find((l: { id: string }) => l.id === first.id).lotCount, 1);
+          assert.equal((await call(`/locations/${first.id}`, "owner", { name: "Depósito Principal", isDefault: false }, "PATCH")).status, 200);
+          const listed = await (await call("/list/products?q=p1", "owner")).json();
+          assert.equal(listed.items[0].location, "Depósito Principal");
+          assert.equal((await call(`/locations/${first.id}/status`, "owner", { active: false }, "PATCH")).status, 200);
+          const updated = await db.product.findUniqueOrThrow({ where: { id: "p1" } });
+          assert.equal((await call("/products/p1", "owner", { ...updated }, "PATCH")).status, 200);
+          assert.equal((await call("/products", "owner", { ...updated, lot: "new-location-lot", locationId: first.id })).status, 400);
+          assert.equal((await call(`/locations/${first.id}/status`, "owner", { active: true }, "PATCH")).status, 200);
+          const added = await call("/products", "owner", { ...updated, lot: "new-location-lot", locationId: first.id });
+          assert.equal(added.status, 201, await added.clone().text());
+          const newProduct = await added.json();
+          assert.equal(newProduct.locationId, first.id);
+          await db.movement.deleteMany({ where: { productId: newProduct.id } });
+          await db.product.delete({ where: { id: newProduct.id } });
+        } finally {
+          await db.product.update({ where: { id: "p1" }, data: { location: original.location, locationId: original.locationId } });
+        }
+      });
       await t.test(
         "viewer cannot mutate; responsible cannot read or move another owner stock",
         async () => {
@@ -353,14 +396,17 @@ test(
             400,
           );
           assert.equal(await db.product.count(), 2);
-          const productCsv = "name,strain,type,unit,lot,supplier,stock,minimum,cost,price,location,ownerId,expires,sourceSystem,sourceId\nImportado,Test,Flor,g,import-supplier-1,Cooperativa Oeste,2,1,4.50,10.00,A,r1,,appsheet,lote-supplier-1";
+          const productCsv = "name,strain,type,unit,lot,supplier,stock,minimum,cost,price,location,ownerId,expires,sourceSystem,sourceId\nImportado,Test,Flor,g,import-supplier-1,Cooperativa Oeste,2,1,4.50,10.00,Depósito importado,r1,,appsheet,lote-supplier-1";
           const productPreview = await (await call("/import", "owner", { kind: "products", csv: productCsv })).json();
           assert.equal(productPreview.count, 1);
           assert.equal(await db.supplier.count({ where: { key: "cooperativa oeste" } }), 0);
+          assert.equal(await db.location.count({ where: { key: "depósito importado" } }), 0);
           assert.equal((await call("/import", "owner", { kind: "products", csv: productCsv, commit: true })).status, 200);
           const imported = await db.product.findUniqueOrThrow({ where: { lot: "import-supplier-1" } });
           assert.equal(imported.supplierId, (await db.supplier.findUniqueOrThrow({ where: { key: "cooperativa oeste" } })).id);
+          assert.equal(imported.locationId, (await db.location.findUniqueOrThrow({ where: { key: "depósito importado" } })).id);
           const repeatedProduct = await (await call("/import", "owner", { kind: "products", csv: productCsv, commit: true })).json();
+          assert.equal(await db.location.count({ where: { key: "depósito importado" } }), 1);
           assert.equal(repeatedProduct.count, 0);
           assert.equal(repeatedProduct.skipped, 1);
           await db.movement.deleteMany({ where: { productId: imported.id } });
