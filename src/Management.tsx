@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Plus,
   Wallet,
@@ -20,8 +20,10 @@ import {
   number,
   shortDate,
   download,
+  useResource,
   type Expense,
 } from "./lib";
+import type { Page } from "../shared/types";
 import {
   PageHeader,
   Panel,
@@ -35,22 +37,34 @@ import {
   Metric,
 } from "./ui";
 export function Expenses() {
-  const { state, money, canManage, isManager, user, reload } = useClub();
+  const { state, money, canManage, isManager, user, owner, reload } = useClub();
+  const [params, setParams] = useSearchParams();
   const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const [kind, setKind] = useState("all");
-  const [month, setMonth] = useState(state.today.slice(0, 7));
-  const list = state.expenses.filter(
-    (e) =>
-      e.date.startsWith(month) &&
-      e.name.toLowerCase().includes(query.toLowerCase()) &&
-      (kind === "all" || e.kind === kind),
+  const [query, setQuery] = useState(params.get("q") || "");
+  const [kind, setKind] = useState(params.get("kind") || "all");
+  const [month, setMonth] = useState(params.get("month") || state.today.slice(0, 7));
+  const [debouncedQuery, setDebouncedQuery] = useState(query);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [previous, setPrevious] = useState<(string | null)[]>([]);
+  useEffect(() => { const timer = window.setTimeout(() => setDebouncedQuery(query), 250); return () => clearTimeout(timer); }, [query]);
+  useEffect(() => {
+    setQuery(params.get("q") || "");
+    setKind(params.get("kind") || "all");
+    setMonth(params.get("month") || state.today.slice(0, 7));
+  }, [params, state.today]);
+  const updateParam = (key: string, value: string, defaultValue = "") => {
+    const next = new URLSearchParams(params);
+    if (value && value !== defaultValue) next.set(key, value);
+    else next.delete(key);
+    setParams(next, { replace: true });
+  };
+  useEffect(() => { setCursor(null); setPrevious([]); }, [debouncedQuery, kind, month, owner]);
+  const expenseData = useResource<Page<Expense, { total: number }>>(
+    `/list/expenses?${new URLSearchParams({ month, kind, q: debouncedQuery, ...(owner ? { owner } : {}), ...(cursor ? { cursor } : {}) })}`,
   );
-  const expenses = state.expenses.filter((e) => e.date.startsWith(month));
-  const total = expenses.reduce((n, e) => n + e.amount, 0);
-  const income = state.sales
-    .filter((s) => s.date.startsWith(month))
-    .reduce((n, s) => n + s.total, 0);
+  const list = expenseData.data?.items || [];
+  const total = expenseData.data?.summary.total || 0;
+  const income = state.periodRevenue;
   return (
     <>
       <PageHeader
@@ -66,7 +80,7 @@ export function Expenses() {
                   void send<{ count: number }>("/expenses/recurring", {})
                     .then(async (r) => {
                       toast.success(`${r.count} vencimientos procesados`);
-                      await reload();
+                      await Promise.all([reload(), expenseData.reload()]);
                     })
                     .catch((e) => toast.error(e.message))
                 }
@@ -108,7 +122,7 @@ export function Expenses() {
         <div className="table-toolbar">
           <Search
             value={query}
-            onChange={setQuery}
+            onChange={(value) => { setQuery(value); updateParam("q", value); }}
             placeholder="Buscar gasto…"
           />
           <div className="filter-group">
@@ -116,12 +130,12 @@ export function Expenses() {
               type="month"
               aria-label="Mes de gastos"
               value={month}
-              onChange={(e) => setMonth(e.target.value)}
+              onChange={(e) => { setMonth(e.target.value); updateParam("month", e.target.value, state.today.slice(0, 7)); }}
             />
             <select
               aria-label="Tipo de gasto"
               value={kind}
-              onChange={(e) => setKind(e.target.value)}
+              onChange={(e) => { setKind(e.target.value); updateParam("kind", e.target.value, "all"); }}
             >
               <option value="all">Todos los gastos</option>
               <option value="fixed">Fijos</option>
@@ -170,8 +184,15 @@ export function Expenses() {
               ))}
             </tbody>
           </table>
-          {!list.length && <Empty title="Sin gastos en este período" />}
+          {expenseData.loading && <p role="status" className="table-note">Buscando gastos…</p>}
+          {!expenseData.loading && !list.length && <Empty title="Sin gastos en este período" />}
         </div>
+        {expenseData.error && <p role="alert">{expenseData.error}</p>}
+        {(previous.length > 0 || expenseData.data?.nextCursor) && <div className="table-pagination">
+          <button className="button" disabled={!previous.length} onClick={() => { setCursor(previous.at(-1) || null); setPrevious((rows) => rows.slice(0, -1)); }}>Anterior</button>
+          <span>Página {previous.length + 1} · {expenseData.data?.total || 0} gastos</span>
+          <button className="button" disabled={!expenseData.data?.nextCursor} onClick={() => { setPrevious((rows) => [...rows, cursor]); setCursor(expenseData.data!.nextCursor); }}>Siguiente</button>
+        </div>}
       </Panel>
       <Modal
         title="Registrar gasto"
@@ -189,7 +210,7 @@ export function Expenses() {
             });
             toast.success("Gasto registrado");
             setOpen(false);
-            await reload();
+            await Promise.all([reload(), expenseData.reload()]);
           }}
         >
           <Field label="Concepto">
@@ -270,7 +291,6 @@ export function Responsibles() {
   const { state, money, setOwner } = useClub();
   const navigate = useNavigate();
   const [sort, setSort] = useState("revenue");
-  const start = state.today.slice(0, 7) + "-01";
   const owners = state.users
     .filter(
       (u) =>
@@ -279,10 +299,7 @@ export function Responsibles() {
     )
     .map((u) => {
       const products = state.products.filter((p) => p.ownerId === u.id);
-      const items = state.sales
-        .filter((s) => s.date >= start && s.date <= state.today)
-        .flatMap((s) => s.items)
-        .filter((i) => i.ownerId === u.id);
+      const items = state.responsibleRows.filter((row) => row.ownerId === u.id);
       const revenue = items.reduce((n, i) => n + i.revenue, 0);
       const cost = items.reduce((n, i) => n + i.cost, 0);
       const stockCost = products.reduce(
@@ -388,18 +405,14 @@ export function Responsibles() {
             </thead>
             <tbody>
               {owners.flatMap((o) => {
-                const items = state.sales
-                  .filter((s) => s.date >= start && s.date <= state.today)
-                  .flatMap((s) => s.items)
-                  .filter((i) => i.ownerId === o.id);
-                return [...new Set(items.map((i) => i.productId))].map((id) => {
-                  const own = items.filter((i) => i.productId === id);
-                  const income = own.reduce((n, i) => n + i.revenue, 0);
-                  const cost = own.reduce((n, i) => n + i.cost, 0);
+                const items = state.responsibleRows.filter((row) => row.ownerId === o.id);
+                return items.map((row) => {
+                  const income = row.revenue;
+                  const cost = row.cost;
                   return (
-                    <tr key={`${o.id}-${id}`}>
+                    <tr key={`${o.id}-${row.productId}`}>
                       <td>
-                        <strong>{own[0]?.name}</strong>
+                        <strong>{row.name}</strong>
                       </td>
                       <td>{o.name}</td>
                       <td className="numeric">{money(income)}</td>

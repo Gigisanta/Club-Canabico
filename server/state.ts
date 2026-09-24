@@ -1,6 +1,7 @@
-import type { User, Prisma } from "@prisma/client";
+import { Prisma, type User } from "@prisma/client";
 import { db, getSettings } from "./db.js";
-import { businessDate, tier } from "../shared/domain.js";
+import { businessDate } from "../shared/domain.js";
+export type ViewName = "dashboard" | "inventory" | "customers" | "sales" | "expenses" | "finance" | "responsibles" | "reports" | "settings";
 export const publicUser = {
   id: true,
   name: true,
@@ -11,107 +12,87 @@ export const publicUser = {
 export function ownerScope(user: User, requested?: string): string | undefined {
   return user.role === "responsible" ? user.id : requested || undefined;
 }
-export async function getState(user: User, requested?: string) {
+export async function getState(user: User, requested: string | undefined, view: ViewName, requestedMonth?: string) {
   const ownerId = ownerScope(user, requested);
   const settings = await getSettings();
   const restricted = user.role === "cashier";
-  const salesWhere: Prisma.SaleWhereInput = ownerId
-    ? { items: { some: { ownerId } } }
-    : {};
-  const [users, products, sales, customers, expenses, movements, closures, cashEntries, cashPlans] =
+  const today = businessDate(settings);
+  const monthStart = `${today.slice(0, 7)}-01`;
+  const expenseMonth = requestedMonth || today.slice(0, 7);
+  const needsProducts = ["dashboard", "finance", "responsibles"].includes(view);
+  const [users, products, closures, cashPlans] =
     await Promise.all([
       db.user.findMany({
         select: publicUser,
         where: user.role === "responsible" ? { id: user.id } : undefined,
         orderBy: { name: "asc" },
       }),
-      db.product.findMany({
+      needsProducts ? db.product.findMany({
         where: ownerId ? { ownerId } : undefined,
         orderBy: { name: "asc" },
-      }),
-      db.sale.findMany({
-        where: salesWhere,
-        include: { items: ownerId ? { where: { ownerId } } : true },
-        orderBy: { createdAt: "desc" },
-      }),
-      db.customer.findMany({
-        where:
-          user.role === "responsible"
-            ? { sales: { some: { items: { some: { ownerId: user.id } } } } }
-            : undefined,
-        orderBy: { name: "asc" },
-      }),
-      restricted
-        ? Promise.resolve([])
-        : db.expense.findMany({
-            where: ownerId ? { ownerId } : undefined,
-            orderBy: { date: "desc" },
-          }),
-      db.movement.findMany({
-        where: ownerId
-          ? { OR: [{ fromOwner: ownerId }, { toOwner: ownerId }] }
-          : undefined,
-        orderBy: { createdAt: "desc" },
-        take: 500,
-      }),
-      ownerId || user.role === "viewer"
+      }) : Promise.resolve([]),
+      ownerId || user.role === "viewer" || view !== "sales"
         ? Promise.resolve([])
         : db.closure.findMany({ orderBy: { date: "desc" }, take: 90 }),
-      user.role === "owner" || user.role === "admin"
-        ? db.cashEntry.findMany({ orderBy: [{ date: "desc" }, { createdAt: "desc" }], take: 2000 })
-        : Promise.resolve([]),
-      user.role === "owner" || user.role === "admin"
+      view === "finance" && (user.role === "owner" || user.role === "admin")
         ? db.cashPlan.findMany({ orderBy: { date: "asc" } })
         : Promise.resolve([]),
     ]);
-  const lifetime = await db.sale.groupBy({
-    by: ["customerId"],
-    where: { customerId: { in: customers.map((c) => c.id) } },
-    _sum: { total: true },
-  });
-  const lifetimeTotals = new Map(
-    lifetime.map((s) => [s.customerId, s._sum.total || 0]),
-  );
-  const previousClosure = ownerId || user.role === "viewer" ? null : await db.closure.findFirst({
-    where: { date: { lt: businessDate(settings) } },
+  const previousClosure = ownerId || user.role === "viewer" || view !== "sales" ? null : await db.closure.findFirst({
+    where: { date: { lt: today } },
     orderBy: { date: "desc" },
   });
-  const financeBalance = ["owner", "admin"].includes(user.role) ?
-    ((await db.cashEntry.aggregate({ where: { date: { lte: businessDate(settings) } }, _sum: { amount: true } }))._sum.amount || 0) : 0;
-  const cashExpected = ownerId || user.role === "viewer" ? 0 :
+  const financeBalance = view === "finance" && ["owner", "admin"].includes(user.role) ?
+    ((await db.cashEntry.aggregate({ where: { date: { lte: today } }, _sum: { amount: true } }))._sum.amount || 0) : 0;
+  const cashExpected = ownerId || user.role === "viewer" || view !== "sales" ? 0 :
     (previousClosure?.counted || 0) + ((await db.cashEntry.aggregate({
-      where: { account: "cash", date: { gt: previousClosure?.date || "0000-00-00", lte: businessDate(settings) } },
+      where: { account: "cash", date: { gt: previousClosure?.date || "0000-00-00", lte: today } },
       _sum: { amount: true },
     }))._sum.amount || 0);
-  const scopedSales = sales.map((s) => {
-    const items = s.items.map((i) => ({ ...i, cost: restricted ? 0 : i.cost }));
-    const total = ownerId ? items.reduce((n, i) => n + i.revenue, 0) : s.total;
-    const cost = restricted
-      ? 0
-      : ownerId
-        ? items.reduce((n, i) => n + i.cost, 0)
-        : s.cost;
-    return {
-      ...s,
-      items,
-      total,
-      cost,
-      subtotal: ownerId
-        ? items.reduce(
-            (n, i) => n + Math.round((i.quantity * i.price) / 1000),
-            0,
-          )
-        : s.subtotal,
-      discount: ownerId
-        ? items.reduce(
-            (n, i) => n + Math.round((i.quantity * i.price) / 1000) - i.revenue,
-            0,
-          )
-        : s.discount,
-      pointsEarned: ownerId ? 0 : s.pointsEarned,
-      pointsUsed: ownerId ? 0 : s.pointsUsed,
-    };
-  });
+  const todaySales = view === "sales" ? ownerId
+    ? await db.$queryRaw<Array<{ total: bigint; count: bigint }>>`
+        SELECT COALESCE(SUM(i.revenue), 0)::bigint AS total, COUNT(DISTINCT s.id)::bigint AS count
+        FROM "SaleItem" i JOIN "Sale" s ON s.id = i."saleId"
+        WHERE i."ownerId" = ${ownerId} AND s.date = ${today}`
+    : await db.$queryRaw<Array<{ total: bigint; count: bigint }>>`
+        SELECT COALESCE(SUM(total), 0)::bigint AS total, COUNT(*)::bigint AS count FROM "Sale" WHERE date = ${today}`
+    : [];
+  const periodStart = view === "expenses" ? `${expenseMonth}-01` : monthStart;
+  const periodEnd = view === "expenses" ? (() => {
+    const next = new Date(`${periodStart}T12:00:00Z`);
+    next.setUTCMonth(next.getUTCMonth() + 1);
+    return next.toISOString().slice(0, 10);
+  })() : (() => {
+    const next = new Date(`${today}T12:00:00Z`);
+    next.setUTCDate(next.getUTCDate() + 1);
+    return next.toISOString().slice(0, 10);
+  })();
+  const needsPeriod = ["expenses", "finance", "responsibles"].includes(view);
+  const periodRows = !needsPeriod ? [] : ownerId
+    ? await db.$queryRaw<Array<{ revenue: bigint; cost: bigint }>>`
+        SELECT COALESCE(SUM(i.revenue), 0)::bigint AS revenue, COALESCE(SUM(i.cost), 0)::bigint AS cost
+        FROM "SaleItem" i JOIN "Sale" s ON s.id = i."saleId"
+        WHERE i."ownerId" = ${ownerId} AND s.date >= ${periodStart} AND s.date < ${periodEnd}`
+    : await db.$queryRaw<Array<{ revenue: bigint; cost: bigint }>>`
+        SELECT COALESCE(SUM(total), 0)::bigint AS revenue, COALESCE(SUM(cost), 0)::bigint AS cost
+        FROM "Sale" WHERE date >= ${periodStart} AND date < ${periodEnd}`;
+  const periodExpense = view === "finance" && !restricted ? (await db.expense.aggregate({
+    where: { ...(ownerId ? { ownerId } : {}), date: { gte: monthStart, lte: today } }, _sum: { amount: true },
+  }))._sum.amount || 0 : 0;
+  const responsibleRows = view === "responsibles" ? await db.$queryRaw<Array<{
+    ownerId: string; productId: string; name: string; revenue: bigint; cost: bigint;
+  }>>`SELECT i."ownerId", i."productId", MIN(i.name) AS name,
+      SUM(i.revenue)::bigint AS revenue, SUM(i.cost)::bigint AS cost
+      FROM "SaleItem" i JOIN "Sale" s ON s.id = i."saleId"
+      WHERE s.date >= ${monthStart} AND s.date <= ${today}
+        ${ownerId ? Prisma.sql`AND i."ownerId" = ${ownerId}` : Prisma.empty}
+      GROUP BY i."ownerId", i."productId"` : [];
+  const lowRows = ownerId
+    ? await db.$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*)::bigint AS count FROM "Product" WHERE "ownerId" = ${ownerId} AND stock <= minimum`
+    : await db.$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*)::bigint AS count FROM "Product" WHERE stock <= minimum`;
+  const lowStockAlerts = ownerId
+    ? await db.$queryRaw<Array<{ id: string; name: string; stock: number; minimum: number; unit: string }>>`SELECT id, name, stock, minimum, unit FROM "Product" WHERE "ownerId" = ${ownerId} AND stock <= minimum ORDER BY name LIMIT 20`
+    : await db.$queryRaw<Array<{ id: string; name: string; stock: number; minimum: number; unit: string }>>`SELECT id, name, stock, minimum, unit FROM "Product" WHERE stock <= minimum ORDER BY name LIMIT 20`;
   return {
     user: {
       id: user.id,
@@ -122,37 +103,21 @@ export async function getState(user: User, requested?: string) {
     },
     users,
     products: products.map((p) => ({ ...p, cost: restricted ? 0 : p.cost })),
-    sales: scopedSales,
-    customers: customers.map((c) => {
-      const history = scopedSales.filter((s) => s.customerId === c.id);
-      const totalSpent = history.reduce((n, s) => n + s.total, 0);
-      return {
-        ...c,
-        notes: ["owner", "admin", "cashier"].includes(user.role) ? c.notes : "",
-        email: ["owner", "admin", "cashier"].includes(user.role) ? c.email : "",
-        phone: ["owner", "admin", "cashier"].includes(user.role) ? c.phone : "",
-        permitStatus: ["owner", "admin", "cashier"].includes(user.role) ? c.permitStatus : "unverified",
-        permitValidUntil: ["owner", "admin", "cashier"].includes(user.role) ? c.permitValidUntil : null,
-        permitCheckedAt: ["owner", "admin"].includes(user.role) ? c.permitCheckedAt : null,
-        sourceSystem: ["owner", "admin"].includes(user.role) ? c.sourceSystem : null,
-        sourceId: ["owner", "admin"].includes(user.role) ? c.sourceId : null,
-        points: user.role === "responsible" ? 0 : c.points,
-        totalSpent,
-        purchases: history.length,
-        lastPurchase: history[0]?.date || null,
-        tier: tier(lifetimeTotals.get(c.id) || 0, settings),
-      };
-    }),
-    expenses,
-    movements,
     closures,
-    cashEntries,
     cashPlans,
     financeBalance,
+    periodRevenue: Number(periodRows[0]?.revenue || 0),
+    periodCost: restricted ? 0 : Number(periodRows[0]?.cost || 0),
+    periodExpense,
+    responsibleRows: responsibleRows.map((row) => ({ ...row, revenue: Number(row.revenue), cost: Number(row.cost) })),
     cashExpected,
+    salesTodayTotal: Number(todaySales[0]?.total || 0),
+    salesTodayCount: Number(todaySales[0]?.count || 0),
+    lowStockCount: Number(lowRows[0]?.count || 0),
+    lowStockAlerts,
     operationsEnabled: process.env.DEMO_MODE === "true" || process.env.CLUB_OPERATIONS_APPROVED === "true",
     settings,
-    today: businessDate(settings),
+    today,
     demo: process.env.DEMO_MODE === "true",
   };
 }

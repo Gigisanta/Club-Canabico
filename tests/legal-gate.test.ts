@@ -37,7 +37,7 @@ test("real club mode blocks regulated sales until club approval", { skip: !proce
     const login = await fetch(`${base}/auth/login`, { method: "POST", headers: { Origin: "http://test.local", "Content-Type": "application/json" }, body: JSON.stringify({ email: "owner@test.local", password: "test-password-123" }) });
     assert.equal(login.status, 200);
     const headers = { Cookie: login.headers.get("set-cookie")!.split(";")[0], Origin: "http://test.local", "Content-Type": "application/json" };
-    const state = await (await fetch(`${base}/state`, { headers })).json();
+    const state = await (await fetch(`${base}/views/settings`, { headers })).json();
     assert.equal(state.operationsEnabled, false);
     const sale = await fetch(`${base}/sales`, { method: "POST", headers, body: JSON.stringify({ requestId: randomUUID(), customerId: "member", payment: "cash", items: [{ productId: "lot", quantity: 1000 }] }) });
     assert.equal(sale.status, 403);

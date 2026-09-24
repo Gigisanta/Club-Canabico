@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Plus,
@@ -12,11 +12,13 @@ import { toast } from "sonner";
 import {
   useClub,
   send,
+  useResource,
   daysBetween,
   shortDate,
   number,
   type Customer,
 } from "./lib";
+import type { Page, Sale } from "../shared/types";
 import {
   PageHeader,
   Panel,
@@ -29,8 +31,8 @@ import {
   Empty,
 } from "./ui";
 export default function Customers() {
-  const { state, money, reload, user } = useClub();
-  const [params] = useSearchParams();
+  const { state, money, reload, user, owner } = useClub();
+  const [params, setParams] = useSearchParams();
   const [query, setQuery] = useState(params.get("q") || "");
   const [segment, setSegment] = useState(params.get("segment") || "all");
   const [days, setDays] = useState(
@@ -38,25 +40,37 @@ export default function Customers() {
   );
   const [detail, setDetail] = useState<Customer | null>(null);
   const [edit, setEdit] = useState<Customer | "new" | null>(null);
+  const [debouncedQuery, setDebouncedQuery] = useState(query);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [previous, setPrevious] = useState<(string | null)[]>([]);
+  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
+  const [historyPrevious, setHistoryPrevious] = useState<(string | null)[]>([]);
+  useEffect(() => { const id = window.setTimeout(() => setDebouncedQuery(query), 250); return () => clearTimeout(id); }, [query]);
+  useEffect(() => {
+    setQuery(params.get("q") || "");
+    setSegment(params.get("segment") || "all");
+    setDays(Number(params.get("days")) || state.settings.inactiveDays);
+  }, [params, state.settings.inactiveDays]);
+  const updateParams = (key: string, value: string) => {
+    const next = new URLSearchParams(params);
+    if (value && value !== "all" && !(key === "days" && value === String(state.settings.inactiveDays))) next.set(key, value);
+    else next.delete(key);
+    setParams(next, { replace: true });
+  };
+  useEffect(() => { setCursor(null); setPrevious([]); }, [debouncedQuery, segment, days, owner]);
+  useEffect(() => { setHistoryCursor(null); setHistoryPrevious([]); }, [detail?.id]);
+  const listData = useResource<Page<Customer, { total: number; gold: number; inactive: number }>>(
+    `/list/customers?q=${encodeURIComponent(debouncedQuery)}&segment=${segment}&days=${days}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`,
+  );
+  const historyData = useResource<Page<Sale>>(
+    detail ? `/customers/${encodeURIComponent(detail.id)}/history${historyCursor ? `?cursor=${encodeURIComponent(historyCursor)}` : ""}` : null,
+  );
   const inactive = (c: Customer) =>
     daysBetween(state.today, c.lastPurchase || c.createdAt) >= days;
   const risk = (c: Customer) =>
     daysBetween(state.today, c.lastPurchase || c.createdAt) >=
       Math.floor(days / 2) && !inactive(c);
-  const list = state.customers
-    .filter(
-      (c) =>
-        `${c.name} ${c.email}`.toLowerCase().includes(query.toLowerCase()) &&
-        (segment === "all" ||
-          (segment === "inactive" && inactive(c)) ||
-          (segment === "risk" && risk(c)) ||
-          (segment === "top" && c.purchases > 0)),
-    )
-    .sort((a, b) =>
-      segment === "top"
-        ? b.totalSpent - a.totalSpent
-        : a.name.localeCompare(b.name),
-    );
+  const list = listData.data?.items || [];
   const editing = edit && edit !== "new" ? edit : null;
   const canEdit = ["owner", "admin", "cashier"].includes(user.role);
   return (
@@ -77,32 +91,32 @@ export default function Customers() {
       <div className="mini-stats">
         <span>
           <UsersThree />
-          <strong>{state.customers.length}</strong> socios
+          <strong>{listData.data?.summary.total ?? "…"}</strong> socios
         </span>
         <span>
           <Medal />
           <strong>
-            {state.customers.filter((c) => c.tier === "Oro").length}
+            {listData.data?.summary.gold ?? "…"}
           </strong>{" "}
           nivel Oro
         </span>
         <span>
           <Clock />
-          <strong>{state.customers.filter(inactive).length}</strong> inactivos
+          <strong>{listData.data?.summary.inactive ?? "…"}</strong> inactivos
         </span>
       </div>
       <Panel title="Tu comunidad">
         <div className="table-toolbar">
           <Search
             value={query}
-            onChange={setQuery}
+            onChange={(value) => { setQuery(value); updateParams("q", value); }}
             placeholder="Buscar por nombre o email…"
           />
           <div className="filter-group">
             <select
               aria-label="Segmento de socios"
               value={segment}
-              onChange={(e) => setSegment(e.target.value)}
+              onChange={(e) => { setSegment(e.target.value); updateParams("segment", e.target.value); }}
             >
               <option value="all">Todos los socios</option>
               <option value="top">Top por volumen</option>
@@ -112,7 +126,7 @@ export default function Customers() {
             <select
               aria-label="Umbral de inactividad"
               value={days}
-              onChange={(e) => setDays(Number(e.target.value))}
+              onChange={(e) => { setDays(Number(e.target.value)); updateParams("days", e.target.value); }}
             >
               {[
                 30,
@@ -197,13 +211,20 @@ export default function Customers() {
               ))}
             </tbody>
           </table>
-          {!list.length && (
+          {listData.loading && <p role="status" className="table-note">Buscando socios…</p>}
+          {!listData.loading && !list.length && (
             <Empty
               title="No hay socios en este segmento"
               description="Cambiá los filtros o registrá un nuevo socio."
             />
           )}
         </div>
+        {listData.error && <p role="alert">{listData.error}</p>}
+        {(previous.length > 0 || listData.data?.nextCursor) && <div className="table-pagination">
+          <button className="button" disabled={!previous.length} onClick={() => { setCursor(previous.at(-1) || null); setPrevious((s) => s.slice(0, -1)); }}>Anterior</button>
+          <span>Página {previous.length + 1} · {listData.data?.total || 0} resultados</span>
+          <button className="button" disabled={!listData.data?.nextCursor} onClick={() => { setPrevious((s) => [...s, cursor]); setCursor(listData.data!.nextCursor); }}>Siguiente</button>
+        </div>}
       </Panel>
       <Modal
         title={editing ? "Editar socio" : "Nuevo socio"}
@@ -221,7 +242,7 @@ export default function Customers() {
             toast.success("Socio guardado");
             setEdit(null);
             setDetail(null);
-            await reload();
+            await Promise.all([reload(), listData.reload()]);
           }}
         >
           <Field label="Nombre completo">
@@ -274,7 +295,7 @@ export default function Customers() {
               await send(`/customers/${detail.id}/permit`, { status: fd.get("status"), validUntil: fd.get("validUntil") || null }, "PATCH");
               toast.success("Estado de permiso actualizado");
               setDetail(null);
-              await reload();
+              await Promise.all([reload(), listData.reload()]);
             }}>
               <div className="form-grid"><Field label="Estado de verificación"><select name="status" defaultValue={detail.permitStatus}><option value="unverified">Sin verificar</option><option value="pending">Pendiente</option><option value="verified">Verificado</option><option value="expired">Vencido</option></select></Field><Field label="Vigente hasta"><input name="validUntil" type="date" defaultValue={detail.permitValidUntil || ""} /></Field></div>
             </Form>}
@@ -318,9 +339,7 @@ export default function Customers() {
                   </tr>
                 </thead>
                 <tbody>
-                  {state.sales
-                    .filter((s) => s.customerId === detail.id)
-                    .map((s) => (
+                  {(historyData.data?.items || []).map((s) => (
                       <tr key={s.id}>
                         <td>{shortDate(s.date)}</td>
                         <td>{s.items.map((i) => i.name).join(", ")}</td>
@@ -332,8 +351,14 @@ export default function Customers() {
                     ))}
                 </tbody>
               </table>
-              {!detail.purchases && <Empty title="Todavía no tiene compras" />}
+              {historyData.loading && <p>Cargando historial…</p>}
+              {!historyData.loading && !detail.purchases && <Empty title="Todavía no tiene compras" />}
             </div>
+            {(historyPrevious.length > 0 || historyData.data?.nextCursor) && <div className="table-pagination">
+              <button className="button" disabled={!historyPrevious.length} onClick={() => { setHistoryCursor(historyPrevious.at(-1) || null); setHistoryPrevious((s) => s.slice(0, -1)); }}>Anterior</button>
+              <span>Página {historyPrevious.length + 1} · {historyData.data?.total || 0} compras</span>
+              <button className="button" disabled={!historyData.data?.nextCursor} onClick={() => { setHistoryPrevious((s) => [...s, historyCursor]); setHistoryCursor(historyData.data!.nextCursor); }}>Siguiente</button>
+            </div>}
           </>
         )}
       </Modal>

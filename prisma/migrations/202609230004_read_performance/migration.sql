@@ -1,0 +1,11 @@
+CREATE INDEX "Product_name_id_idx" ON "Product"("name", "id");
+CREATE INDEX "Product_ownerId_name_id_idx" ON "Product"("ownerId", "name", "id");
+CREATE INDEX "Customer_name_id_idx" ON "Customer"("name", "id");
+CREATE INDEX "Sale_createdAt_id_idx" ON "Sale"("createdAt", "id");
+CREATE INDEX "Sale_date_createdAt_id_idx" ON "Sale"("date", "createdAt", "id");
+CREATE INDEX "Sale_customerId_createdAt_id_idx" ON "Sale"("customerId", "createdAt", "id");
+CREATE INDEX "CashEntry_account_date_idx" ON "CashEntry"("account", "date");
+CREATE INDEX "CashPlan_scenario_date_idx" ON "CashPlan"("scenario", "date");
+CREATE INDEX "SaleItem_ownerId_saleId_idx" ON "SaleItem"("ownerId", "saleId");
+CREATE INDEX "Movement_createdAt_id_idx" ON "Movement"("createdAt", "id");
+CREATE INDEX "Expense_date_ownerId_idx" ON "Expense"("date", "ownerId");

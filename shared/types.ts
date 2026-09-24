@@ -81,6 +81,7 @@ export interface Sale {
   payment: string;
   channel: string;
   items: SaleItem[];
+  customerName?: string;
 }
 export interface Expense {
   id: string;
@@ -104,6 +105,7 @@ export interface Movement {
   userId: string;
   note: string;
   createdAt: string;
+  product?: { name: string };
 }
 export interface Closure {
   id: string;
@@ -136,19 +138,28 @@ export interface ClubState {
   user: User;
   users: User[];
   products: Product[];
-  customers: Customer[];
-  sales: Sale[];
-  expenses: Expense[];
-  movements: Movement[];
   closures: Closure[];
-  cashEntries: CashEntry[];
   cashPlans: CashPlan[];
   financeBalance: number;
+  periodRevenue: number;
+  periodCost: number;
+  periodExpense: number;
+  responsibleRows: { ownerId: string; productId: string; name: string; revenue: number; cost: number }[];
   cashExpected: number;
+  salesTodayTotal: number;
+  salesTodayCount: number;
+  lowStockCount: number;
+  lowStockAlerts: Pick<Product, "id" | "name" | "stock" | "minimum" | "unit">[];
   operationsEnabled: boolean;
   settings: Settings;
   today: string;
   demo: boolean;
+}
+export interface Page<T, S = Record<string, number | string>> {
+  items: T[];
+  total: number;
+  nextCursor: string | null;
+  summary: S;
 }
 export const roleLabels: Record<Role, string> = {
   owner: "Dueño",

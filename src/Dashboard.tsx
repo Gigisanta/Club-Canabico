@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   AreaChart,
@@ -30,11 +30,11 @@ import {
 } from "@phosphor-icons/react";
 import {
   useClub,
-  offsetDate,
   daysBetween,
   number,
   shortDate,
   download,
+  useResource,
 } from "./lib";
 import {
   Panel,
@@ -45,6 +45,24 @@ import {
   ActionLink,
   Empty,
 } from "./ui";
+interface DashboardMetrics {
+  start: string;
+  length: number;
+  total: number;
+  before: number;
+  cost: number;
+  count: number;
+  expenses: number;
+  monthlyExpenses: number;
+  active: number;
+  returning: number;
+  customerTotal: number;
+  inactive: number;
+  chart: { date: string; revenue: number; previous: number; expenses: number }[];
+  owners: { ownerId: string; revenue: number; cost: number }[];
+  topVolume: { id: string; name: string; tier: string; amount: number; count: number }[];
+  topFrequency: { id: string; name: string; tier: string; amount: number; count: number }[];
+}
 export function Dashboard({ onSale }: { onSale: () => void }) {
   const { state, money, owner, setOwner, canSell, user } = useClub();
   const navigate = useNavigate();
@@ -52,69 +70,31 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
   const [tab, setTab] = useState("revenue");
   const [ranking, setRanking] = useState("volume");
   const [inactiveDays, setInactiveDays] = useState(state.settings.inactiveDays);
-  const start =
-    range === "today"
-      ? state.today
-      : range === "week"
-        ? offsetDate(state.today, -6)
-        : `${state.today.slice(0, 7)}-01`;
-  const length = daysBetween(state.today, start) + 1;
-  const prevStart = offsetDate(start, -length);
-  const sales = state.sales.filter(
-    (s) => s.date >= start && s.date <= state.today,
+  const metrics = useResource<DashboardMetrics>(
+    `/dashboard?${new URLSearchParams({ range, inactiveDays: String(inactiveDays), ...(owner ? { owner } : {}) })}`,
   );
-  const previous = state.sales.filter(
-    (s) => s.date >= prevStart && s.date < start,
-  );
-  const total = sales.reduce((n, s) => n + s.total, 0);
-  const before = previous.reduce((n, s) => n + s.total, 0);
-  const cost = sales.reduce((n, s) => n + s.cost, 0);
-  const expenses = state.expenses
-    .filter((e) => e.date >= start && e.date <= state.today)
-    .reduce((n, e) => n + e.amount, 0);
+  useEffect(() => {
+    const refresh = () => void metrics.reload();
+    window.addEventListener("raiz:sale-changed", refresh);
+    return () => window.removeEventListener("raiz:sale-changed", refresh);
+  }, [metrics.reload]);
+  const data = metrics.data;
   const stock = state.products.reduce(
     (n, p) => n + (p.stock * p.cost) / 1000,
     0,
   );
   const low = state.products.filter((p) => p.stock <= p.minimum);
-  const active = new Set(sales.map((s) => s.customerId));
-  const returning = [...active].filter(
-    (id) => sales.filter((s) => s.customerId === id).length > 1,
-  ).length;
-  const chart = useMemo(
-    () =>
-      Array.from({ length }, (_, i) => {
-        const date = offsetDate(start, i);
-        const old = offsetDate(date, -length);
-        return {
-          date,
-          label: shortDate(date),
-          revenue:
-            state.sales
-              .filter((s) => s.date === date)
-              .reduce((n, s) => n + s.total, 0) / 100,
-          previous:
-            state.sales
-              .filter((s) => s.date === old)
-              .reduce((n, s) => n + s.total, 0) / 100,
-          expenses:
-            state.expenses
-              .filter((e) => e.date === date)
-              .reduce((n, e) => n + e.amount, 0) / 100,
-        };
-      }),
-    [state, start, length],
-  );
+  if (!data) return <div className="page-loading" role="status">{metrics.error || "Calculando panorama del club…"}</div>;
+  const { start, total, before, cost, count, expenses, active, returning, inactive, customerTotal, monthlyExpenses } = data;
+  const chart = data.chart.map((row) => ({ ...row, label: shortDate(row.date) }));
   const owners = state.users
     .filter(
       (u) =>
         state.products.some((p) => p.ownerId === u.id) ||
-        sales.some((s) => s.items.some((i) => i.ownerId === u.id)),
+        data.owners.some((row) => row.ownerId === u.id),
     )
     .map((u) => {
-      const items = sales
-        .flatMap((s) => s.items)
-        .filter((i) => i.ownerId === u.id);
+      const ownerSales = data.owners.find((row) => row.ownerId === u.id);
       const products = state.products.filter((p) => p.ownerId === u.id);
       return {
         ...u,
@@ -122,29 +102,12 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
           user.role === "cashier"
             ? products.length
             : products.reduce((n, p) => n + (p.stock * p.cost) / 1000, 0),
-        revenue: items.reduce((n, i) => n + i.revenue, 0),
-        cost: items.reduce((n, i) => n + i.cost, 0),
+        revenue: ownerSales?.revenue || 0,
+        cost: ownerSales?.cost || 0,
         lots: products.length,
       };
     });
-  const top = state.customers
-    .map((c) => {
-      const history = sales.filter((s) => s.customerId === c.id);
-      return {
-        ...c,
-        amount: history.reduce((n, s) => n + s.total, 0),
-        count: history.length,
-      };
-    })
-    .filter((c) => c.count > 0)
-    .sort((a, b) =>
-      ranking === "volume" ? b.amount - a.amount : b.count - a.count,
-    )
-    .slice(0, 10);
-  const inactive = state.customers.filter(
-    (c) =>
-      daysBetween(state.today, c.lastPurchase || c.createdAt) >= inactiveDays,
-  );
+  const top = ranking === "volume" ? data.topVolume : data.topFrequency;
   const expiring = state.products.filter(
     (p) =>
       p.expires && daysBetween(p.expires, state.today) <= 30 && p.stock > 0,
@@ -245,22 +208,22 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
         />
         <Metric
           title="Socios activos"
-          value={number(active.size)}
+          value={number(active)}
           icon={<UsersThree size={20} />}
-          detail={`De ${state.customers.length} socios registrados`}
+          detail={`De ${customerTotal} socios registrados`}
         />
         <Metric
           title={financial ? "Margen bruto" : "Ticket promedio"}
           value={
             financial
               ? `${total ? (((total - cost) / total) * 100).toFixed(1) : "0"}%`
-              : money(sales.length ? total / sales.length : 0)
+              : money(count ? total / count : 0)
           }
           icon={<Coins size={20} />}
           detail={
             financial
               ? `${money(total - cost)} de beneficio bruto`
-              : `${sales.length} ventas registradas`
+              : `${count} ventas registradas`
           }
         />
       </div>
@@ -376,15 +339,15 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
           <div className="chart-foot">
             <span>
               Ticket promedio{" "}
-              <strong>{money(sales.length ? total / sales.length : 0)}</strong>
+              <strong>{money(count ? total / count : 0)}</strong>
             </span>
             <span>
-              Ventas realizadas <strong>{sales.length}</strong>
+              Ventas realizadas <strong>{count}</strong>
             </span>
             <span>
               Tasa de recompra{" "}
               <strong>
-                {active.size ? Math.round((returning / active.size) * 100) : 0}%
+                {active ? Math.round((returning / active) * 100) : 0}%
               </strong>
             </span>
           </div>
@@ -652,7 +615,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
               </select>
             </div>
             <strong>
-              {inactive.length} <span>socios inactivos</span>
+              {inactive} <span>socios inactivos</span>
             </strong>
             <p>
               Hace más de {inactiveDays} días que no visitan el club.
@@ -714,22 +677,14 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
           <Panel title="Gastos bajo control" sub="Presupuesto mensual">
             <div className="budget-value">
               <strong>
-                {money(
-                  state.expenses
-                    .filter(
-                      (e) =>
-                        e.date.startsWith(state.today.slice(0, 7)) &&
-                        e.date <= state.today,
-                    )
-                    .reduce((n, e) => n + e.amount, 0),
-                )}
+                {money(monthlyExpenses)}
               </strong>
               <span>de {money(state.settings.budget)}</span>
             </div>
             <div className="budget-track">
               <i
                 style={{
-                  width: `${Math.min(100, (state.expenses.filter((e) => e.date.startsWith(state.today.slice(0, 7)) && e.date <= state.today).reduce((n, e) => n + e.amount, 0) / (state.settings.budget || 1)) * 100)}%`,
+                  width: `${Math.min(100, (monthlyExpenses / (state.settings.budget || 1)) * 100)}%`,
                 }}
               />
             </div>

@@ -40,7 +40,7 @@ test(
       data: {
         id: "customer",
         name: "Cliente de prueba",
-        email: "",
+        email: "hidden@example.test",
         phone: "",
         points: 200,
       },
@@ -107,7 +107,7 @@ test(
     }
     try {
       await t.test("requires session and rejects foreign origins", async () => {
-        assert.equal((await fetch(base + "/state")).status, 401);
+        assert.equal((await fetch(base + "/views/dashboard")).status, 401);
         assert.equal(
           (
             await fetch(base + "/products", {
@@ -127,12 +127,14 @@ test(
         "viewer cannot mutate; responsible cannot read or move another owner stock",
         async () => {
           assert.equal((await call("/products", "viewer", {})).status, 403);
-          const state = await (await call("/state?owner=r2", "r1")).json();
+          const state = await (await call("/list/products?owner=r2", "r1")).json();
           assert.deepEqual(
-            state.products.map((p: { id: string }) => p.id),
+            state.items.map((p: { id: string }) => p.id),
             ["p1"],
           );
-          assert.equal(state.users.length, 1);
+          assert.equal((await (await call("/views/inventory?owner=r2", "r1")).json()).users.length, 1);
+          assert.equal((await (await call("/list/customers?q=hidden%40example.test", "viewer")).json()).total, 0);
+          assert.equal((await (await call("/list/customers?q=hidden%40example.test", "owner")).json()).total, 1);
           assert.equal(
             (
               await call("/products/p2/movements", "r1", {
@@ -241,18 +243,32 @@ test(
             ).status,
             201,
           );
-          const state = await (await call("/state", "r1")).json();
-          assert.equal(state.products.length, 0);
-          assert.equal(state.sales.length, 1);
-          assert.equal(state.sales[0].items[0].ownerId, "r1");
-          assert.equal(state.customers[0].totalSpent,1900);
-          assert.equal(state.customers[0].tier,'Plata');
-          const ledger=await(await call('/movements?page=1&owner=r2','r1')).json();
-          assert(ledger.rows.every((m:{fromOwner:string;toOwner:string})=>m.fromOwner==='r1'||m.toOwner==='r1'));
-          const cashier = await (await call("/state", "cashier")).json();
+          const state = await (await call("/views/dashboard", "r1")).json();
+          assert.equal((await (await call("/views/inventory", "r1")).json()).products.length, 0);
+          assert.equal("sales" in state, false);
+          assert.equal("customers" in state, false);
+          const history = await (await call("/customers/customer/history", "r1")).json();
+          assert.equal(history.items.length, 1);
+          assert.equal(history.items[0].items[0].ownerId, "r1");
+          assert.equal(history.items[0].subtotal, 2000);
+          assert.equal(history.items[0].discount, 100);
+          assert.equal(history.items[0].pointsEarned, 0);
+          const salePage = await (await call("/list/sales", "r1")).json();
+          assert.equal(salePage.items[0].subtotal, 2000);
+          assert.equal(salePage.items[0].discount, 100);
+          const customers = await (await call("/list/customers", "r1")).json();
+          assert.equal(customers.items[0].totalSpent, 1900);
+          assert.equal(customers.items[0].tier, "Plata");
+          const dashboard = await (await call("/dashboard?range=month", "r1")).json();
+          assert.equal(dashboard.total, 1900);
+          assert.equal(dashboard.active, 1);
+          assert.equal(dashboard.customerTotal, 1);
+          const ledger=await(await call('/movements?owner=r2','r1')).json();
+          assert(ledger.items.every((m:{fromOwner:string;toOwner:string})=>m.fromOwner==='r1'||m.toOwner==='r1'));
+          const cashier = await (await call("/views/dashboard", "cashier")).json();
           assert(cashier.products.every((p: { cost: number }) => p.cost === 0));
-          assert(cashier.sales.every((s: { cost: number }) => s.cost === 0));
-          assert.equal(cashier.expenses.length, 0);
+          assert.equal("sales" in cashier, false);
+          assert.equal("expenses" in cashier, false);
         },
       );
       await t.test(
@@ -297,12 +313,12 @@ test(
       await t.test("permit verification is restricted and finance entries are idempotent", async () => {
         assert.equal((await call("/customers/customer/permit", "cashier", { status: "verified", validUntil: "2027-01-01" }, "PATCH")).status, 403);
         assert.equal((await call("/customers/customer/permit", "owner", { status: "verified", validUntil: "2027-01-01" }, "PATCH")).status, 200);
-        const cashier = await (await call("/state", "cashier")).json();
-        assert.equal(cashier.customers.find((c: {id: string}) => c.id === "customer").permitStatus, "verified");
-        const responsible = await (await call("/state", "r1")).json();
-        assert.equal(responsible.customers.find((c: {id: string}) => c.id === "customer").permitStatus, "unverified");
-        const viewer = await (await call("/state", "viewer")).json();
-        const masked = viewer.customers.find((c: {id: string}) => c.id === "customer");
+        const cashier = await (await call("/views/dashboard", "cashier")).json();
+        assert.equal((await (await call("/list/customers", "cashier")).json()).items.find((c: {id: string}) => c.id === "customer").permitStatus, "verified");
+        const responsible = await (await call("/list/customers", "r1")).json();
+        assert.equal(responsible.items.find((c: {id: string}) => c.id === "customer").permitStatus, "unverified");
+        const viewer = await (await call("/list/customers", "viewer")).json();
+        const masked = viewer.items.find((c: {id: string}) => c.id === "customer");
         assert.equal(masked.permitStatus, "unverified");
         assert.equal(masked.email, "");
         assert.equal(masked.notes, "");
@@ -397,6 +413,69 @@ test(
           );
         },
       );
+      await t.test("bounded pages are stable and checkout reads keep role gates", async () => {
+        await db.customer.createMany({ data: Array.from({ length: 61 }, (_, i) => ({
+          id: `paged-c-${i}`, name: `Paginado ${String(i).padStart(3, "0")}`, email: "", phone: "",
+        })) });
+        await db.product.createMany({ data: Array.from({ length: 61 }, (_, i) => ({
+          id: `paged-p-${i}`, name: `Paginado ${String(i).padStart(3, "0")}`, strain: "Test", type: "Flor",
+          lot: `paged-${i}`, stock: 1000, minimum: 500, cost: 100, price: 200,
+          location: "A", ownerId: "r1",
+        })) });
+        await db.sale.createMany({ data: Array.from({ length: 61 }, (_, i) => ({
+          id: `paged-s-${i}`, customerId: `paged-c-${i}`, userId: "owner", date: "2026-01-01",
+          subtotal: 100, discount: 0, total: 100, cost: 50, pointsEarned: 0, pointsUsed: 0,
+          payment: "cash", requestId: `paged-request-${i}`,
+        })) });
+        for (const path of ["/list/customers?q=Paginado", "/list/customers?q=Paginado&segment=top", "/list/products?q=Paginado", "/list/sales?date=2026-01-01"]) {
+          const first = await (await call(path)).json();
+          assert.equal(first.items.length, 50);
+          assert(first.nextCursor);
+          const second = await (await call(`${path}&cursor=${encodeURIComponent(first.nextCursor)}`)).json();
+          assert.equal(second.items.length, 11);
+          assert.equal(second.nextCursor, null);
+          assert.equal(new Set([...first.items, ...second.items].map((x: { id: string }) => x.id)).size, 61);
+        }
+        assert.equal((await call("/checkout/customers?q=cliente", "viewer")).status, 403);
+        assert.equal((await call("/checkout/products", "viewer")).status, 403);
+        const scoped = await (await call("/list/products?q=Paginado&owner=r2", "r1")).json();
+        assert.equal(scoped.total, 61);
+        assert(scoped.items.every((p: { ownerId: string }) => p.ownerId === "r1"));
+      });
+      await t.test("financial aggregates and ledger pages preserve totals and roles", async () => {
+        const finance = await (await call("/views/finance", "owner")).json();
+        const monthStart = `${finance.today.slice(0, 7)}-01`;
+        const saleTotals = await db.sale.aggregate({ where: { date: { gte: monthStart, lte: finance.today } },
+          _sum: { total: true, cost: true } });
+        assert.equal(finance.periodRevenue, saleTotals._sum.total || 0);
+        assert.equal(finance.periodCost, saleTotals._sum.cost || 0);
+        assert.equal("sales" in finance, false);
+        const responsible = await (await call("/views/responsibles", "owner")).json();
+        const itemTotals = await db.saleItem.aggregate({ where: { sale: { date: { gte: monthStart, lte: finance.today } } },
+          _sum: { revenue: true, cost: true } });
+        assert.equal(responsible.responsibleRows.reduce((sum: number, row: { revenue: number }) => sum + row.revenue, 0), itemTotals._sum.revenue || 0);
+        assert.equal(responsible.responsibleRows.reduce((sum: number, row: { cost: number }) => sum + row.cost, 0), itemTotals._sum.cost || 0);
+        await db.expense.createMany({ data: Array.from({ length: 61 }, (_, i) => ({
+          id: `paged-e-${i}`, name: `Paged expense ${i}`, amount: 100, category: "Test", kind: "variable",
+          date: finance.today, ownerId: "r1",
+        })) });
+        await db.cashEntry.createMany({ data: Array.from({ length: 61 }, (_, i) => ({
+          id: `paged-cash-${i}`, date: finance.today, account: "bank", category: "adjustment",
+          amount: 100, description: `Paged entry ${i}`, userId: "owner",
+        })) });
+        const expenses = await (await call(`/list/expenses?month=${finance.today.slice(0, 7)}&q=Paged`, "owner")).json();
+        assert.equal(expenses.items.length, 50);
+        const expensesNext = await (await call(`/list/expenses?month=${finance.today.slice(0, 7)}&q=Paged&cursor=${encodeURIComponent(expenses.nextCursor)}`, "owner")).json();
+        assert.equal(expensesNext.items.length, 11);
+        assert.equal(expenses.summary.total, (await db.expense.aggregate({ where: { date: { startsWith: finance.today.slice(0, 7) } }, _sum: { amount: true } }))._sum.amount);
+        const ledger = await (await call("/list/cash-entries", "owner")).json();
+        assert.equal(ledger.items.length, 50);
+        const ledgerNext = await (await call(`/list/cash-entries?cursor=${encodeURIComponent(ledger.nextCursor)}`, "owner")).json();
+        assert(new Set([...ledger.items, ...ledgerNext.items].map((row: { id: string }) => row.id)).size > 50);
+        assert.equal((await call("/list/cash-entries", "cashier")).status, 403);
+        assert.equal((await call(`/list/expenses?month=${finance.today.slice(0, 7)}`, "cashier")).status, 200);
+        assert.equal((await (await call(`/list/expenses?month=${finance.today.slice(0, 7)}`, "cashier")).json()).items.length, 0);
+      });
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
       await db.$executeRawUnsafe(`DROP SCHEMA "${schema}" CASCADE`);

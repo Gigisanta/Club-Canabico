@@ -2,7 +2,8 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { Wallet, Package, ChartBar, ArrowRight } from "@phosphor-icons/react";
-import { useClub, send, offsetDate, shortDate, number } from "./lib";
+import { useClub, send, offsetDate, shortDate, number, useResource } from "./lib";
+import type { CashEntry, Page } from "../shared/types";
 import { PageHeader, Panel, Modal, Form, Field, Metric, Empty } from "./ui";
 
 const categories: Record<string, string> = {
@@ -28,16 +29,18 @@ export default function Finance() {
   const [entryKey, setEntryKey] = useState(() => crypto.randomUUID());
   const [scenario, setScenario] = useState<(typeof scenarios)[number]>("base");
   const [view, setView] = useState<"overview" | "forecast" | "activity">("overview");
+  const [cashCursor, setCashCursor] = useState<string | null>(null);
+  const [cashPrevious, setCashPrevious] = useState<(string | null)[]>([]);
+  const cashPage = useResource<Page<CashEntry>>(view === "activity"
+    ? `/list/cash-entries${cashCursor ? `?cursor=${encodeURIComponent(cashCursor)}` : ""}` : null);
   const today = state.today;
   const cash = state.financeBalance;
   const stock = state.products.reduce((n, p) => n + Math.round(p.stock * p.cost / 1000), 0);
   const withoutSupplier = state.products.filter((p) => !p.supplier).length;
   const currentPlans = state.cashPlans.filter((p) => p.scenario === scenario);
-  const month = today.slice(0, 7);
-  const monthSales = state.sales.filter((s) => s.date.startsWith(month));
-  const revenue = monthSales.reduce((n, s) => n + s.total, 0);
-  const cogs = monthSales.reduce((n, s) => n + s.cost, 0);
-  const expenses = state.expenses.filter((e) => e.date.startsWith(month)).reduce((n, e) => n + e.amount, 0);
+  const revenue = state.periodRevenue;
+  const cogs = state.periodCost;
+  const expenses = state.periodExpense;
   let running = cash;
   const weeks = Array.from({ length: 13 }, (_, i) => {
     const from = offsetDate(today, i * 7 + 1);
@@ -64,6 +67,7 @@ export default function Finance() {
     toast.success(mode === "entry" ? "Movimiento registrado" : "Proyección registrada");
     setMode(null);
     await reload();
+    if (mode === "entry") { setCashCursor(null); setCashPrevious([]); await cashPage.reload(); }
   }
   return <>
     <PageHeader eyebrow="BASE FINANCIERA · EN CONCILIACIÓN" title="Caja y planificación" description="Seguí el dinero real, el capital en stock y los compromisos que vienen. Validá cada cifra contra AppSheet, Sheets y comprobantes." actions={<>
@@ -112,9 +116,12 @@ export default function Finance() {
     </div>}
     {view === "activity" && <div className="finance-section">
     <div className="finance-callout activity"><span className="finance-callout-index">03 / REGISTRO</span><div><strong>Movimientos reales</strong><p>Las ventas locales entran automáticamente. Un gasto cargado en Gastos se refleja en caja cuando registrás su pago acá.</p></div><button onClick={() => { setEntryKey(crypto.randomUUID()); setMode("entry"); }}>Nuevo movimiento <ArrowRight size={16} /></button></div>
-    <Panel title="Movimientos reales" sub="Últimos 2.000 movimientos. Las ventas locales se registran automáticamente. Los gastos cargados en el módulo Gastos no descuentan caja hasta registrar su pago aquí.">
-      <div className="table-scroll"><table><thead><tr><th>Fecha</th><th>Cuenta</th><th>Categoría</th><th>Detalle</th><th>Origen</th><th className="numeric">Importe</th></tr></thead><tbody>{state.cashEntries.map((e) => <tr key={e.id}><td>{shortDate(e.date)}</td><td>{e.account === "cash" ? "Efectivo" : "Banco"}</td><td>{categories[e.category] || e.category}</td><td className="table-name">{e.description}</td><td><span className="source-id" title={e.sourceSystem && e.sourceId ? `${e.sourceSystem} · ${e.sourceId}` : "App local"}>{e.sourceSystem && e.sourceId ? `${e.sourceSystem} · ${e.sourceId}` : "App local"}</span></td><td className="numeric amount">{money(e.amount)}</td></tr>)}</tbody></table></div>
-      {!state.cashEntries.length && <Empty title="Todavía no hay movimientos" description="Registrá un saldo inicial conciliado o el primer movimiento real." />}
+    <Panel title="Movimientos reales" sub="Historial por páginas. Las ventas locales se registran automáticamente. Los gastos cargados en Gastos descuentan caja al registrar su pago aquí.">
+      {cashPage.loading && <p role="status" className="muted">Cargando movimientos…</p>}
+      {cashPage.error && <p role="alert">{cashPage.error}</p>}
+      <div className="table-scroll"><table><thead><tr><th>Fecha</th><th>Cuenta</th><th>Categoría</th><th>Detalle</th><th>Origen</th><th className="numeric">Importe</th></tr></thead><tbody>{cashPage.data?.items.map((e) => <tr key={e.id}><td>{shortDate(e.date)}</td><td>{e.account === "cash" ? "Efectivo" : "Banco"}</td><td>{categories[e.category] || e.category}</td><td className="table-name">{e.description}</td><td><span className="source-id" title={e.sourceSystem && e.sourceId ? `${e.sourceSystem} · ${e.sourceId}` : "App local"}>{e.sourceSystem && e.sourceId ? `${e.sourceSystem} · ${e.sourceId}` : "App local"}</span></td><td className="numeric amount">{money(e.amount)}</td></tr>)}</tbody></table></div>
+      {cashPage.data && !cashPage.data.items.length && <Empty title="Todavía no hay movimientos" description="Registrá un saldo inicial conciliado o el primer movimiento real." />}
+      {cashPage.data && <div className="list-pagination"><span>Página {cashPrevious.length + 1} · {cashPage.data.total} movimientos</span><div><button className="button" disabled={!cashPrevious.length} onClick={() => { setCashCursor(cashPrevious.at(-1) || null); setCashPrevious((rows) => rows.slice(0, -1)); }}>Anterior</button><button className="button" disabled={!cashPage.data.nextCursor} onClick={() => { setCashPrevious((rows) => [...rows, cashCursor]); setCashCursor(cashPage.data!.nextCursor); }}>Siguiente</button></div></div>}
     </Panel>
     </div>}
     <Modal title={mode === "entry" ? "Registrar movimiento real" : "Agregar partida proyectada"} open={mode !== null} onClose={() => setMode(null)}>

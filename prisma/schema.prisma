@@ -53,6 +53,8 @@ model Product {
   items SaleItem[]
   movements Movement[]
   @@index([ownerId])
+  @@index([name, id])
+  @@index([ownerId, name, id])
   @@unique([sourceSystem, sourceId])
 }
 model Customer {
@@ -70,6 +72,7 @@ model Customer {
   createdAt DateTime @default(now())
   sales Sale[]
   @@unique([sourceSystem, sourceId])
+  @@index([name, id])
 }
 model Sale {
   id String @id @default(cuid())
@@ -92,6 +95,9 @@ model Sale {
   cashEntry CashEntry?
   @@index([date])
   @@index([customerId])
+  @@index([createdAt, id])
+  @@index([date, createdAt, id])
+  @@index([customerId, createdAt, id])
 }
 model CashEntry {
   id String @id @default(cuid())
@@ -109,6 +115,8 @@ model CashEntry {
   createdAt DateTime @default(now())
   @@unique([sourceSystem, sourceId])
   @@index([date, account])
+  @@index([date, createdAt, id])
+  @@index([account, date])
 }
 model CashPlan {
   id String @id @default(cuid())
@@ -122,6 +130,7 @@ model CashPlan {
   user User @relation(fields: [userId], references: [id])
   createdAt DateTime @default(now())
   @@index([date, scenario])
+  @@index([scenario, date])
 }
 model SaleItem {
   id String @id @default(cuid())
@@ -137,6 +146,8 @@ model SaleItem {
   cost Int
   revenue Int
   @@index([ownerId])
+  @@index([ownerId, saleId])
+  @@index([saleId])
 }
 model Movement {
   id String @id @default(cuid())
@@ -155,6 +166,7 @@ model Movement {
   note String
   createdAt DateTime @default(now())
   @@index([productId, createdAt])
+  @@index([createdAt, id])
 }
 model Expense {
   id String @id @default(cuid())
@@ -169,7 +181,8 @@ model Expense {
   ruleId String?
   rule RecurringRule? @relation(fields: [ruleId], references: [id])
   @@unique([ruleId, date])
-  @@index([date])
+  @@index([date, id])
+  @@index([ownerId, date, id])
 }
 model RecurringRule {
   id String @id @default(cuid())

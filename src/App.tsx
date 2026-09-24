@@ -40,8 +40,9 @@ import {
   type ClubState,
 } from "./lib";
 import { Avatar, Brand, Modal, Field, Form, Empty } from "./ui";
-import { Dashboard } from "./Dashboard";
-import Sales, { SaleModal } from "./Sales";
+const Dashboard = lazy(() => import("./Dashboard").then((m) => ({ default: m.Dashboard })));
+const Sales = lazy(() => import("./Sales"));
+const SaleModal = lazy(() => import("./Sales").then((m) => ({ default: m.SaleModal })));
 const Inventory = lazy(() => import("./Inventory"));
 const Customers = lazy(() => import("./Customers"));
 
@@ -218,16 +219,28 @@ function Workspace({
 }) {
   const [owner, setOwner] = useState("");
   const [saleOpen, setSaleOpen] = useState(false);
+  const [saleLoaded, setSaleLoaded] = useState(false);
+  const openSale = () => { setSaleLoaded(true); setSaleOpen(true); };
   const [menu, setMenu] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [searchTerm, setSearchTerm] = useState("");
   const [notifications, setNotifications] = useState(false);
   const [profile, setProfile] = useState(false);
+  const location = useLocation();
+  const view = ({
+    "/": "dashboard", "/inventario": "inventory", "/socios": "customers",
+    "/ventas": "sales", "/gastos": "expenses", "/finanzas": "finance",
+    "/responsables": "responsibles", "/reportes": "reports", "/configuracion": "settings",
+  } as Record<string, string>)[location.pathname] || "dashboard";
   const resource = useResource<ClubState>(
-    `/state${owner ? `?owner=${encodeURIComponent(owner)}` : ""}`,
+    `/views/${view}?${new URLSearchParams({ ...(owner ? { owner } : {}), ...(view === "expenses" && new URLSearchParams(location.search).get("month") ? { month: new URLSearchParams(location.search).get("month")! } : {}) })}`,
+  );
+  useEffect(() => { const id = window.setTimeout(() => setSearchTerm(query.trim()), 220); return () => clearTimeout(id); }, [query]);
+  const searchData = useResource<{ items: { name: string; type: string; path: string }[] }>(
+    searchOpen && searchTerm ? `/search?q=${encodeURIComponent(searchTerm)}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}` : null,
   );
   const state = resource.data;
-  const location = useLocation();
   const navigate = useNavigate();
   const isManager = ["owner", "admin"].includes(user.role);
   const canManage = ["owner", "admin", "responsible"].includes(user.role);
@@ -271,8 +284,7 @@ function Workspace({
         )}
       </div>
     );
-  const low = state.products.filter((p) => p.stock <= p.minimum);
-  const alerts = low.length;
+  const alerts = state.lowStockCount;
   const nav = navigation.filter(
     (n) =>
       (user.role !== "cashier" || !["/gastos", "/finanzas", "/reportes", "/responsables"].includes(n.path)) &&
@@ -462,17 +474,17 @@ function Workspace({
                 </div>
               }
             >
-              <Routes key={location.pathname + location.search}>
+              <Routes key={location.pathname}>
                 <Route
                   path="/"
-                  element={<Dashboard onSale={() => setSaleOpen(true)} />}
+                  element={<Dashboard onSale={openSale} />}
                 />
                 <Route path="/inventario" element={<Inventory />} />
                 <Route path="/socios" element={<Customers />} />
                 <Route path="/finanzas" element={isManager ? <Finance /> : <Navigate to="/" replace />} />
                 <Route
                   path="/ventas"
-                  element={<Sales onSale={() => setSaleOpen(true)} />}
+                  element={<Sales onSale={openSale} />}
                 />
                 <Route
                   path="/gastos"
@@ -510,7 +522,9 @@ function Workspace({
           </main>
         </div>
       </div>
-      <SaleModal open={saleOpen} onClose={() => setSaleOpen(false)} />
+      <Suspense fallback={null}>
+        {saleLoaded && <SaleModal open={saleOpen} onClose={() => setSaleOpen(false)} />}
+      </Suspense>
       <Modal
         title="Buscar en el club"
         open={searchOpen}
@@ -532,16 +546,7 @@ function Workspace({
               type: "Sección",
               path: n.path,
             })),
-            ...state.products.map((p) => ({
-              name: p.name,
-              type: p.lot,
-              path: "/inventario",
-            })),
-            ...state.customers.map((c) => ({
-              name: c.name,
-              type: "Socio",
-              path: "/socios",
-            })),
+            ...(searchData.data?.items || []),
           ]
             .filter((x) => x.name.toLowerCase().includes(query.toLowerCase()))
             .slice(0, 12)
@@ -562,6 +567,8 @@ function Workspace({
                 <ArrowRight />
               </button>
             ))}
+          {searchData.loading && searchTerm && <p role="status" className="table-note">Buscando…</p>}
+          {searchData.error && <p role="alert">{searchData.error}</p>}
         </div>
       </Modal>
       <Modal
@@ -570,8 +577,8 @@ function Workspace({
         open={notifications}
         onClose={() => setNotifications(false)}
       >
-        {low.length ? (
-          low.map((p) => (
+        {state.lowStockAlerts.length ? (
+          state.lowStockAlerts.map((p) => (
             <div className="notification-row" key={p.id}>
               <span className="alert-symbol">
                 <Package />

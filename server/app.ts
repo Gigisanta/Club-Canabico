@@ -18,7 +18,9 @@ import { z } from "zod";
 import { parse } from "csv-parse/sync";
 import { db, atomic, getSettings } from "./db.js";
 import { businessDate, nextDate, priceSale, allocateRevenue } from "../shared/domain.js";
-import { getState, publicUser, ownerScope } from "./state.js";
+import { getState, publicUser } from "./state.js";
+import { customerPage, productPage, checkoutCustomers, checkoutProducts, salesPage, customerHistory, globalSearch, cashEntryPage, expensePage, movementPage } from "./read.js";
+import { dashboardMetrics } from "./dashboard.js";
 import {
   productSchema,
   customerSchema,
@@ -178,39 +180,38 @@ app.get("/api/auth/me", auth, (req, res) =>
   }),
 );
 app.use("/api", auth);
-app.get("/api/state", async (req, res) =>
+app.get("/api/views/:view", async (req, res) =>
   res.json(
     await getState(
       req.user,
       typeof req.query.owner === "string" ? req.query.owner : undefined,
+      z.enum(["dashboard", "inventory", "customers", "sales", "expenses", "finance", "responsibles", "reports", "settings"]).parse(req.params.view),
+      req.params.view === "expenses" && req.query.month !== undefined
+        ? z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).parse(req.query.month)
+        : undefined,
     ),
   ),
 );
-app.get("/api/movements", async (req, res) => {
-  const page = z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(100000)
-    .parse(req.query.page || 1);
-  const ownerId = ownerScope(
-    req.user,
-    typeof req.query.owner === "string" ? req.query.owner : undefined,
-  );
-  const where: Prisma.MovementWhereInput = ownerId
-    ? { OR: [{ fromOwner: ownerId }, { toOwner: ownerId }] }
-    : {};
-  const [rows, total] = await Promise.all([
-    db.movement.findMany({
-      where,
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      skip: (page - 1) * 100,
-      take: 100,
-    }),
-    db.movement.count({ where }),
-  ]);
-  res.json({ rows, total });
-});
+app.get("/api/list/customers", async (req, res) =>
+  res.json(await customerPage(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined, req.query)));
+app.get("/api/dashboard", async (req, res) =>
+  res.json(await dashboardMetrics(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined, req.query)));
+app.get("/api/list/products", async (req, res) =>
+  res.json(await productPage(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined, req.query)));
+app.get("/api/list/sales", async (req, res) =>
+  res.json(await salesPage(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined, req.query)));
+app.get("/api/list/cash-entries", async (req, res) => res.json(await cashEntryPage(req.user, req.query)));
+app.get("/api/list/expenses", async (req, res) =>
+  res.json(await expensePage(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined, req.query)));
+app.get("/api/checkout/customers", roles("owner", "admin", "cashier", "responsible"), async (req, res) => res.json(await checkoutCustomers(req.user, req.query.q)));
+app.get("/api/checkout/products", roles("owner", "admin", "cashier", "responsible"), async (req, res) =>
+  res.json(await checkoutProducts(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined)));
+app.get("/api/customers/:id/history", async (req, res) =>
+  res.json(await customerHistory(req.user, String(req.params.id), req.query)));
+app.get("/api/search", async (req, res) =>
+  res.json(await globalSearch(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined, req.query.q)));
+app.get("/api/movements", async (req, res) =>
+  res.json(await movementPage(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined, req.query)));
 async function validOwner(id: string) {
   const owner = await db.user.findUnique({ where: { id } });
   if (!owner || !["responsible", "owner", "admin"].includes(owner.role))
@@ -731,12 +732,22 @@ app.post("/api/import", roles("owner", "admin"), async (req, res) => {
     where: { role: { in: ["owner", "admin", "responsible"] } },
     select: { id: true },
   });
-  const lots = new Set(
-    (await db.product.findMany({ select: { lot: true } })).map((p) => p.lot),
-  );
-  const existingProducts = await db.product.findMany();
-  const existingCustomers = await db.customer.findMany();
-  const existingCashEntries = v.kind === "cash_entries" ? await db.cashEntry.findMany() : [];
+  const ownerIds = new Set(owners.map((o) => o.id));
+  const sourceSystems = [...new Set(rows.map((r) => r.sourceSystem).filter(Boolean))];
+  const sourceIds = [...new Set(rows.map((r) => r.sourceId).filter(Boolean))];
+  const sourceWhere = sourceSystems.length && sourceIds.length
+    ? { sourceSystem: { in: sourceSystems }, sourceId: { in: sourceIds } }
+    : null;
+  const existingProducts = v.kind === "products" ? await db.product.findMany({
+    where: { OR: [{ lot: { in: rows.map((r) => r.lot).filter(Boolean) } }, ...(sourceWhere ? [sourceWhere] : [])] },
+  }) : [];
+  const existingCustomers = v.kind === "customers" && sourceWhere ? await db.customer.findMany({ where: sourceWhere }) : [];
+  const existingCashEntries = v.kind === "cash_entries" && sourceWhere ? await db.cashEntry.findMany({ where: sourceWhere }) : [];
+  const lots = new Set(existingProducts.map((p) => p.lot));
+  const productsByLot = new Map(existingProducts.map((p) => [p.lot, p]));
+  const productsBySource = new Map(existingProducts.map((p) => [`${p.sourceSystem}\u0000${p.sourceId}`, p]));
+  const customersBySource = new Map(existingCustomers.map((c) => [`${c.sourceSystem}\u0000${c.sourceId}`, c]));
+  const cashBySource = new Map(existingCashEntries.map((c) => [`${c.sourceSystem}\u0000${c.sourceId}`, c]));
   const latestClosure = v.kind === "cash_entries" ? await db.closure.findFirst({ orderBy: { date: "desc" } }) : null;
   const today = businessDate(await getSettings());
   const sourceKeys = new Set<string>();
@@ -758,12 +769,12 @@ app.post("/api/import", roles("owner", "admin"), async (req, res) => {
         if (!p.sourceSystem || !p.sourceId) throw new Error("Cada lote importado requiere sourceSystem y sourceId");
         if (p.unit === "ud" && (p.stock % 1000 !== 0 || p.minimum % 1000 !== 0))
           throw new Error("Las unidades deben ser enteras");
-        if (!owners.some((o) => o.id === p.ownerId))
+        if (!ownerIds.has(p.ownerId))
           throw new Error("Responsable desconocido");
         const key = `${p.sourceSystem}\u0000${p.sourceId}`;
         if (sourceKeys.has(key)) throw new Error("ID de origen repetido en el archivo");
         sourceKeys.add(key);
-        const prior = existingProducts.find((e) => e.lot === p.lot || (e.sourceSystem === p.sourceSystem && e.sourceId === p.sourceId));
+        const prior = productsByLot.get(p.lot) || productsBySource.get(key);
         if (prior) {
           if (prior.lot !== p.lot || prior.sourceSystem !== p.sourceSystem || prior.sourceId !== p.sourceId ||
               prior.name !== p.name || prior.strain !== p.strain || prior.type !== p.type || prior.unit !== p.unit ||
@@ -787,7 +798,7 @@ app.post("/api/import", roles("owner", "admin"), async (req, res) => {
         const key = `${c.sourceSystem}\u0000${c.sourceId}`;
         if (sourceKeys.has(key)) throw new Error("ID de origen repetido en el archivo");
         sourceKeys.add(key);
-        const prior = existingCashEntries.find((e) => e.sourceSystem === c.sourceSystem && e.sourceId === c.sourceId);
+        const prior = cashBySource.get(key);
         if (prior) {
           if (prior.date !== c.date || prior.account !== c.account || prior.category !== c.category || prior.amount !== c.amount || prior.description !== c.description)
             throw new Error("Movimiento de origen existente con datos diferentes; conciliar antes de importar");
@@ -810,7 +821,7 @@ app.post("/api/import", roles("owner", "admin"), async (req, res) => {
         const key = `${c.sourceSystem}\u0000${c.sourceId}`;
         if (sourceKeys.has(key)) throw new Error("ID de origen repetido en el archivo");
         sourceKeys.add(key);
-        const prior = existingCustomers.find((e) => e.sourceSystem === c.sourceSystem && e.sourceId === c.sourceId);
+        const prior = customersBySource.get(key);
         if (prior) {
           if (prior.name !== c.name || prior.email !== c.email || prior.phone !== c.phone || prior.notes !== c.notes) throw new Error("Socio de origen existente con datos diferentes; conciliar antes de importar");
           skipped++;
@@ -865,7 +876,7 @@ app.get(
     const from = req.query.from ? date.parse(req.query.from) : undefined;
     const to = req.query.to ? date.parse(req.query.to) : undefined;
     if (from && to && from > to) throw new HttpError(400, "Rango inválido");
-    await exportReport(res, await getState(req.user, owner), format, from, to);
+    await exportReport(res, req.user, owner, format, from, to);
   },
 );
 app.use("/api", (_req, res) =>

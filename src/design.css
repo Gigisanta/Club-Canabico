@@ -386,3 +386,10 @@ tfoot th { border-top: 2px solid #c7d7c4; color: var(--text); font-size: 11px; }
 @media print {
   body [role="dialog"], body [role="dialog"] * { color: #111 !important; background: #fff !important; }
 }
+@keyframes raiz-dialog-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.modal-body { animation: raiz-dialog-enter 180ms ease-out both; }
+@media (prefers-reduced-motion: reduce) { .modal-body { animation: none; } }
+.stock-expand svg { transition: transform 180ms ease; }
+@keyframes raiz-expand-enter { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+.expandable-body { animation: raiz-expand-enter 180ms ease-out both; }
+@media (prefers-reduced-motion: reduce) { .expandable-body, .stock-expand svg { animation: none; transition: none; } }

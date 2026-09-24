@@ -72,6 +72,8 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await page.getByRole("link", { name: "Ventas y caja" }).click();
   await page.getByRole("button", { name: "Nueva venta" }).click();
   dialog = page.getByRole("dialog");
+  await dialog.getByRole("searchbox", { name: "Buscar socio" }).fill(customer);
+  await expect(dialog.getByLabel("Socio", { exact: true }).locator("option").filter({ hasText: customer })).toHaveCount(1);
   await dialog
     .getByLabel("Socio", { exact: true })
     .selectOption({ label: `${customer} · Bronce` });
@@ -100,7 +102,9 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await expect(page.getByText(product, { exact: true })).toBeVisible();
   await page.getByRole("link", { name: "Socios y fidelización" }).click();
   await page.getByPlaceholder("Buscar por nombre o email…").fill(customer);
-  await page.getByRole("button", { name: "Ver ficha" }).click();
+  const customerRow = page.getByRole("row", { name: new RegExp(customer) });
+  await expect(customerRow).toBeVisible();
+  await customerRow.getByRole("button", { name: "Ver ficha" }).click();
   await expect(page.locator(".detail-stats")).toContainText("20.000,00");
   await expect(page.locator(".detail-stats")).toContainText("2");
   await page.getByRole("button", { name: "Cerrar", exact: true }).click();
@@ -126,7 +130,13 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
     await expect(
       page.getByRole("heading", { name: heading, exact: true }),
     ).toBeVisible();
-    if (label === "Caja y planificación") await expect(page.getByRole("heading", { name: "Capital en inventario" })).toBeVisible();
+    if (label === "Gastos") await expect(page.getByRole("heading", { name: "Registro de gastos" })).toBeVisible();
+    if (label === "Caja y planificación") {
+      await expect(page.getByRole("heading", { name: "Capital en inventario" })).toBeVisible();
+      await page.getByRole("button", { name: "Movimientos reales" }).click();
+      await expect(page.getByRole("heading", { name: "Movimientos reales" })).toBeVisible();
+      await expect(page.locator(".finance-section tbody tr").first()).toBeVisible();
+    }
   }
   await page.getByRole("link", { name: "Caja y planificación" }).click();
   await page.getByRole("button", { name: "Agregar proyección" }).click();

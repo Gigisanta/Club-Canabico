@@ -19,7 +19,6 @@ import {
   MagnifyingGlass,
   Tray,
 } from "@phosphor-icons/react";
-import { motion } from "motion/react";
 import { initials } from "./lib";
 export function Brand() {
   return (
@@ -226,11 +225,7 @@ export function Modal({
           className={`modal ${wide ? "wide" : ""}`}
           aria-describedby={description ? "dialog-desc" : undefined}
         >
-          <motion.div
-            initial={{ opacity: 0, transform: "translateY(8px)" }}
-            animate={{ opacity: 1, transform: "translateY(0)" }}
-            transition={{ duration: 0.18 }}
-          >
+          <div className="modal-body">
             <div className="modal-head">
               <div>
                 <Dialog.Title>{title}</Dialog.Title>
@@ -245,7 +240,7 @@ export function Modal({
               </Dialog.Close>
             </div>
             {children}
-          </motion.div>
+          </div>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

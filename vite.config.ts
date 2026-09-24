@@ -15,9 +15,7 @@ export default defineConfig(({ mode }) => {
         output: {
           manualChunks: {
             charts: ["recharts"],
-            motion: ["motion/react"],
             react: ["react", "react-dom", "react-router-dom"],
-            ui: ["@radix-ui/react-dialog", "sonner", "@phosphor-icons/react"],
           },
         },
       },

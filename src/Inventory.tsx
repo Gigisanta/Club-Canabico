@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Plus,
@@ -19,7 +19,7 @@ import {
   shortDate,
   type Product,
 } from "./lib";
-import type { Movement } from "../shared/types";
+import type { Movement, Page } from "../shared/types";
 import {
   PageHeader,
   Panel,
@@ -34,31 +34,42 @@ import {
 import { StockCard } from "./StockCard";
 export default function Inventory() {
   const { state, money, canManage, isManager, reload, user, owner } = useClub();
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const [query, setQuery] = useState(params.get("q") || "");
   const [filter, setFilter] = useState(params.get("filter") === "low" ? "low" : "all");
   const [view, setView] = useState<"cards" | "table">("cards");
-  const [type, setType] = useState("all");
+  const [type, setType] = useState(params.get("type") || "all");
   const [editor, setEditor] = useState<Product | "new" | null>(null);
   const [movement, setMovement] = useState<Product | null>(null);
   const [history, setHistory] = useState(false);
   const [moveType, setMoveType] = useState("entry");
-  const [historyPage, setHistoryPage] = useState(1);
-  const historyData = useResource<{ rows: Movement[]; total: number }>(
+  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
+  const [historyPrevious, setHistoryPrevious] = useState<(string | null)[]>([]);
+  const [debouncedQuery, setDebouncedQuery] = useState(query);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [previous, setPrevious] = useState<(string | null)[]>([]);
+  useEffect(() => { const id = window.setTimeout(() => setDebouncedQuery(query), 250); return () => clearTimeout(id); }, [query]);
+  useEffect(() => {
+    setQuery(params.get("q") || "");
+    setFilter(params.get("filter") === "low" ? "low" : params.get("filter") === "expired" ? "expired" : "all");
+    setType(params.get("type") || "all");
+  }, [params]);
+  const updateParams = (key: string, value: string) => {
+    const next = new URLSearchParams(params);
+    if (value && value !== "all") next.set(key, value); else next.delete(key);
+    setParams(next, { replace: true });
+  };
+  useEffect(() => { setCursor(null); setPrevious([]); }, [debouncedQuery, filter, type, owner]);
+  useEffect(() => { setHistoryCursor(null); setHistoryPrevious([]); }, [owner, history]);
+  const page = useResource<Page<Product, { total: number; low: number; value: number }>>(
+    `/list/products?q=${encodeURIComponent(debouncedQuery)}&filter=${filter}&type=${encodeURIComponent(type)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`,
+  );
+  const historyData = useResource<Page<Movement>>(
     history
-      ? `/movements?page=${historyPage}${owner ? "&owner=" + encodeURIComponent(owner) : ""}`
+      ? `/movements?${new URLSearchParams({ ...(historyCursor ? { cursor: historyCursor } : {}), ...(owner ? { owner } : {}) })}`
       : null,
   );
-  const products = state.products.filter(
-    (p) =>
-      `${p.name} ${p.strain} ${p.lot} ${state.users.find((u) => u.id === p.ownerId)?.name}`
-        .toLowerCase()
-        .includes(query.toLowerCase()) &&
-      (type === "all" || p.type === type) &&
-      (filter === "all" ||
-        (filter === "low" && p.stock <= p.minimum) ||
-        (filter === "expired" && p.expires && p.expires <= state.today)),
-  );
+  const products = page.data?.items || [];
   async function save(fd: FormData) {
     const existing = editor !== "new" ? editor : null;
     const data = {
@@ -76,7 +87,7 @@ export default function Inventory() {
     );
     toast.success(existing ? "Producto actualizado" : "Lote creado");
     setEditor(null);
-    await reload();
+    await Promise.all([reload(), page.reload()]);
   }
   const edit = editor && editor !== "new" ? editor : null;
   return (
@@ -105,12 +116,12 @@ export default function Inventory() {
       />
       <div className="mini-stats inventory-summary">
         <span>
-          <Package /> <strong>{state.products.length}</strong> lotes registrados
+          <Package /> <strong>{page.data?.summary.total ?? "…"}</strong> lotes registrados
         </span>
         <span>
           <WarningCircle />{" "}
           <strong>
-            {state.products.filter((p) => p.stock <= p.minimum).length}
+            {page.data?.summary.low ?? "…"}
           </strong>{" "}
           con stock bajo
         </span>
@@ -118,12 +129,7 @@ export default function Inventory() {
           <span>
             Valor de inventario{" "}
             <strong>
-              {money(
-                state.products.reduce(
-                  (n, p) => n + (p.stock * p.cost) / 1000,
-                  0,
-                ),
-              )}
+              {money(page.data?.summary.value || 0)}
             </strong>
           </span>
         )}
@@ -132,7 +138,7 @@ export default function Inventory() {
         title="Todos los productos"
         action={
           <div className="inventory-view">
-            <span className="muted small">{products.length} lotes</span>
+            <span className="muted small">{page.data?.total ?? "…"} lotes</span>
             <div
               className="segmented"
               role="group"
@@ -161,14 +167,14 @@ export default function Inventory() {
         <div className="table-toolbar">
           <Search
             value={query}
-            onChange={setQuery}
+            onChange={(value) => { setQuery(value); updateParams("q", value); }}
             placeholder="Buscar producto, lote o responsable…"
           />
           <div className="filter-group">
             <select
               aria-label="Tipo de producto"
               value={type}
-              onChange={(e) => setType(e.target.value)}
+              onChange={(e) => { setType(e.target.value); updateParams("type", e.target.value); }}
             >
               <option value="all">Todos los tipos</option>
               {["Flor", "Extracto", "Aceite", "Accesorio"].map((t) => (
@@ -178,7 +184,7 @@ export default function Inventory() {
             <select
               aria-label="Estado del stock"
               value={filter}
-              onChange={(e) => setFilter(e.target.value)}
+              onChange={(e) => { setFilter(e.target.value); updateParams("filter", e.target.value); }}
             >
               <option value="all">Todo el stock</option>
               <option value="low">Stock bajo</option>
@@ -201,7 +207,7 @@ export default function Inventory() {
                 />
               ))}
             </div>
-            {!products.length && (
+            {!page.loading && !products.length && (
               <Empty
                 title="No encontramos productos"
                 description="Probá con otra búsqueda o creá el primer lote."
@@ -323,7 +329,7 @@ export default function Inventory() {
                 })}
               </tbody>
             </table>
-            {!products.length && (
+            {!page.loading && !products.length && (
               <Empty
                 title="No encontramos productos"
                 description="Probá con otra búsqueda o creá el primer lote."
@@ -331,6 +337,13 @@ export default function Inventory() {
             )}
           </div>
         )}
+        {page.loading && <p role="status" className="table-note">Buscando lotes…</p>}
+        {page.error && <p role="alert">{page.error}</p>}
+        {(previous.length > 0 || page.data?.nextCursor) && <div className="table-pagination">
+          <button className="button" disabled={!previous.length} onClick={() => { setCursor(previous.at(-1) || null); setPrevious((s) => s.slice(0, -1)); }}>Anterior</button>
+          <span>Página {previous.length + 1} · {page.data?.total || 0} lotes</span>
+          <button className="button" disabled={!page.data?.nextCursor} onClick={() => { setPrevious((s) => [...s, cursor]); setCursor(page.data!.nextCursor); }}>Siguiente</button>
+        </div>}
       </Panel>
       <Modal
         title={edit ? "Editar producto" : "Nuevo lote"}
@@ -469,7 +482,7 @@ export default function Inventory() {
             });
             toast.success("Movimiento registrado");
             setMovement(null);
-            await reload();
+            await Promise.all([reload(), page.reload()]);
           }}
         >
           <Field label="Tipo de movimiento">
@@ -546,11 +559,11 @@ export default function Inventory() {
               </tr>
             </thead>
             <tbody>
-              {(historyData.data?.rows || []).map((m) => (
+              {(historyData.data?.items || []).map((m) => (
                 <tr key={m.id}>
                   <td>{shortDate(m.createdAt)}</td>
                   <td>
-                    {state.products.find((p) => p.id === m.productId)?.name ||
+                    {m.product?.name ||
                       "Lote traspasado"}
                   </td>
                   <td>
@@ -593,13 +606,13 @@ export default function Inventory() {
           <span>
             {historyData.loading
               ? "Cargando…"
-              : `${historyData.data?.total || 0} movimientos · Página ${historyPage}`}
+              : `${historyData.data?.total || 0} movimientos · Página ${historyPrevious.length + 1}`}
           </span>
           <div>
             <button
               className="button small-button"
-              disabled={historyPage === 1 || historyData.loading}
-              onClick={() => setHistoryPage((p) => p - 1)}
+              disabled={!historyPrevious.length || historyData.loading}
+              onClick={() => { setHistoryCursor(historyPrevious.at(-1) || null); setHistoryPrevious((rows) => rows.slice(0, -1)); }}
             >
               Anterior
             </button>
@@ -607,9 +620,9 @@ export default function Inventory() {
               className="button small-button"
               disabled={
                 historyData.loading ||
-                historyPage * 100 >= (historyData.data?.total || 0)
+                !historyData.data?.nextCursor
               }
-              onClick={() => setHistoryPage((p) => p + 1)}
+              onClick={() => { setHistoryPrevious((rows) => [...rows, historyCursor]); setHistoryCursor(historyData.data!.nextCursor); }}
             >
               Siguiente
             </button>

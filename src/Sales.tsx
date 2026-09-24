@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Plus,
   Receipt,
@@ -9,7 +10,8 @@ import {
   CheckCircle,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
-import { useClub, send, number, shortDate, type Sale } from "./lib";
+import { useClub, send, useResource, number, shortDate, type Sale } from "./lib";
+import type { Customer, Product, Page } from "../shared/types";
 import {
   PageHeader,
   Panel,
@@ -26,23 +28,30 @@ const payments: Record<string, string> = {
   card: "Tarjeta",
   transfer: "Transferencia",
 };
+type CheckoutCustomer = Pick<Customer, "id" | "name" | "points" | "tier" | "permitStatus" | "permitValidUntil">;
+type CheckoutProduct = Pick<Product, "id" | "name" | "lot" | "price" | "stock" | "unit" | "ownerId" | "expires">;
 export default function Sales({ onSale }: { onSale: () => void }) {
-  const { state, money, canSell, user, reload } = useClub();
-  const [query, setQuery] = useState("");
-  const [date, setDate] = useState("");
+  const { state, money, canSell, user, reload, owner } = useClub();
+  const [params, setParams] = useSearchParams();
+  const [query, setQuery] = useState(params.get("q") || "");
+  const [debouncedQuery, setDebouncedQuery] = useState(query);
+  const [date, setDate] = useState(params.get("date") || "");
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [previous, setPrevious] = useState<(string | null)[]>([]);
+  useEffect(() => { const id = window.setTimeout(() => setDebouncedQuery(query), 250); return () => clearTimeout(id); }, [query]);
+  useEffect(() => { setQuery(params.get("q") || ""); setDate(params.get("date") || ""); }, [params]);
+  const updateParams = (key: string, value: string) => { const next = new URLSearchParams(params); if (value) next.set(key, value); else next.delete(key); setParams(next, { replace: true }); };
+  useEffect(() => { setCursor(null); setPrevious([]); }, [debouncedQuery, date, owner]);
+  const page = useResource<Page<Sale, { pageCount: number }>>(
+    `/list/sales?q=${encodeURIComponent(debouncedQuery)}${date ? `&date=${date}` : ""}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`,
+  );
+  useEffect(() => { const refresh = () => void page.reload(); window.addEventListener("raiz:sale-changed", refresh); return () => window.removeEventListener("raiz:sale-changed", refresh); }, [page.reload]);
   const [ticket, setTicket] = useState<Sale | null>(null);
   const [close, setClose] = useState(false);
-  const daily = state.sales.filter((s) => s.date === state.today);
   const cash = state.cashExpected;
   const closed = state.closures.find((c) => c.date === state.today);
   const canClose = ["owner", "admin", "cashier"].includes(user.role);
-  const sales = state.sales.filter(
-    (s) =>
-      (!date || s.date === date) &&
-      `${s.id} ${state.customers.find((c) => c.id === s.customerId)?.name}`
-        .toLowerCase()
-        .includes(query.toLowerCase()),
-  );
+  const sales = page.data?.items || [];
   return (
     <>
       <PageHeader
@@ -77,8 +86,8 @@ export default function Sales({ onSale }: { onSale: () => void }) {
       <div className="sales-summary">
         <div>
           <span>Ventas de hoy</span>
-          <strong>{money(daily.reduce((n, s) => n + s.total, 0))}</strong>
-          <small>{daily.length} operaciones</small>
+          <strong>{money(state.salesTodayTotal)}</strong>
+          <small>{state.salesTodayCount} operaciones</small>
         </div>
         <div>
           <span>Efectivo esperado</span>
@@ -99,22 +108,22 @@ export default function Sales({ onSale }: { onSale: () => void }) {
       </div>
       <Panel
         title="Historial de ventas"
-        action={<span className="muted small">{sales.length} operaciones</span>}
+        action={<span className="muted small">{page.data?.total ?? "…"} operaciones</span>}
       >
         <div className="table-toolbar">
           <Search
             value={query}
-            onChange={setQuery}
+            onChange={(value) => { setQuery(value); updateParams("q", value); }}
             placeholder="Buscar socio o ticket…"
           />
           <input
             aria-label="Filtrar ventas por fecha"
             type="date"
             value={date}
-            onChange={(e) => setDate(e.target.value)}
+            onChange={(e) => { setDate(e.target.value); updateParams("date", e.target.value); }}
           />
           {date && (
-            <button className="button" onClick={() => setDate("")}>
+            <button className="button" onClick={() => { setDate(""); updateParams("date", ""); }}>
               Todas las fechas
             </button>
           )}
@@ -132,7 +141,7 @@ export default function Sales({ onSale }: { onSale: () => void }) {
               </tr>
             </thead>
             <tbody>
-              {sales.slice(0, 200).map((s) => (
+              {sales.map((s) => (
                 <tr key={s.id}>
                   <td>
                     <strong className="ticket-id">
@@ -143,8 +152,7 @@ export default function Sales({ onSale }: { onSale: () => void }) {
                     <small className="cell-small">{shortDate(s.date)}</small>
                   </td>
                   <td>
-                    {state.customers.find((c) => c.id === s.customerId)?.name ||
-                      "Socio"}
+                    {s.customerName || "Socio"}
                   </td>
                   <td>
                     <span className="truncate">
@@ -170,14 +178,15 @@ export default function Sales({ onSale }: { onSale: () => void }) {
               ))}
             </tbody>
           </table>
-          {!sales.length && <Empty title="No hay ventas para mostrar" />}
+          {page.loading && <p role="status" className="table-note">Buscando comprobantes…</p>}
+          {!page.loading && !sales.length && <Empty title="No hay ventas para mostrar" />}
         </div>
-        {sales.length > 200 && (
-          <p className="table-note">
-            Mostrando las últimas 200 operaciones. Filtrá por fecha para
-            consultar las anteriores.
-          </p>
-        )}
+        {page.error && <p role="alert">{page.error}</p>}
+        {(previous.length > 0 || page.data?.nextCursor) && <div className="table-pagination">
+          <button className="button" disabled={!previous.length} onClick={() => { setCursor(previous.at(-1) || null); setPrevious((s) => s.slice(0, -1)); }}>Anterior</button>
+          <span>Página {previous.length + 1} · {page.data?.total || 0} operaciones</span>
+          <button className="button" disabled={!page.data?.nextCursor} onClick={() => { setPrevious((s) => [...s, cursor]); setCursor(page.data!.nextCursor); }}>Siguiente</button>
+        </div>}
       </Panel>
       {canClose && state.closures.length > 0 && (
         <Panel className="spaced-panel" title="Cierres anteriores">
@@ -252,8 +261,18 @@ export function SaleModal({
   open: boolean;
   onClose: () => void;
 }) {
-  const { state, money, reload, user } = useClub();
+  const { state, money, reload, user, owner } = useClub();
   const [customerId, setCustomerId] = useState("");
+  const [customerSearch, setCustomerSearch] = useState("");
+  const [searched, setSearched] = useState("");
+  const [selectedCustomer, setSelectedCustomer] = useState<CheckoutCustomer | null>(null);
+  useEffect(() => { const id = window.setTimeout(() => setSearched(customerSearch), 250); return () => clearTimeout(id); }, [customerSearch]);
+  const customerData = useResource<{ items: CheckoutCustomer[] }>(open ? `/checkout/customers?q=${encodeURIComponent(searched)}` : null);
+  const productData = useResource<{ items: CheckoutProduct[] }>(open ? `/checkout/products${owner ? `?owner=${encodeURIComponent(owner)}` : ""}` : null);
+  const products = productData.data?.items || [];
+  const customerOptions = selectedCustomer
+    ? [selectedCustomer, ...(customerData.data?.items || []).filter((c) => c.id !== selectedCustomer.id)]
+    : customerData.data?.items || [];
   const [lines, setLines] = useState([{ productId: "", quantity: 1 }]);
   const [points, setPoints] = useState(0);
   const [requestId, setRequestId] = useState(() => crypto.randomUUID());
@@ -261,17 +280,19 @@ export function SaleModal({
   useEffect(() => {
     if (open) {
       setCustomerId("");
+      setCustomerSearch("");
+      setSelectedCustomer(null);
       setLines([{ productId: "", quantity: 1 }]);
       setPoints(0);
       setRequestId(crypto.randomUUID());
     }
   }, [open]);
-  const customer = state.customers.find((c) => c.id === customerId);
+  const customer = selectedCustomer;
   const subtotal = lines.reduce(
     (n, l) =>
       n +
       Math.round(
-        (state.products.find((p) => p.id === l.productId)?.price || 0) *
+        (products.find((p) => p.id === l.productId)?.price || 0) *
           l.quantity,
       ),
     0,
@@ -322,27 +343,33 @@ export function SaleModal({
             });
             toast.success("Venta registrada");
             onClose();
-            setTicket(sale);
+            setTicket({ ...sale, customerName: customer?.name });
             await reload();
+            window.dispatchEvent(new Event("raiz:sale-changed"));
           }}
         >
           <div className="form-grid">
             <Field label="Socio">
+              <input type="search" aria-label="Buscar socio" placeholder="Escribí nombre o email…" value={customerSearch} onChange={(e) => setCustomerSearch(e.target.value)} />
               <select
+                aria-label="Socio"
                 required
                 value={customerId}
                 onChange={(e) => {
                   setCustomerId(e.target.value);
+                  setSelectedCustomer(customerOptions.find((c) => c.id === e.target.value) || null);
                   setPoints(0);
                 }}
               >
                 <option value="">Seleccionar socio</option>
-                {state.customers.map((c) => (
+                {customerOptions.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name} · {c.tier}
                   </option>
                 ))}
               </select>
+              {customerData.loading && <small>Buscando socios…</small>}
+              {customerData.error && <small role="alert">{customerData.error}</small>}
             </Field>
             <Field label="Medio de pago">
               <select name="payment">
@@ -356,7 +383,7 @@ export function SaleModal({
           </div>
           <div className="sale-lines">
             {lines.map((l, i) => {
-              const product = state.products.find((p) => p.id === l.productId);
+              const product = products.find((p) => p.id === l.productId);
               return (
                 <div className="sale-line" key={i}>
                   <Field label="Producto / lote">
@@ -374,7 +401,7 @@ export function SaleModal({
                       }
                     >
                       <option value="">Seleccionar producto</option>
-                      {state.products
+                      {products
                         .filter(
                           (p) =>
                             p.stock > 0 &&
@@ -516,7 +543,7 @@ export function Ticket({
               <p>Comprobante interno · {sale.id.slice(-10).toUpperCase()}</p>
               <small>
                 {shortDate(sale.date)} ·{" "}
-                {state.customers.find((c) => c.id === sale.customerId)?.name}
+                {sale.customerName || "Socio"}
               </small>
             </div>
             {sale.items.map((i) => (

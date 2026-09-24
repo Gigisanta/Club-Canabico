@@ -115,10 +115,14 @@ Todas las rutas de datos requieren JWT en cookie `HttpOnly`, `SameSite=Strict`; 
 | POST       | `/api/auth/login`, `/api/auth/logout`      | Sesión                                     |
 | GET        | `/api/auth/me`, `/api/config`              | Sesión y disponibilidad de demo            |
 | POST       | `/api/auth/demo`                           | Sesión demo, deshabilitada en producción   |
-| GET        | `/api/state?owner=`                        | Estado consolidado o filtrado por permisos |
+| GET        | `/api/views/:view?owner=`                 | Datos acotados de inicio, inventario, socios, ventas, gastos, finanzas, responsables, reportes o configuración |
+| GET        | `/api/dashboard?range=&inactiveDays=&owner=` | Agregados del panel calculados en PostgreSQL |
+| GET        | `/api/list/customers`, `/api/list/products`, `/api/list/sales` | Listados de hasta 50 filas con `items`, `total`, `nextCursor` y `summary` |
+| GET        | `/api/list/expenses?month=`, `/api/list/cash-entries`, `/api/movements` | Historial paginado con cursor estable |
+| GET        | `/api/customers/:id/history`, `/api/checkout/customers`, `/api/checkout/products` | Ficha del socio y selección acotada al registrar ventas |
+| GET        | `/api/search?q=`                          | Búsqueda global acotada por permisos       |
 | POST/PATCH | `/api/products`, `/api/products/:id`       | Alta/edición                               |
 | POST       | `/api/products/:id/movements`              | Entrada/salida/ajuste/traspaso             |
-| GET        | `/api/movements?page=&owner=`              | Historial paginado                         |
 | POST/PATCH | `/api/customers`, `/api/customers/:id`     | Socios                                     |
 | POST       | `/api/sales`                               | Venta transaccional e idempotente          |
 | POST       | `/api/closures`                            | Cierre diario                              |
@@ -132,6 +136,26 @@ Todas las rutas de datos requieren JWT en cookie `HttpOnly`, `SameSite=Strict`; 
 | GET        | `/api/health`                              | Comprueba conexión a PostgreSQL            |
 
 ## Pruebas
+
+`npm run check` valida tipos, pruebas unitarias y compilación. Para las pruebas de integración, configurá `TEST_DATABASE_URL` con una base PostgreSQL desechable y ejecutá `npm test`; cada ejecución crea y elimina su propio esquema. El circuito de navegador se ejecuta con `npm run test:e2e` contra una instancia demo aislada (`E2E_URL`).
+
+### Medición de carga
+
+El fixture de rendimiento requiere una base **vacía y desechable** llamada `raiz_bench`: `BENCH_DATABASE_URL=.../raiz_bench npm run bench:seed`. Crea 5.000 socios, 500 lotes, 100.000 ventas con sus líneas y 100.000 asientos de caja. Aplicá las migraciones antes de sembrar y ejecutá `ANALYZE` (el script lo hace). `BENCH_BASELINE_URL` y `BENCH_OPTIMIZED_URL` deben apuntar a las versiones anterior y nueva del servidor con esa misma base; `npm run bench:measure` obtiene una sesión de prueba y mide la mediana de tres solicitudes por pantalla, tras una de calentamiento. `npm run bench:compare` concilia ingresos, costos, caja, stock, puntos y atribución contra la versión anterior. No apuntes estas variables a producción.
+
+Medición local del 23 de septiembre de 2026, PostgreSQL de prueba y respuestas sin compresión HTTP:
+
+| Ruta / pantalla | Antes (`/api/state`) | Después |
+| --- | ---: | ---: |
+| Respuesta inicial | 51,7 MB · 8,8 s | Inicio: 160 KB · 81 ms |
+| Inventario | 51,7 MB · 8,8 s | 16 KB · 12 ms |
+| Socios | 51,7 MB · 8,8 s | 18 KB · 95 ms |
+| Ventas | 51,7 MB · 8,8 s | 27 KB · 28 ms |
+| Finanzas | 51,7 MB · 8,8 s | 169 KB · 34 ms |
+
+En el build de producción, la apertura de Inventario pasa de unos **287 KB a 126 KB de JavaScript comprimido** (56% menos): suma el script principal, sus preloads y el módulo de Inventario. Los gráficos ya no se precargan en esa ruta. Las fuentes y CSS no forman parte de esa cifra.
+
+Son mediciones locales de una carga sintética; no representan tiempos de red ni datos reales del club. La paginación por cursor mantiene el orden de los registros al insertar otros nuevos. Los índices nuevos se aplican con `npm run db:migrate` antes de usar la versión actualizada.
 
 ```sh
 npm run typecheck

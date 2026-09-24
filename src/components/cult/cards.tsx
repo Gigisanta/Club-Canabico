@@ -9,7 +9,6 @@ import {
   type HTMLAttributes,
   type ReactNode,
 } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { CaretDown } from "@phosphor-icons/react";
 
 export const MinimalCard = forwardRef<
@@ -71,23 +70,9 @@ export function ExpandableTrigger({ label }: { label: string }) {
 }
 export function ExpandableContent({ children }: { children: ReactNode }) {
   const { isExpanded, id } = useExpandable();
-  const reduced = useReducedMotion();
   return (
     <div id={id} role="region" aria-labelledby={`${id}-trigger`}>
-      <AnimatePresence initial={false}>
-        {isExpanded && (
-          <motion.div
-            key="content"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: reduced ? 0 : 0.18, ease: "easeOut" }}
-            style={{ overflow: "hidden" }}
-          >
-            {children}
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {isExpanded && <div className="expandable-body">{children}</div>}
     </div>
   );
 }
