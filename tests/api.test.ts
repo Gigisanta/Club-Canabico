@@ -267,6 +267,7 @@ test(
           assert.equal(res.status, 201, await res.clone().text());
           const sale = await res.json();
           assert.equal(sale.total, 1900);
+          assert.equal(sale.items[0].unit, "g");
           assert.equal(
             (await db.product.findUniqueOrThrow({ where: { id: "p1" } })).stock,
             8000,
@@ -317,6 +318,16 @@ test(
           (await db.product.findUniqueOrThrow({ where: { id: "p2" } })).stock,
           3000,
         );
+      });
+      await t.test("sale history finds product names within the user's scope", async () => {
+        const owner = await (await call("/list/sales?q=P2", "owner")).json();
+        assert.equal(owner.total, 1);
+        assert.equal(owner.items[0].items[0].name, "p2");
+        assert.equal(owner.items[0].items[0].unit, "g");
+        const responsible = await (await call("/list/sales?q=p2", "r1")).json();
+        assert.equal(responsible.total, 0);
+        const ownProduct = await (await call("/list/sales?q=P1", "r1")).json();
+        assert.equal(ownProduct.total, 1);
       });
       await t.test(
         "responsible sale cannot include a foreign product",

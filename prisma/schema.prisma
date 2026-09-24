@@ -171,6 +171,7 @@ model SaleItem {
   ownerId String
   owner User @relation(fields: [ownerId], references: [id])
   name String
+  unit String @default("g")
   quantity Int
   price Int
   cost Int

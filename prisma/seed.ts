@@ -184,6 +184,7 @@ async function seed() {
                   productId: p.id,
                   ownerId: p.ownerId,
                   name: p.name,
+                  unit: p.unit,
                   quantity,
                   price: p.price,
                   cost,

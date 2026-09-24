@@ -8,6 +8,9 @@ import {
   Printer,
   ShoppingBag,
   CheckCircle,
+  MagnifyingGlass,
+  X,
+  Minus,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import { useClub, send, useResource, number, shortDate, type Sale } from "./lib";
@@ -25,13 +28,94 @@ import {
   Empty,
 } from "./ui";
 import { priceSale } from "../shared/domain";
+import "./sales.css";
 const payments: Record<string, string> = {
   cash: "Efectivo",
   card: "Tarjeta",
   transfer: "Transferencia",
 };
-type CheckoutCustomer = Pick<Customer, "id" | "name" | "points" | "tier" | "permitStatus" | "permitValidUntil">;
+type CheckoutCustomer = Pick<Customer, "id" | "name" | "points" | "tier">;
 type CheckoutProduct = Pick<Product, "id" | "name" | "lot" | "price" | "stock" | "unit" | "ownerId" | "expires">;
+function CustomerPicker({
+  query, onQueryChange, selected, items, loading, error, onSelect,
+}: {
+  query: string;
+  onQueryChange: (value: string) => void;
+  selected: CheckoutCustomer | null;
+  items: CheckoutCustomer[];
+  loading: boolean;
+  error?: string | null;
+  onSelect: (customer: CheckoutCustomer | null) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [active, setActive] = useState(0);
+  const choose = (customer: CheckoutCustomer) => {
+    onSelect(customer);
+    setExpanded(false);
+  };
+  return (
+    <div className="customer-picker">
+      <div className={`customer-picker-input${selected ? " is-selected" : ""}`}>
+        {selected ? <CheckCircle size={18} weight="fill" /> : <MagnifyingGlass size={18} />}
+        <input
+          id="sale-customer-search"
+          type="search"
+          role="combobox"
+          aria-label="Buscar socio"
+          aria-autocomplete="list"
+          aria-controls="sale-customer-options"
+          aria-expanded={expanded}
+          aria-activedescendant={expanded && items.length ? `sale-customer-${Math.min(active, items.length - 1)}` : undefined}
+          placeholder="Nombre, email o teléfono…"
+          autoComplete="off"
+          value={query}
+          onFocus={() => { setExpanded(true); setActive(0); }}
+          onBlur={() => setExpanded(false)}
+          onChange={(event) => { onQueryChange(event.target.value); setActive(0); setExpanded(true); }}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              event.preventDefault();
+              setExpanded(true);
+              setActive((current) => Math.max(0, Math.min(items.length - 1, current + (event.key === "ArrowDown" ? 1 : -1))));
+            } else if (event.key === "Enter" && expanded && items.length) {
+              event.preventDefault();
+              choose(items[Math.min(active, items.length - 1)]);
+            } else if (event.key === "Escape") {
+              event.stopPropagation();
+              setExpanded(false);
+            }
+          }}
+        />
+        {selected && <button type="button" className="customer-picker-clear" aria-label="Cambiar socio" onMouseDown={(event) => event.preventDefault()} onClick={() => { onSelect(null); setExpanded(true); document.getElementById("sale-customer-search")?.focus(); }}><X size={16} /></button>}
+      </div>
+      {expanded && (
+        <div id="sale-customer-options" className="customer-picker-results" role="listbox" aria-label="Socios encontrados">
+          {loading && <p role="status">Buscando socios…</p>}
+          {error && <p role="alert">{error}</p>}
+          {!loading && !error && !items.length && <p>No encontramos socios. Probá con otro dato.</p>}
+          {!loading && !error && items.map((customer, index) => (
+            <button
+              type="button"
+              role="option"
+              id={`sale-customer-${index}`}
+              aria-selected={selected?.id === customer.id}
+              className={index === active ? "is-active" : ""}
+              key={customer.id}
+              onMouseDown={(event) => event.preventDefault()}
+              onMouseEnter={() => setActive(index)}
+              onClick={() => choose(customer)}
+            >
+              <span className="customer-picker-avatar">{customer.name.trim().charAt(0).toUpperCase()}</span>
+              <span><strong>{customer.name}</strong><small>{customer.tier} · {customer.points} puntos</small></span>
+              {selected?.id === customer.id && <CheckCircle size={18} />}
+            </button>
+          ))}
+        </div>
+      )}
+      {selected && <small className="customer-picker-confirmation">Socio seleccionado · {selected.tier} · {selected.points} puntos disponibles</small>}
+    </div>
+  );
+}
 export default function Sales({ onSale }: { onSale: () => void }) {
   const { state, money, canSell, user, reload, owner } = useClub();
   const [params, setParams] = useSearchParams();
@@ -116,7 +200,7 @@ export default function Sales({ onSale }: { onSale: () => void }) {
           <Search
             value={query}
             onChange={(value) => { setQuery(value); updateParams("q", value); }}
-            placeholder="Buscar socio o ticket…"
+            placeholder="Buscar socio, producto o ticket…"
           />
           <input
             aria-label="Filtrar ventas por fecha"
@@ -273,9 +357,7 @@ export function SaleModal({
   const insights = useResource<CustomerInsights>(open && customerId ? `/customers/${encodeURIComponent(customerId)}/insights` : null);
   const productData = useResource<{ items: CheckoutProduct[] }>(open ? `/checkout/products${owner ? `?owner=${encodeURIComponent(owner)}` : ""}` : null);
   const products = productData.data?.items || [];
-  const customerOptions = selectedCustomer
-    ? [selectedCustomer, ...(customerData.data?.items || []).filter((c) => c.id !== selectedCustomer.id)]
-    : customerData.data?.items || [];
+  const customerOptions = customerData.data?.items || [];
   const [lines, setLines] = useState([{ productId: "", quantity: 1 }]);
   const [points, setPoints] = useState(0);
   const [requestId, setRequestId] = useState(() => crypto.randomUUID());
@@ -334,6 +416,15 @@ export function SaleModal({
           onCancel={onClose}
           onSubmit={async (fd) => {
             if (pricingError) throw new Error(pricingError);
+            if (!customerId) throw new Error("Seleccioná un socio para continuar.");
+            if (lines.some((line) => {
+              const product = products.find((item) => item.id === line.productId);
+              return !product || !Number.isFinite(line.quantity) || line.quantity <= 0 || line.quantity * 1000 > product.stock
+                || Math.abs(line.quantity * 1000 - Math.round(line.quantity * 1000)) > 1e-6
+                || (product.unit === "ud" && !Number.isInteger(line.quantity));
+            })) {
+              throw new Error("Revisá los productos y las cantidades antes de confirmar.");
+            }
             const sale = await send<Sale>("/sales", {
               customerId,
               payment: fd.get("payment"),
@@ -351,42 +442,34 @@ export function SaleModal({
             window.dispatchEvent(new Event("raiz:sale-changed"));
           }}
         >
-          <div className="form-grid">
-            <Field label="Socio">
-              <input type="search" aria-label="Buscar socio" placeholder="Escribí nombre o email…" value={customerSearch} onChange={(e) => setCustomerSearch(e.target.value)} />
-              <select
-                aria-label="Socio"
-                required
-                value={customerId}
-                onChange={(e) => {
-                  setCustomerId(e.target.value);
-                  setSelectedCustomer(customerOptions.find((c) => c.id === e.target.value) || null);
-                  setPoints(0);
-                }}
-              >
-                <option value="">Seleccionar socio</option>
-                {customerOptions.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name} · {c.tier}
-                  </option>
-                ))}
-              </select>
-              {customerData.loading && <small>Buscando socios…</small>}
-              {customerData.error && <small role="alert">{customerData.error}</small>}
-            </Field>
-            <Field label="Medio de pago">
-              <select name="payment">
-                {Object.entries(payments).map(([key, name]) => (
-                  <option key={key} value={key}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          </div>
+          <section className="sale-section sale-buyer" aria-labelledby="sale-buyer-title">
+            <div className="sale-section-head"><span className="sale-step">01</span><div><h3 id="sale-buyer-title">Socio y cobro</h3><p>Encontrá al socio y elegí cómo paga.</p></div></div>
+            <div className="form-grid">
+              <Field label="Socio">
+                <CustomerPicker
+                  query={customerSearch}
+                  onQueryChange={(value) => { setCustomerSearch(value); setSelectedCustomer(null); setCustomerId(""); setPoints(0); }}
+                  selected={selectedCustomer}
+                  items={searched === customerSearch ? customerOptions : []}
+                  loading={customerData.loading || searched !== customerSearch}
+                  error={customerData.error}
+                  onSelect={(selected) => { setSelectedCustomer(selected); setCustomerId(selected?.id || ""); setCustomerSearch(selected?.name || ""); setPoints(0); }}
+                />
+              </Field>
+              <Field label="Medio de pago">
+                <select name="payment">
+                  {Object.entries(payments).map(([key, name]) => (
+                    <option key={key} value={key}>{name}</option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+          </section>
           {insights.data && <CustomerInsightsPanel insights={insights.data} today={state.today} money={money} compact />}
           {insights.loading && customerId && <p role="status" className="table-note">Leyendo historial del socio…</p>}
           {insights.error && customerId && <p role="alert" className="table-note">{insights.error}</p>}
+          <section className="sale-section" aria-labelledby="sale-products-title">
+          <div className="sale-section-head"><span className="sale-step">02</span><div><h3 id="sale-products-title">Productos</h3><p>Elegí cada lote y ajustá la cantidad.</p></div></div>
           <div className="sale-lines">
             {lines.map((l, i) => {
               const product = products.find((p) => p.id === l.productId);
@@ -400,7 +483,7 @@ export function SaleModal({
                         setLines((prev) =>
                           prev.map((item, index) =>
                             index === i
-                              ? { ...item, productId: e.target.value }
+                              ? { ...item, productId: e.target.value, quantity: Math.min(1, (products.find((p) => p.id === e.target.value)?.stock || 1000) / 1000) }
                               : item,
                           ),
                         )
@@ -437,24 +520,21 @@ export function SaleModal({
                     )}
                   </Field>
                   <Field label={`Cantidad (${product?.unit || "g"})`}>
-                    <input
-                      aria-label={`Cantidad línea ${i + 1}`}
-                      type="number"
-                      min={product?.unit === "ud" ? 1 : 0.001}
-                      max={product ? product.stock / 1000 : 100000}
-                      step={product?.unit === "ud" ? 1 : 0.001}
-                      value={l.quantity}
-                      onChange={(e) =>
-                        setLines((prev) =>
-                          prev.map((item, index) =>
-                            index === i
-                              ? { ...item, quantity: Number(e.target.value) }
-                              : item,
-                          ),
-                        )
-                      }
-                      required
-                    />
+                    <div className="sale-quantity">
+                      <button type="button" aria-label={`Restar 1 ${product?.unit || "g"} en línea ${i + 1}`} disabled={l.quantity <= 1} onClick={() => setLines((prev) => prev.map((item, index) => index === i ? { ...item, quantity: Math.round((item.quantity - 1) * 1000) / 1000 } : item))}><Minus size={14} /></button>
+                      <input
+                        aria-label={`Cantidad línea ${i + 1}`}
+                        type="number"
+                        inputMode="decimal"
+                        min={product?.unit === "ud" ? 1 : 0.001}
+                        max={product ? product.stock / 1000 : 100000}
+                        step="any"
+                        value={l.quantity}
+                        onChange={(e) => setLines((prev) => prev.map((item, index) => index === i ? { ...item, quantity: Number(e.target.value) } : item))}
+                        required
+                      />
+                      <button type="button" aria-label={`Sumar 1 ${product?.unit || "g"} en línea ${i + 1}`} disabled={!!product && l.quantity + 1 > product.stock / 1000} onClick={() => setLines((prev) => prev.map((item, index) => index === i ? { ...item, quantity: Math.round((item.quantity + 1) * 1000) / 1000 } : item))}><Plus size={14} /></button>
+                    </div>
                   </Field>
                   <button
                     className="icon-button remove-line"
@@ -467,6 +547,7 @@ export function SaleModal({
                   >
                     <Trash size={20} />
                   </button>
+                  {product && <div className="sale-line-price">{money(Math.round(product.price * l.quantity))}</div>}
                 </div>
               );
             })}
@@ -479,6 +560,9 @@ export function SaleModal({
             <Plus />
             Agregar producto
           </button>
+          </section>
+          <section className="sale-section sale-finish" aria-labelledby="sale-finish-title">
+          <div className="sale-section-head"><span className="sale-step">03</span><div><h3 id="sale-finish-title">Revisá el total</h3><p>La venta genera un comprobante interno al confirmar.</p></div></div>
           <div className="sale-checkout">
             <div>
               {customer && user.role !== "responsible" && (
@@ -519,6 +603,7 @@ export function SaleModal({
               </div>
             </div>
           </div>
+          </section>
           {pricingError && (
             <p role="alert" className="form-error">
               {pricingError}
@@ -539,43 +624,49 @@ export function Ticket({
 }) {
   const { state, money } = useClub();
   return (
-    <Modal title="Comprobante de venta" open={!!sale} onClose={onClose}>
+    <Modal title="Comprobante de venta" description="Registro interno de la operación. Disponible para imprimir." open={!!sale} onClose={onClose}>
       {sale && (
         <>
-          <div className="print-ticket">
+          <div className="print-ticket" data-receipt-version="1">
             <div className="ticket-heading">
-              <CheckCircle size={36} weight="duotone" />
+              <span className="ticket-mark"><CheckCircle size={27} weight="fill" /></span>
+              <span className="ticket-kicker">VENTA REGISTRADA</span>
               <h2>{state.settings.clubName}</h2>
-              <p>Comprobante interno · {sale.id.slice(-10).toUpperCase()}</p>
-              <small>
-                {shortDate(sale.date)} ·{" "}
-                {sale.customerName || "Socio"}
-              </small>
+              <p>Comprobante interno</p>
             </div>
+            <div className="ticket-meta">
+              <div><span>Número de operación</span><strong>{sale.id}</strong></div>
+              <div><span>Fecha y hora</span><strong>{new Intl.DateTimeFormat("es-AR", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: state.settings.timezone }).format(new Date(sale.createdAt))}</strong></div>
+              <div><span>Socio</span><strong>{sale.customerName || "Socio"}</strong></div>
+              <div><span>Canal</span><strong>{sale.channel === "delivery" ? "Delivery" : "Local"}</strong></div>
+            </div>
+            <div className="ticket-items-title"><span>Detalle</span><span>Importe</span></div>
             {sale.items.map((i) => (
               <div className="ticket-line" key={i.id}>
                 <span>
-                  {i.name}
+                  <strong>{i.name}</strong>
                   <small>
-                    {number(i.quantity / 1000)} × {money(i.price)}
+                    {number(i.quantity / 1000)} {i.unit || "g"} × {money(i.price)}
                   </small>
                 </span>
                 <strong>{money(i.revenue)}</strong>
               </div>
             ))}
+            <div className="ticket-breakdown">
+              <div><span>Subtotal</span><strong>{money(sale.subtotal)}</strong></div>
+              {sale.discount > 0 && <div><span>Descuentos y puntos</span><strong>−{money(sale.discount)}</strong></div>}
+            </div>
             <div className="ticket-total">
               <span>Total</span>
               <strong>{money(sale.total)}</strong>
             </div>
-            <p className="muted small">
-              {payments[sale.payment]} · {sale.pointsEarned} puntos obtenidos
-            </p>
+            <div className="ticket-payment"><span>Medio de pago</span><strong>{payments[sale.payment] || sale.payment}</strong></div>
+            {(sale.pointsEarned > 0 || sale.pointsUsed > 0) && <p className="ticket-points">{sale.pointsEarned > 0 && `+${sale.pointsEarned} puntos acumulados`}{sale.pointsEarned > 0 && sale.pointsUsed > 0 && " · "}{sale.pointsUsed > 0 && `${sale.pointsUsed} puntos canjeados`}</p>}
             <p className="ticket-disclaimer">
-              Importes en {state.settings.currency}. Documento interno. No
-              constituye factura fiscal.
+              Importes en {state.settings.currency}. Este es un comprobante interno de la operación y no constituye una factura fiscal.
             </p>
           </div>
-          <button className="button full-width" onClick={() => window.print()}>
+          <button className="button primary full-width ticket-print" onClick={() => window.print()}>
             <Printer />
             Imprimir comprobante
           </button>

@@ -561,6 +561,7 @@ app.post(
                 productId: l.p.id,
                 ownerId: l.p.ownerId,
                 name: l.p.name,
+                unit: l.p.unit,
                 quantity: l.quantity,
                 price: l.p.price,
                 cost: l.cost,

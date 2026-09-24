@@ -81,6 +81,7 @@ export interface SaleItem {
   productId: string;
   ownerId: string;
   name: string;
+  unit: string;
   quantity: number;
   price: number;
   cost: number;

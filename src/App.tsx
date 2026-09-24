@@ -59,9 +59,9 @@ const Settings = lazy(() => import("./Settings"));
 const Finance = lazy(() => import("./Finance"));
 const navigation = [
   { path: "/", label: "Resumen general", icon: SquaresFour },
+  { path: "/ventas", label: "Ventas y caja", icon: Receipt },
   { path: "/inventario", label: "Inventario", icon: Package },
   { path: "/socios", label: "Socios y fidelización", icon: Users },
-  { path: "/ventas", label: "Ventas y caja", icon: Receipt },
   { path: "/gastos", label: "Gastos", icon: Wallet },
   { path: "/finanzas", label: "Caja y planificación", icon: ChartBar },
   { path: "/responsables", label: "Responsables", icon: Plant },

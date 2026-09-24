@@ -12,7 +12,11 @@ test("purchase history helps service without extra entry", async ({ page }) => {
   await page.goto("/ventas");
   await page.getByRole("button", { name: "Nueva venta" }).click();
   const checkout = page.getByRole("dialog", { name: "Nueva venta" });
-  await checkout.getByRole("combobox", { name: "Socio" }).selectOption({ index: 1 });
+  await checkout.getByRole("combobox", { name: "Buscar socio" }).focus();
+  await checkout.getByRole("listbox", { name: "Socios encontrados" }).getByRole("option").first().waitFor();
+  await checkout.getByRole("combobox", { name: "Buscar socio" }).press("ArrowDown");
+  await checkout.getByRole("combobox", { name: "Buscar socio" }).press("Enter");
+  await expect(checkout.getByRole("button", { name: "Cambiar socio" })).toBeVisible();
   await expect(checkout.getByRole("region", { name: "Lectura automática del socio" })).toContainText("Última compra");
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -232,11 +236,8 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await page.getByRole("link", { name: "Ventas y caja" }).click();
   await page.getByRole("button", { name: "Nueva venta" }).click();
   dialog = page.getByRole("dialog");
-  await dialog.getByRole("searchbox", { name: "Buscar socio" }).fill(customer);
-  await expect(dialog.getByLabel("Socio", { exact: true }).locator("option").filter({ hasText: customer })).toHaveCount(1);
-  await dialog
-    .getByLabel("Socio", { exact: true })
-    .selectOption({ label: `${customer} · Bronce` });
+  await dialog.getByRole("combobox", { name: "Buscar socio" }).fill(customer);
+  await dialog.getByRole("option", { name: new RegExp(customer) }).click();
   const option = dialog
     .getByLabel("Producto / lote")
     .locator("option")
@@ -245,13 +246,28 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
     .getByLabel("Producto / lote")
     .selectOption((await option.getAttribute("value")) || "");
   await dialog.getByLabel("Cantidad línea 1").fill("2");
+  await dialog.getByRole("button", { name: "Sumar 1 g en línea 1" }).click();
+  await expect(dialog.getByLabel("Cantidad línea 1")).toHaveValue("3");
+  await dialog.getByRole("button", { name: "Restar 1 g en línea 1" }).click();
   await expect(dialog.locator(".total")).toContainText("20.000,00");
   await dialog.getByRole("button", { name: "Confirmar venta" }).click();
   await expect(
     page.getByRole("heading", { name: "Comprobante de venta" }),
   ).toBeVisible();
   await expect(page.locator(".ticket-total")).toContainText("20.000,00");
+  await expect(page.locator(".print-ticket")).toContainText("2 g ×");
+  await expect(page.locator(".print-ticket")).toContainText("no constituye una factura fiscal");
+  await expect(page.locator(".print-ticket")).toContainText("Fecha y hora");
+  await page.emulateMedia({ media: "print" });
+  await expect(page.locator(".print-ticket")).toBeVisible();
+  await expect(page.locator(".ticket-print")).toBeHidden();
+  await page.emulateMedia({ media: "screen" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByRole("button", { name: "Cerrar", exact: true }).click();
+  await page.getByPlaceholder("Buscar socio, producto o ticket…").fill(product);
+  await expect(page.getByRole("row", { name: new RegExp(product) })).toBeVisible();
   await page.getByRole("link", { name: /Inventario/ }).click();
   await page
     .getByPlaceholder("Buscar producto, lote o responsable…")

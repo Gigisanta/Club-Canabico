@@ -83,7 +83,7 @@ export async function checkoutCustomers(user: User, raw: unknown) {
   const ownerId = ownerScope(user);
   const customers = await db.customer.findMany({
     where: {
-      ...(q ? { OR: [{ name: { contains: q, mode: "insensitive" } }, { email: { contains: q, mode: "insensitive" } }] } : {}),
+      ...(q ? { OR: [{ name: { contains: q, mode: "insensitive" } }, { email: { contains: q, mode: "insensitive" } }, { phone: { contains: q, mode: "insensitive" } }] } : {}),
       ...(ownerId ? { sales: { some: { items: { some: { ownerId } } } } } : {}),
     },
     orderBy: [{ name: "asc" }, { id: "asc" }], take: 20,
@@ -133,7 +133,11 @@ export async function salesPage(user: User, requested: string | undefined, raw: 
   const where: Prisma.SaleWhereInput = {
     ...(ownerId ? { items: { some: { ownerId } } } : {}),
     ...(v.date ? { date: v.date } : {}),
-    ...(v.q ? { OR: [{ id: { contains: v.q, mode: "insensitive" } }, { customer: { name: { contains: v.q, mode: "insensitive" } } }] } : {}),
+    ...(v.q ? { OR: [
+      { id: { contains: v.q, mode: "insensitive" } },
+      { customer: { name: { contains: v.q, mode: "insensitive" } } },
+      { items: { some: { name: { contains: v.q, mode: "insensitive" }, ...(ownerId ? { ownerId } : {}) } } },
+    ] } : {}),
   };
   const pageWhere: Prisma.SaleWhereInput = cursor ? { AND: [where, { OR: [
     { createdAt: { lt: new Date(cursor.createdAt!) } },
