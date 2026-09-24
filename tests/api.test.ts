@@ -123,6 +123,40 @@ test(
           403,
         );
       });
+      await t.test("owner saves suppliers, selects a default, and archives without losing linked lots", async () => {
+        assert.equal((await call("/suppliers", "viewer")).status, 403);
+        const body = { name: "  Cultivo   Norte ", contactName: "Camila", phone: "123", email: "", notes: "Entrega semanal", isDefault: true };
+        assert.equal((await call("/suppliers", "r1", body)).status, 403);
+        const created = await call("/suppliers", "owner", body);
+        assert.equal(created.status, 201, await created.clone().text());
+        const first = await created.json();
+        assert.equal(first.name, "Cultivo Norte");
+        assert.equal((await call("/suppliers", "owner", { ...body, name: "cultivo norte" })).status, 409);
+        const secondResponse = await call("/suppliers", "owner", { ...body, name: "Vivero Sur" });
+        assert.equal(secondResponse.status, 201);
+        const second = await secondResponse.json();
+        const catalog = await (await call("/suppliers", "r1")).json();
+        assert.equal(catalog.items.find((s: { id: string }) => s.id === first.id).isDefault, false);
+        assert.equal(catalog.items.find((s: { id: string }) => s.id === second.id).isDefault, true);
+        const p1 = await db.product.findUniqueOrThrow({ where: { id: "p1" } });
+        assert.equal((await call("/products/p1", "owner", { ...p1, supplierId: first.id }, "PATCH")).status, 200);
+        assert.equal((await db.product.findUniqueOrThrow({ where: { id: "p1" } })).supplier, "Cultivo Norte");
+        const linked = await (await call("/suppliers")).json();
+        assert.equal(linked.items.find((s: { id: string }) => s.id === first.id).lotCount, 1);
+        assert.equal((await call(`/suppliers/${first.id}`, "owner", { ...body, name: "Cultivo Norte Renovado", isDefault: false }, "PATCH")).status, 200);
+        const currentLot = await (await call("/list/products?q=p1", "owner")).json();
+        assert.equal(currentLot.items[0].supplier, "Cultivo Norte Renovado");
+        assert.equal((await call(`/suppliers/${first.id}/status`, "owner", { active: false }, "PATCH")).status, 200);
+        assert.equal((await call("/products/p1", "owner", { ...p1, supplierId: first.id }, "PATCH")).status, 200);
+        const newLot = { ...p1, lot: "new-lot", name: "New lot", stock: 1000, supplierId: first.id };
+        assert.equal((await call("/products", "owner", newLot)).status, 400);
+        assert.equal((await call(`/suppliers/${first.id}/status`, "owner", { active: true }, "PATCH")).status, 200);
+        assert.equal((await call("/products", "owner", newLot)).status, 201);
+        const added = await db.product.findUniqueOrThrow({ where: { lot: "new-lot" } });
+        assert.equal(added.supplierId, first.id);
+        await db.movement.deleteMany({ where: { productId: added.id } });
+        await db.product.delete({ where: { id: added.id } });
+      });
       await t.test(
         "viewer cannot mutate; responsible cannot read or move another owner stock",
         async () => {
@@ -291,6 +325,18 @@ test(
             400,
           );
           assert.equal(await db.product.count(), 2);
+          const productCsv = "name,strain,type,unit,lot,supplier,stock,minimum,cost,price,location,ownerId,expires,sourceSystem,sourceId\nImportado,Test,Flor,g,import-supplier-1,Cooperativa Oeste,2,1,4.50,10.00,A,r1,,appsheet,lote-supplier-1";
+          const productPreview = await (await call("/import", "owner", { kind: "products", csv: productCsv })).json();
+          assert.equal(productPreview.count, 1);
+          assert.equal(await db.supplier.count({ where: { key: "cooperativa oeste" } }), 0);
+          assert.equal((await call("/import", "owner", { kind: "products", csv: productCsv, commit: true })).status, 200);
+          const imported = await db.product.findUniqueOrThrow({ where: { lot: "import-supplier-1" } });
+          assert.equal(imported.supplierId, (await db.supplier.findUniqueOrThrow({ where: { key: "cooperativa oeste" } })).id);
+          const repeatedProduct = await (await call("/import", "owner", { kind: "products", csv: productCsv, commit: true })).json();
+          assert.equal(repeatedProduct.count, 0);
+          assert.equal(repeatedProduct.skipped, 1);
+          await db.movement.deleteMany({ where: { productId: imported.id } });
+          await db.product.delete({ where: { id: imported.id } });
           const valid =
             "name,email,phone,notes,sourceSystem,sourceId\nNuevo socio,nuevo@example.com,,Migrado,appsheet,contacto-1";
           assert.equal(

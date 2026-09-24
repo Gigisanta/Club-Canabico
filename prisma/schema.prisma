@@ -31,6 +31,20 @@ model User {
   cashEntries CashEntry[]
   cashPlans CashPlan[]
 }
+model Supplier {
+  id String @id @default(cuid())
+  name String
+  key String @unique
+  contactName String @default("")
+  phone String @default("")
+  email String @default("")
+  notes String @default("")
+  active Boolean @default(true)
+  isDefault Boolean @default(false)
+  createdAt DateTime @default(now())
+  products Product[]
+  @@index([active, name])
+}
 model Product {
   id String @id @default(cuid())
   name String
@@ -39,6 +53,8 @@ model Product {
   unit String @default("g")
   lot String @unique
   supplier String @default("")
+  supplierId String?
+  supplierRef Supplier? @relation(fields: [supplierId], references: [id], onDelete: Restrict)
   sourceSystem String?
   sourceId String?
   stock Int
@@ -53,6 +69,7 @@ model Product {
   items SaleItem[]
   movements Movement[]
   @@index([ownerId])
+  @@index([supplierId])
   @@index([name, id])
   @@index([ownerId, name, id])
   @@unique([sourceSystem, sourceId])

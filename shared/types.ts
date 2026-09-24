@@ -27,6 +27,7 @@ export interface Product {
   unit: string;
   lot: string;
   supplier: string;
+  supplierId: string | null;
   sourceSystem: string | null;
   sourceId: string | null;
   stock: number;
@@ -37,6 +38,17 @@ export interface Product {
   ownerId: string;
   expires: string | null;
   createdAt: string;
+}
+export interface Supplier {
+  id: string;
+  name: string;
+  contactName: string;
+  phone: string;
+  email: string;
+  notes: string;
+  active: boolean;
+  isDefault: boolean;
+  lotCount: number;
 }
 export interface Customer {
   id: string;

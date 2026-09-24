@@ -40,6 +40,7 @@ export async function productPage(user: User, requested: string | undefined, raw
   const v = pageQuery.extend({
     filter: z.enum(["all", "low", "expired"]).default("all"),
     type: z.string().trim().max(80).default("all"),
+    supplier: z.string().trim().max(100).default("all"),
   }).parse(raw);
   const cursor = decodeCursor(v.cursor);
   if (cursor && !cursor.name) throw new HttpError(400, "Cursor inválido");
@@ -49,14 +50,20 @@ export async function productPage(user: User, requested: string | undefined, raw
   if (ownerId) clauses.push(Prisma.sql`p."ownerId" = ${ownerId}`);
   if (v.q) clauses.push(Prisma.sql`(p.name ILIKE ${`%${v.q}%`} OR p.strain ILIKE ${`%${v.q}%`} OR p.lot ILIKE ${`%${v.q}%`} OR u.name ILIKE ${`%${v.q}%`})`);
   if (v.type !== "all") clauses.push(Prisma.sql`p.type = ${v.type}`);
+  if (v.supplier === "unassigned") clauses.push(Prisma.sql`p."supplierId" IS NULL`);
+  else if (v.supplier !== "all") clauses.push(Prisma.sql`p."supplierId" = ${v.supplier}`);
   if (v.filter === "low") clauses.push(Prisma.sql`p.stock <= p.minimum`);
   if (v.filter === "expired") clauses.push(Prisma.sql`p.expires <= ${today}`);
   const filters = clauses.length ? Prisma.sql`WHERE ${Prisma.join(clauses, " AND ")}` : Prisma.empty;
   const cursorFilter = cursor ? Prisma.sql`AND (p.name, p.id) > (${cursor.name}, ${cursor.id})` : Prisma.empty;
   const pageFilters = clauses.length ? Prisma.sql`${filters} ${cursorFilter}` : cursor ? Prisma.sql`WHERE (p.name, p.id) > (${cursor.name}, ${cursor.id})` : Prisma.empty;
   const [rows, countRows, summaryRows] = await Promise.all([
-    db.$queryRaw<Array<{ id: string; name: string; strain: string; type: string; unit: string; lot: string; supplier: string; sourceSystem: string | null; sourceId: string | null; stock: number; minimum: number; cost: number; price: number; location: string; ownerId: string; expires: string | null; createdAt: Date }>>`
-      SELECT p.* FROM "Product" p JOIN "User" u ON u.id = p."ownerId" ${pageFilters}
+    db.$queryRaw<Array<{ id: string; name: string; strain: string; type: string; unit: string; lot: string; supplier: string; supplierId: string | null; sourceSystem: string | null; sourceId: string | null; stock: number; minimum: number; cost: number; price: number; location: string; ownerId: string; expires: string | null; createdAt: Date }>>`
+      SELECT p.id, p.name, p.strain, p.type, p.unit, p.lot, COALESCE(s.name, p.supplier) AS supplier,
+             p."supplierId", p."sourceSystem", p."sourceId", p.stock, p.minimum, p.cost, p.price,
+             p.location, p."ownerId", p.expires, p."createdAt"
+      FROM "Product" p JOIN "User" u ON u.id = p."ownerId"
+      LEFT JOIN "Supplier" s ON s.id = p."supplierId" ${pageFilters}
       ORDER BY p.name ASC, p.id ASC LIMIT ${pageSize + 1}`,
     db.$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*)::bigint AS count FROM "Product" p JOIN "User" u ON u.id = p."ownerId" ${filters}`,
     ownerId

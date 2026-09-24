@@ -8,6 +8,7 @@ import {
   PencilSimple,
   ArrowsLeftRight,
   WarningCircle,
+  Truck,
   CheckCircle,
 } from "@phosphor-icons/react";
 import { useClub, number, shortDate, type Product } from "./lib";
@@ -141,6 +142,7 @@ export function StockCard({
                 <MapPin size={16} />
                 {p.location}
               </span>
+              <span><Truck size={16} />{p.supplier || "Sin proveedor"}</span>
               <span>
                 <CalendarBlank size={16} />
                 {p.expires

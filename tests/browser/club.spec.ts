@@ -1,4 +1,40 @@
 import { test, expect } from "@playwright/test";
+test("owner saves a default supplier and selects it for a new lot", async ({ page }) => {
+  const suffix = Date.now().toString().slice(-8);
+  const supplier = `Proveedor QA ${suffix}`;
+  const lot = `Lote proveedor QA ${suffix}`;
+  await page.goto("/inventario");
+  await page.getByRole("button", { name: "Explorar club de demostración" }).click();
+  await page.getByRole("heading", { name: "Inventario", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Proveedores" }).click();
+  await page.getByRole("button", { name: "Nuevo proveedor" }).click();
+  let dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Nombre del proveedor").fill(supplier);
+  await dialog.getByLabel("Persona de contacto").fill("Contacto de prueba");
+  await dialog.getByLabel("Seleccionar por defecto en lotes nuevos").check();
+  await dialog.getByRole("button", { name: "Guardar", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator(".supplier-card").filter({ hasText: supplier })).toContainText("Predeterminado");
+  await page.getByRole("button", { name: "Nuevo lote" }).click();
+  dialog = page.getByRole("dialog");
+  await expect(dialog.getByLabel("Proveedor", { exact: true }).locator("option:checked")).toHaveText(supplier);
+  await dialog.getByLabel("Nombre del producto").fill(lot);
+  await dialog.getByLabel("Cepa / strain").fill("Prueba");
+  await dialog.getByLabel("Código de lote").fill(`QA-SUP-${suffix}`);
+  await dialog.getByLabel("Ubicación").fill("Depósito de prueba");
+  await dialog.getByLabel("Responsable de reprogram").selectOption("r1");
+  await dialog.getByLabel("Stock inicial").fill("20");
+  await dialog.getByLabel("Precio de costo").fill("100");
+  await dialog.getByLabel("Precio de venta").fill("200");
+  await dialog.getByRole("button", { name: "Guardar", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator(".supplier-card").filter({ hasText: supplier })).toContainText("1 lote vinculado");
+  await page.getByRole("combobox", { name: "Filtrar por proveedor" }).selectOption({ label: supplier });
+  await expect(page.locator(".stock-card")).toContainText(lot);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator(".supplier-card").filter({ hasText: supplier })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
 test("owner: create lot and customer, sell, verify persistence, and preview CSV", async ({
   page,
 }) => {

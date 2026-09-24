@@ -9,6 +9,8 @@ import {
   ClockCounterClockwise,
   PencilSimple,
   WarningCircle,
+  Truck,
+  Star,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import {
@@ -18,6 +20,7 @@ import {
   number,
   shortDate,
   type Product,
+  type Supplier,
 } from "./lib";
 import type { Movement, Page } from "../shared/types";
 import {
@@ -39,6 +42,10 @@ export default function Inventory() {
   const [filter, setFilter] = useState(params.get("filter") === "low" ? "low" : "all");
   const [view, setView] = useState<"cards" | "table">("cards");
   const [type, setType] = useState(params.get("type") || "all");
+  const [supplierFilter, setSupplierFilter] = useState(params.get("supplier") || "all");
+  const [showSuppliers, setShowSuppliers] = useState(false);
+  const [supplierEditor, setSupplierEditor] = useState<Supplier | "new" | null>(null);
+  const [lotSupplierId, setLotSupplierId] = useState("");
   const [editor, setEditor] = useState<Product | "new" | null>(null);
   const [movement, setMovement] = useState<Product | null>(null);
   const [history, setHistory] = useState(false);
@@ -53,17 +60,24 @@ export default function Inventory() {
     setQuery(params.get("q") || "");
     setFilter(params.get("filter") === "low" ? "low" : params.get("filter") === "expired" ? "expired" : "all");
     setType(params.get("type") || "all");
+    setSupplierFilter(params.get("supplier") || "all");
   }, [params]);
   const updateParams = (key: string, value: string) => {
     const next = new URLSearchParams(params);
     if (value && value !== "all") next.set(key, value); else next.delete(key);
     setParams(next, { replace: true });
   };
-  useEffect(() => { setCursor(null); setPrevious([]); }, [debouncedQuery, filter, type, owner]);
+  useEffect(() => { setCursor(null); setPrevious([]); }, [debouncedQuery, filter, type, supplierFilter, owner]);
   useEffect(() => { setHistoryCursor(null); setHistoryPrevious([]); }, [owner, history]);
   const page = useResource<Page<Product, { total: number; low: number; value: number }>>(
-    `/list/products?q=${encodeURIComponent(debouncedQuery)}&filter=${filter}&type=${encodeURIComponent(type)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`,
+    `/list/products?q=${encodeURIComponent(debouncedQuery)}&filter=${filter}&type=${encodeURIComponent(type)}&supplier=${encodeURIComponent(supplierFilter)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`,
   );
+  const suppliers = useResource<{ items: Supplier[]; total: number }>(canManage ? "/suppliers" : null);
+  useEffect(() => {
+    if (editor) setLotSupplierId(editor === "new"
+      ? suppliers.data?.items.find((s) => s.active && s.isDefault)?.id || ""
+      : editor.supplierId || "");
+  }, [editor, suppliers.data]);
   const historyData = useResource<Page<Movement>>(
     history
       ? `/movements?${new URLSearchParams({ ...(historyCursor ? { cursor: historyCursor } : {}), ...(owner ? { owner } : {}) })}`
@@ -74,6 +88,8 @@ export default function Inventory() {
     const existing = editor !== "new" ? editor : null;
     const data = {
       ...Object.fromEntries(fd),
+      supplier: "",
+      supplierId: lotSupplierId || null,
       stock: Math.round(Number(fd.get("stock")) * 1000),
       minimum: Math.round(Number(fd.get("minimum")) * 1000),
       cost: Math.round(Number(fd.get("cost")) * 100),
@@ -87,7 +103,23 @@ export default function Inventory() {
     );
     toast.success(existing ? "Producto actualizado" : "Lote creado");
     setEditor(null);
-    await Promise.all([reload(), page.reload()]);
+    await Promise.all([reload(), page.reload(), suppliers.reload()]);
+  }
+  async function saveSupplier(fd: FormData) {
+    const existing = supplierEditor !== "new" ? supplierEditor : null;
+    await send(
+      existing ? `/suppliers/${existing.id}` : "/suppliers",
+      { name: fd.get("name"), contactName: fd.get("contactName"), phone: fd.get("phone"), email: fd.get("email"), notes: fd.get("notes"), isDefault: fd.get("isDefault") === "on" },
+      existing ? "PATCH" : "POST",
+    );
+    toast.success(existing ? "Proveedor actualizado" : "Proveedor guardado");
+    setSupplierEditor(null);
+    await suppliers.reload();
+  }
+  async function toggleSupplier(supplier: Supplier) {
+    await send(`/suppliers/${supplier.id}/status`, { active: !supplier.active }, "PATCH");
+    toast.success(supplier.active ? "Proveedor archivado" : "Proveedor activado");
+    await suppliers.reload();
   }
   const edit = editor && editor !== "new" ? editor : null;
   return (
@@ -102,6 +134,11 @@ export default function Inventory() {
               <ClockCounterClockwise size={18} />
               Movimientos
             </button>
+            {user.role === "owner" && (
+              <button className="button" onClick={() => setShowSuppliers((v) => !v)} aria-expanded={showSuppliers}>
+                <Truck size={18} /> Proveedores
+              </button>
+            )}
             {canManage && (
               <button
                 className="button primary"
@@ -134,6 +171,30 @@ export default function Inventory() {
           </span>
         )}
       </div>
+      {showSuppliers && user.role === "owner" && (
+        <Panel title="Proveedores guardados" sub="Elegí uno al crear cada lote. El predeterminado se selecciona automáticamente."
+          action={<button className="button primary" onClick={() => setSupplierEditor("new")}><Plus size={17} /> Nuevo proveedor</button>}>
+          {suppliers.loading && <p role="status" className="table-note">Cargando proveedores…</p>}
+          {suppliers.error && <p role="alert" className="form-error">{suppliers.error}</p>}
+          {!suppliers.loading && !suppliers.data?.items.length && <Empty title="Todavía no hay proveedores" description="Guardá el primero para seleccionarlo al crear un lote." />}
+          <div className="supplier-grid">
+            {suppliers.data?.items.map((supplier) => (
+              <article className={`supplier-card${supplier.active ? "" : " is-archived"}`} key={supplier.id}>
+                <div className="supplier-card-top"><span className="supplier-icon"><Truck size={19} /></span>
+                  <div><strong>{supplier.name}</strong><small>{supplier.active ? `${supplier.lotCount} ${supplier.lotCount === 1 ? "lote vinculado" : "lotes vinculados"}` : "Archivado"}</small></div>
+                  {supplier.isDefault && <span className="supplier-default"><Star size={13} weight="fill" /> Predeterminado</span>}
+                </div>
+                {(supplier.contactName || supplier.phone || supplier.email) && <p className="supplier-contact">{[supplier.contactName, supplier.phone, supplier.email].filter(Boolean).join(" · ")}</p>}
+                {supplier.notes && <p className="supplier-note">{supplier.notes}</p>}
+                <div className="supplier-actions">
+                  <button className="button" onClick={() => setSupplierEditor(supplier)}>Editar</button>
+                  <button className="button" onClick={() => void toggleSupplier(supplier).catch((e) => toast.error(e.message))}>{supplier.active ? "Archivar" : "Activar"}</button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </Panel>
+      )}
       <Panel
         title="Todos los productos"
         action={
@@ -190,6 +251,12 @@ export default function Inventory() {
               <option value="low">Stock bajo</option>
               <option value="expired">Vencidos</option>
             </select>
+            {canManage && <select aria-label="Filtrar por proveedor" value={supplierFilter}
+              onChange={(e) => { setSupplierFilter(e.target.value); updateParams("supplier", e.target.value); }}>
+              <option value="all">Todos los proveedores</option>
+              {suppliers.data?.items.map((s) => <option key={s.id} value={s.id}>{s.name}{s.active ? "" : " (archivado)"}</option>)}
+              <option value="unassigned">Sin proveedor</option>
+            </select>}
           </div>
         </div>
         {view === "cards" ? (
@@ -221,6 +288,7 @@ export default function Inventory() {
                 <tr>
                   <th>Producto / lote</th>
                   <th>Responsable</th>
+                  <th>Proveedor</th>
                   <th className="numeric">Stock</th>
                   <th>Estado</th>
                   <th className="numeric">Precio</th>
@@ -258,6 +326,7 @@ export default function Inventory() {
                           <span>{owner?.name || p.ownerId}</span>
                         </div>
                       </td>
+                      <td>{p.supplier || <span className="missing-value">Sin proveedor</span>}</td>
                       <td className="numeric">
                         <strong>{number(p.stock / 1000)}</strong>{" "}
                         <span className="muted">{p.unit}</span>
@@ -381,8 +450,11 @@ export default function Inventory() {
                 required
               />
             </Field>
-            <Field label="Proveedor">
-              <input name="supplier" defaultValue={edit?.supplier || ""} placeholder="Proveedor del lote" />
+            <Field label="Proveedor" hint={suppliers.error || "Elegí un proveedor guardado; podés dejarlo sin asignar."}>
+              <select name="supplierId" value={lotSupplierId} onChange={(e) => setLotSupplierId(e.target.value)}>
+                <option value="">Sin proveedor</option>
+                {suppliers.data?.items.filter((s) => s.active || s.id === edit?.supplierId).map((s) => <option key={s.id} value={s.id}>{s.name}{s.active ? "" : " (archivado)"}</option>)}
+              </select>
             </Field>
             <Field label="Ubicación">
               <input
@@ -462,6 +534,20 @@ export default function Inventory() {
                 required
               />
             </Field>
+          </div>
+        </Form>
+      </Modal>
+      <Modal title={supplierEditor === "new" ? "Nuevo proveedor" : "Editar proveedor"}
+        description="Estos datos quedan guardados para los próximos lotes."
+        open={!!supplierEditor} onClose={() => setSupplierEditor(null)}>
+        <Form onSubmit={saveSupplier} onCancel={() => setSupplierEditor(null)}>
+          <div className="form-grid">
+            <Field label="Nombre del proveedor"><input name="name" defaultValue={supplierEditor !== "new" ? supplierEditor?.name : ""} required maxLength={180} /></Field>
+            <Field label="Persona de contacto"><input name="contactName" defaultValue={supplierEditor !== "new" ? supplierEditor?.contactName : ""} maxLength={180} /></Field>
+            <Field label="Teléfono"><input name="phone" type="tel" defaultValue={supplierEditor !== "new" ? supplierEditor?.phone : ""} maxLength={40} /></Field>
+            <Field label="Correo electrónico"><input name="email" type="email" defaultValue={supplierEditor !== "new" ? supplierEditor?.email : ""} /></Field>
+            <Field label="Notas"><textarea name="notes" defaultValue={supplierEditor !== "new" ? supplierEditor?.notes : ""} maxLength={2000} rows={3} /></Field>
+            <label className="supplier-default-choice"><input name="isDefault" type="checkbox" defaultChecked={supplierEditor !== "new" ? !!supplierEditor?.isDefault : false} /> Seleccionar por defecto en lotes nuevos</label>
           </div>
         </Form>
       </Modal>

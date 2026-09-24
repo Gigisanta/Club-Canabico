@@ -51,7 +51,7 @@ El seed nunca borra datos: si ya existen usuarios, termina sin modificar la base
 ## Funcionalidad
 
 - **Dashboard:** períodos día, últimos 7 días y mes; comparación con período anterior equivalente; ventas, stock a costo, clientes activos, margen, ticket medio, recompra, top 10 por importe/frecuencia, inactivos 30/60/90 días, vencimientos, gastos/presupuesto y ranking de responsables.
-- **Inventario:** productos/lotes, cepa, tipo, gramos/unidades, precios, mínimos, ubicación, responsable y vencimiento. Alta, edición de datos, entradas, salidas, ajustes por conteo y traspasos completos de lote. Historial completo paginado de 100 en 100.
+- **Inventario:** productos/lotes, cepa, tipo, gramos/unidades, precios, mínimos, ubicación, proveedor, responsable y vencimiento. El dueño guarda proveedores con contacto y notas, marca uno como predeterminado y puede archivarlos sin perder los lotes vinculados. Al crear un lote se elige un proveedor guardado; el inventario se puede filtrar por proveedor. Alta, edición de datos, entradas, salidas, ajustes por conteo y traspasos completos de lote. Historial completo paginado de 100 en 100.
 - **Socios:** altas/edición, notas internas, puntos, nivel por gasto acumulado, historial, frecuencia, segmentos top/inactivos/en riesgo.
 - **Ventas:** carrito con varios productos, socio, responsable derivado del lote, pago efectivo/tarjeta/transferencia, descuentos por nivel y puntos, comprobante imprimible. El servidor recalcula todos los importes.
 - **Caja:** libro de movimientos reales por efectivo/banco y categoría, con aportes, retiros, compras de stock e inversiones separados. Venta local crea un movimiento automáticamente. El cierre suma saldo anterior y movimientos de efectivo desde el cierre previo; registra esperado, contado y diferencia. El saldo inicial debe cargarse y conciliarse.
@@ -76,7 +76,7 @@ Un responsable no puede ampliar su ámbito cambiando `?owner=` ni enviando IDs a
 
 ## Modelo y reglas
 
-El esquema se encuentra en `prisma/schema.prisma`: usuarios, productos/lotes, socios, ventas, líneas, movimientos de stock y caja, partidas proyectadas, gastos, reglas recurrentes, cierres y configuración.
+El esquema se encuentra en `prisma/schema.prisma`: usuarios, proveedores, productos/lotes, socios, ventas, líneas, movimientos de stock y caja, partidas proyectadas, gastos, reglas recurrentes, cierres y configuración.
 
 - Dinero en **centavos enteros**. Stock/cantidades en **milésimas** de gramo o unidad; los artículos por unidad requieren cantidades enteras.
 - Cada lote tiene un responsable actual. Cada línea de venta conserva responsable, nombre, precio y costo originales. Los traspasos no reescriben ventas anteriores.

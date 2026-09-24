@@ -30,6 +30,7 @@ export async function getState(user: User, requested: string | undefined, view: 
       needsProducts ? db.product.findMany({
         where: ownerId ? { ownerId } : undefined,
         orderBy: { name: "asc" },
+        include: { supplierRef: { select: { name: true } } },
       }) : Promise.resolve([]),
       ownerId || user.role === "viewer" || view !== "sales"
         ? Promise.resolve([])
@@ -102,7 +103,7 @@ export async function getState(user: User, requested: string | undefined, view: 
       color: user.color,
     },
     users,
-    products: products.map((p) => ({ ...p, cost: restricted ? 0 : p.cost })),
+    products: products.map(({ supplierRef, ...p }) => ({ ...p, supplier: supplierRef?.name || p.supplier, cost: restricted ? 0 : p.cost })),
     closures,
     cashPlans,
     financeBalance,

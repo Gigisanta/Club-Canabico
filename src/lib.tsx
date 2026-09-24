@@ -12,6 +12,7 @@ export type {
   ClubState,
   User,
   Product,
+  Supplier,
   Customer,
   Sale,
   Settings,

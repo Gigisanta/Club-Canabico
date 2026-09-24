@@ -9,6 +9,7 @@ export const productSchema = z.object({
   unit: z.enum(["g", "ud"]),
   lot: text,
   supplier: z.string().trim().max(180).default(""),
+  supplierId: z.string().trim().min(1).max(100).nullable().default(null),
   sourceSystem: z.string().trim().min(1).max(80).nullable().default(null),
   sourceId: z.string().trim().min(1).max(180).nullable().default(null),
   stock: z.number().int().min(0).max(100_000_000),
@@ -18,6 +19,14 @@ export const productSchema = z.object({
   location: text,
   ownerId: text,
   expires: date.nullable().default(null),
+});
+export const supplierSchema = z.object({
+  name: text,
+  contactName: z.string().trim().max(180).default(""),
+  phone: z.string().trim().max(40).default(""),
+  email: z.union([z.email(), z.literal("")]).default(""),
+  notes: z.string().trim().max(2000).default(""),
+  isDefault: z.boolean().default(false),
 });
 export const customerSchema = z.object({
   name: text,

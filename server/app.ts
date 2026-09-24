@@ -23,6 +23,7 @@ import { customerPage, productPage, checkoutCustomers, checkoutProducts, salesPa
 import { dashboardMetrics } from "./dashboard.js";
 import {
   productSchema,
+  supplierSchema,
   customerSchema,
   saleSchema,
   expenseSchema,
@@ -33,6 +34,7 @@ import {
   cashPlanSchema,
   HttpError,
 } from "./validation.js";
+import { resolveSupplier, supplierKey, supplierName } from "./suppliers.js";
 import { exportReport } from "./reports.js";
 declare global {
   namespace Express {
@@ -217,6 +219,42 @@ async function validOwner(id: string) {
   if (!owner || !["responsible", "owner", "admin"].includes(owner.role))
     throw new HttpError(400, "Responsable inválido");
 }
+app.get("/api/suppliers", roles("owner", "admin", "responsible"), async (_req, res) => {
+  const items = await db.supplier.findMany({
+    orderBy: [{ active: "desc" }, { name: "asc" }, { id: "asc" }],
+    include: { _count: { select: { products: true } } },
+  });
+  res.json({ items: items.map(({ _count, ...supplier }) => ({ ...supplier, lotCount: _count.products })), total: items.length });
+});
+app.post("/api/suppliers", roles("owner"), async (req, res) => {
+  const v = supplierSchema.parse(req.body);
+  const name = supplierName(v.name);
+  const result = await atomic(async (tx) => {
+    if (v.isDefault) await tx.supplier.updateMany({ data: { isDefault: false } });
+    return tx.supplier.create({ data: { ...v, name, key: supplierKey(name) } });
+  });
+  res.status(201).json(result);
+});
+app.patch("/api/suppliers/:id", roles("owner"), async (req, res) => {
+  const v = supplierSchema.parse(req.body);
+  const name = supplierName(v.name);
+  const result = await atomic(async (tx) => {
+    const current = await tx.supplier.findUnique({ where: { id: String(req.params.id) } });
+    if (!current) throw new HttpError(404, "Proveedor no encontrado");
+    if (!current.active && v.isDefault) throw new HttpError(400, "Activá el proveedor antes de marcarlo como predeterminado");
+    if (v.isDefault) await tx.supplier.updateMany({ where: { id: { not: current.id } }, data: { isDefault: false } });
+    return tx.supplier.update({ where: { id: current.id }, data: { ...v, name, key: supplierKey(name) } });
+  });
+  res.json(result);
+});
+app.patch("/api/suppliers/:id/status", roles("owner"), async (req, res) => {
+  const { active } = z.object({ active: z.boolean() }).parse(req.body);
+  const result = await db.supplier.update({
+    where: { id: String(req.params.id) },
+    data: { active, ...(!active ? { isDefault: false } : {}) },
+  });
+  res.json(result);
+});
 function validateCashDirection(category: string, amount: number) {
   if (["opening_balance", "capital_contribution", "delivery_receipt", "other_income"].includes(category) && amount < 0)
     throw new HttpError(400, "Este tipo de ingreso requiere importe positivo");
@@ -235,7 +273,8 @@ app.post(
       throw new HttpError(403, "Solo podés crear lotes propios");
     await validOwner(v.ownerId);
     const product = await atomic(async (tx) => {
-      const p = await tx.product.create({ data: { ...v, sourceSystem: v.sourceSystem || "local", sourceId: v.sourceId || randomUUID() } });
+      const selected = await resolveSupplier(tx, v.supplierId, v.supplier);
+      const p = await tx.product.create({ data: { ...v, ...selected, sourceSystem: v.sourceSystem || "local", sourceId: v.sourceId || randomUUID() } });
       await tx.movement.create({
         data: {
           productId: p.id,
@@ -274,12 +313,15 @@ app.patch(
       );
     if (v.unit === "ud" && v.minimum % 1000 !== 0)
       throw new HttpError(400, "El mínimo de unidades debe ser entero");
-    const result = await db.product.updateMany({
-      where: {
-        id: String(req.params.id),
-        ...(req.user.role === "responsible" ? { ownerId: req.user.id } : {}),
-      },
-      data: v,
+    const result = await atomic(async (tx) => {
+      const selected = await resolveSupplier(tx, v.supplierId, v.supplier, existing.supplierId);
+      return tx.product.updateMany({
+        where: {
+          id: String(req.params.id),
+          ...(req.user.role === "responsible" ? { ownerId: req.user.id } : {}),
+        },
+        data: { ...v, ...selected },
+      });
     });
     if (!result.count) throw new HttpError(404, "Lote no encontrado");
     res.json({ ok: true });
@@ -839,9 +881,24 @@ app.post("/api/import", roles("owner", "admin"), async (req, res) => {
     throw new HttpError(400, "Corregí los errores antes de importar");
   if (v.commit)
     await atomic(async (tx) => {
+      const importedSuppliers = new Map<string, string>();
       for (const row of data) {
         if ("lot" in row) {
-          const p = await tx.product.create({ data: row });
+          let supplierId: string | null = null;
+          if (row.supplier) {
+            const key = supplierKey(row.supplier);
+            supplierId = importedSuppliers.get(key) || null;
+            if (!supplierId) {
+              const supplier = await tx.supplier.upsert({
+                where: { key },
+                create: { name: supplierName(row.supplier), key },
+                update: {},
+              });
+              supplierId = supplier.id;
+              importedSuppliers.set(key, supplierId);
+            }
+          }
+          const p = await tx.product.create({ data: { ...row, supplierId } });
           await tx.movement.create({
             data: {
               productId: p.id,
