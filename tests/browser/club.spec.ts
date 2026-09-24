@@ -15,7 +15,7 @@ test("owner saves a default supplier and selects it for a new lot", async ({ pag
   await dialog.getByRole("button", { name: "Guardar", exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(page.locator(".supplier-card").filter({ hasText: supplier })).toContainText("Predeterminado");
-  await page.getByRole("button", { name: "Nuevo lote" }).click();
+  await page.getByRole("button", { name: "Nuevo stock" }).click();
   dialog = page.getByRole("dialog");
   await expect(dialog.getByLabel("Proveedor", { exact: true }).locator("option:checked")).toHaveText(supplier);
   await dialog.getByLabel("Nombre del producto").fill(lot);
@@ -82,7 +82,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await page.getByRole("button", { name: "Vista de tarjetas" }).click();
   const product = `QA Lote ${suffix}`;
   const customer = `QA Socio ${suffix}`;
-  await page.getByRole("button", { name: "Nuevo lote" }).click();
+  await page.getByRole("button", { name: "Nuevo stock" }).click();
   let dialog = page.getByRole("dialog");
   await dialog.getByLabel("Nombre del producto").fill(product);
   await dialog.getByLabel("Cepa / strain").fill("Prueba");

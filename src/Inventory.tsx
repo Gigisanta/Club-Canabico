@@ -145,7 +145,7 @@ export default function Inventory() {
                 onClick={() => setEditor("new")}
               >
                 <Plus size={18} />
-                Nuevo lote
+                Nuevo stock
               </button>
             )}
           </>
@@ -415,7 +415,7 @@ export default function Inventory() {
         </div>}
       </Panel>
       <Modal
-        title={edit ? "Editar producto" : "Nuevo lote"}
+        title={edit ? "Editar producto" : "Nuevo stock"}
         description="Precios en pesos argentinos (ARS), por unidad o gramo."
         open={!!editor}
         onClose={() => setEditor(null)}
