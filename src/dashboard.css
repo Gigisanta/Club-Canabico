@@ -1,0 +1,60 @@
+.dashboard-section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 0 12px; }
+.dashboard-section-title h2 { margin: 0; font: 400 21px/1.2 Georgia, "Times New Roman", serif; letter-spacing: -.02em; }
+.dashboard-section-title p { margin: 0; color: var(--muted); font-size: 11px; }
+.dashboard-section-title-lower { margin-top: 25px; }
+
+.dashboard-signals { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(275px, 1fr); gap: 16px; margin-bottom: 15px; }
+.outlook-panel, .decision-panel { min-width: 0; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: 0 7px 18px #193b2110; }
+.outlook-panel { overflow: hidden; padding: 22px 23px 0; }
+.outlook-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
+.signal-eyebrow { display: block; margin-bottom: 7px; color: #648062; font-size: 9px; font-weight: 850; letter-spacing: .15em; }
+.outlook-head h2, .decision-head h2 { margin: 0; font: 400 23px/1.15 Georgia, "Times New Roman", serif; letter-spacing: -.025em; }
+.outlook-period { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.outlook-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 0; margin-top: 19px; border-top: 1px solid var(--border); }
+.outlook-lead, .outlook-buyers { min-width: 0; padding: 19px 19px 17px 0; }
+.outlook-buyers { border-left: 1px solid var(--border); padding-left: 20px; padding-right: 0; }
+.outlook-icon { display: grid; place-items: center; width: 31px; height: 31px; border-radius: 8px; background: #e9f0e4; color: var(--accent); }
+.outlook-grid p { margin: 12px 0 3px; color: var(--muted); font-size: 11px; font-weight: 750; line-height: 1.4; }
+.outlook-grid strong { display: block; color: var(--text); font-size: clamp(23px, 2.25vw, 34px); line-height: 1.13; letter-spacing: -.045em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.outlook-grid small { display: block; min-height: 34px; margin-top: 10px; color: #64786a; font-size: 10px; line-height: 1.5; }
+.outlook-month { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 12px 0; border-top: 1px solid var(--border); }
+.outlook-month span { color: var(--muted); font-size: 11px; }
+.outlook-month strong { color: var(--text); font-size: 17px; font-weight: 800; letter-spacing: -.025em; font-variant-numeric: tabular-nums; text-align: right; }
+.outlook-method { margin: 0 -23px; padding: 11px 23px 13px; border-top: 1px solid #e2e9de; background: #f1f5ec; color: #52695a; font-size: 10px; line-height: 1.55; }
+
+.decision-panel { padding: 22px 22px 11px; }
+.decision-head p { margin: 7px 0 0; color: var(--muted); font-size: 11px; }
+.decision-list { list-style: none; margin: 17px 0 0; padding: 0; }
+.decision-list li { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 10px; padding: 13px 0; border-top: 1px solid var(--border); }
+.decision-index { color: #9aa99a; font-size: 10px; font-weight: 850; font-variant-numeric: tabular-nums; }
+.decision-list strong { display: block; color: var(--text); font-size: 12px; line-height: 1.35; }
+.decision-list p { margin: 4px 0 7px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.decision-list button { display: inline-flex; align-items: center; gap: 6px; padding: 4px 0; border: 0; background: none; color: var(--accent); font-size: 11px; font-weight: 800; text-align: left; }
+.decision-list button:hover { color: var(--accent-hover); text-decoration: underline; }
+.decision-empty { padding: 20px 0 7px; color: var(--muted); font-size: 12px; }
+
+.customer-pulse-panel { min-width: 0; padding-bottom: 0; }
+.customer-pulse-total { display: flex; align-items: baseline; flex-wrap: wrap; column-gap: 8px; padding: 0 22px 16px; }
+.customer-pulse-total strong { color: var(--text); font-size: 39px; line-height: 1; letter-spacing: -.055em; font-variant-numeric: tabular-nums; }
+.customer-pulse-total span { color: var(--muted); font-size: 11px; }
+.customer-pulse-total small { margin-left: auto; color: var(--muted); font-size: 10px; }
+.customer-pulse-rows { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin: 0 22px; padding: 15px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.customer-pulse-rows > div { display: flex; flex-direction: column; min-width: 0; gap: 4px; }
+.customer-pulse-rows > div + div { padding-left: 15px; border-left: 1px solid var(--border); }
+.customer-pulse-rows span, .customer-pulse-share span { color: var(--muted); font-size: 10px; }
+.customer-pulse-rows strong { color: var(--text); font-size: 23px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.customer-pulse-rows small, .customer-pulse-share small { color: var(--muted); font-size: 10px; }
+.customer-pulse-share { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px 8px; margin: 0 22px; padding: 16px 0; }
+.customer-pulse-share strong { color: var(--accent); font-size: 18px; font-variant-numeric: tabular-nums; }
+.customer-pulse-share small { margin-left: auto; }
+.customer-inactive { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 14px 22px; border-top: 1px solid var(--border); background: #f1f5ec; }
+.customer-inactive > div { display: flex; align-items: center; gap: 7px; }
+.customer-inactive span { color: var(--muted); font-size: 10px; }
+.customer-inactive select { min-height: 30px; height: 30px; padding: 3px 5px; font-size: 10px; }
+.customer-inactive strong { color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; }
+.customer-inactive button { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 3px 0; border: 0; background: none; color: var(--accent); font-size: 10px; font-weight: 800; }
+.customer-inactive button:hover { text-decoration: underline; }
+
+@media (max-width: 1120px) { .dashboard-signals { grid-template-columns: 1fr; } .decision-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; } .decision-list li { align-content: start; } }
+@media (max-width: 760px) { .dashboard-section-title { display: block; } .dashboard-section-title p { margin-top: 4px; } .outlook-head { display: block; } .outlook-period { display: block; margin-top: 7px; } .decision-list { display: block; } }
+@media (max-width: 520px) { .outlook-panel { padding: 19px 17px 0; } .outlook-grid { grid-template-columns: 1fr; } .outlook-lead { padding-right: 0; } .outlook-buyers { border-left: 0; border-top: 1px solid var(--border); padding: 17px 0; } .outlook-grid small { min-height: 0; } .outlook-method { margin: 0 -17px; padding: 11px 17px 13px; } .outlook-month { display: block; } .outlook-month strong { display: block; margin-top: 4px; text-align: left; } .customer-pulse-total small { width: 100%; margin-left: 0; } .customer-pulse-share small { width: 100%; margin-left: 0; } }

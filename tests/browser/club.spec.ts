@@ -1,4 +1,23 @@
 import { test, expect } from "@playwright/test";
+test("dashboard separates actuals, projections and recommended actions", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Explorar club de demostración" }).click();
+  await expect(page.getByRole("heading", { name: "Estado del período" })).toBeVisible();
+  const outlook = page.getByRole("region", { name: "Lo que sugiere el ritmo reciente" });
+  await expect(outlook).toContainText("Ventas estimadas · próximos 7 días");
+  await expect(outlook).toContainText("Compradores estimados · próximos 30 días");
+  await expect(outlook).toContainText("No incluyen estacionalidad ni equivalen a caja proyectada");
+  await expect(page.getByRole("region", { name: "Qué revisar esta semana" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Cómo compran los socios" })).toBeVisible();
+  await page.getByRole("combobox", { name: "Período del dashboard" }).selectOption("week");
+  await expect(page.locator(".metrics-grid")).toContainText("Ventas del período");
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await expect(outlook).toBeVisible();
+  expect(errors).toEqual([]);
+});
 test("saved products and profiles help classify new stock", async ({ page }) => {
   await page.goto("/inventario");
   await page.getByRole("button", { name: "Explorar club de demostración" }).click();

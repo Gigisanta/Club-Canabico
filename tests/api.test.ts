@@ -368,6 +368,10 @@ test(
           assert.equal(dashboard.total, 1900);
           assert.equal(dashboard.active, 1);
           assert.equal(dashboard.customerTotal, 1);
+          assert.equal(dashboard.outlook.buyers28, 1);
+          assert.equal(dashboard.outlook.repeatBuyers28, 0);
+          assert.equal(dashboard.outlook.revenue7, null);
+          assert.equal(dashboard.outlook.buyers30, null);
           const ledger=await(await call('/movements?owner=r2','r1')).json();
           assert(ledger.items.every((m:{fromOwner:string;toOwner:string})=>m.fromOwner==='r1'||m.toOwner==='r1'));
           const cashier = await (await call("/views/dashboard", "cashier")).json();

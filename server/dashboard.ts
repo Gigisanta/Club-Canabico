@@ -2,6 +2,7 @@ import { Prisma, type User } from "@prisma/client";
 import { z } from "zod";
 import { db, getSettings } from "./db.js";
 import { businessDate, tier } from "../shared/domain.js";
+import { calculateOutlook } from "../shared/outlook.js";
 import { ownerScope } from "./state.js";
 
 const offset = (date: string, days: number) => {
@@ -20,17 +21,21 @@ export async function dashboardMetrics(user: User, requested: string | undefined
   const start = range === "today" ? today : range === "week" ? offset(today, -6) : `${today.slice(0, 7)}-01`;
   const length = Math.floor((Date.parse(today) - Date.parse(start)) / 86400000) + 1;
   const previousStart = offset(start, -length);
+  const recent28Start = offset(today, -27);
+  const previous28Start = offset(today, -55);
+  const historyStart = previousStart < previous28Start ? previousStart : previous28Start;
   const ownerId = ownerScope(user, requested);
   const restricted = user.role === "cashier";
   type Day = { date: string; total: bigint; cost: bigint; count: bigint };
   type CustomerRow = { customerId: string; amount: bigint; count: bigint };
+  type CustomerSummary = { total: bigint; inactive: bigint; firstSaleDate: string | null; buyers28: bigint; repeatBuyers28: bigint; buyersPrevious28: bigint; repeatBuyersPrevious28: bigint };
   const [daily, customerRows, expenseRows, ownerRows, customerSummary] = await Promise.all([
     ownerId
       ? db.$queryRaw<Day[]>`SELECT s.date, SUM(i.revenue)::bigint AS total, SUM(i.cost)::bigint AS cost,
           COUNT(DISTINCT s.id)::bigint AS count FROM "SaleItem" i JOIN "Sale" s ON s.id = i."saleId"
-          WHERE i."ownerId" = ${ownerId} AND s.date >= ${previousStart} AND s.date <= ${today} GROUP BY s.date`
+          WHERE i."ownerId" = ${ownerId} AND s.date >= ${historyStart} AND s.date <= ${today} GROUP BY s.date`
       : db.$queryRaw<Day[]>`SELECT date, SUM(total)::bigint AS total, SUM(cost)::bigint AS cost,
-          COUNT(*)::bigint AS count FROM "Sale" WHERE date >= ${previousStart} AND date <= ${today} GROUP BY date`,
+          COUNT(*)::bigint AS count FROM "Sale" WHERE date >= ${historyStart} AND date <= ${today} GROUP BY date`,
     ownerId
       ? db.$queryRaw<CustomerRow[]>`SELECT s."customerId", SUM(i.revenue)::bigint AS amount,
           COUNT(DISTINCT s.id)::bigint AS count FROM "SaleItem" i JOIN "Sale" s ON s.id = i."saleId"
@@ -47,12 +52,21 @@ export async function dashboardMetrics(user: User, requested: string | undefined
       WHERE s.date >= ${start} AND s.date <= ${today}
         ${ownerId ? Prisma.sql`AND i."ownerId" = ${ownerId}` : Prisma.empty}
       GROUP BY i."ownerId"`,
-    db.$queryRaw<Array<{ total: bigint; inactive: bigint }>>`
+    db.$queryRaw<CustomerSummary[]>`
       SELECT COUNT(*)::bigint AS total,
-        COUNT(*) FILTER (WHERE COALESCE(last_sale.date, to_char(c."createdAt", 'YYYY-MM-DD')) <= ${offset(today, -inactiveDays)})::bigint AS inactive
+        COUNT(*) FILTER (WHERE COALESCE(last_sale.date, to_char(c."createdAt", 'YYYY-MM-DD')) <= ${offset(today, -inactiveDays)})::bigint AS inactive,
+        MIN(last_sale.first_date) AS "firstSaleDate",
+        COUNT(*) FILTER (WHERE last_sale.bought_recent)::bigint AS "buyers28",
+        COUNT(*) FILTER (WHERE last_sale.bought_recent AND last_sale.first_date < ${recent28Start})::bigint AS "repeatBuyers28",
+        COUNT(*) FILTER (WHERE last_sale.bought_previous)::bigint AS "buyersPrevious28",
+        COUNT(*) FILTER (WHERE last_sale.bought_previous AND last_sale.first_date < ${previous28Start})::bigint AS "repeatBuyersPrevious28"
       FROM "Customer" c LEFT JOIN (
-        SELECT s."customerId", MAX(s.date) AS date FROM "Sale" s
+        SELECT s."customerId", MAX(s.date) AS date, MIN(s.date) AS first_date,
+          BOOL_OR(s.date >= ${recent28Start}) AS bought_recent,
+          BOOL_OR(s.date >= ${previous28Start} AND s.date < ${recent28Start}) AS bought_previous
+        FROM "Sale" s
         ${ownerId ? Prisma.sql`JOIN "SaleItem" i ON i."saleId" = s.id AND i."ownerId" = ${ownerId}` : Prisma.empty}
+        WHERE s.date <= ${today}
         GROUP BY s."customerId"
       ) last_sale ON last_sale."customerId" = c.id
       ${user.role === "responsible" ? Prisma.sql`WHERE last_sale.date IS NOT NULL` : Prisma.empty}`,
@@ -60,7 +74,7 @@ export async function dashboardMetrics(user: User, requested: string | undefined
   const days = new Map(daily.map((row) => [row.date, row]));
   const expensesByDay = new Map(expenseRows.map((row) => [row.date, row._sum.amount || 0]));
   const inRange = daily.filter((row) => row.date >= start);
-  const before = daily.filter((row) => row.date < start).reduce((sum, row) => sum + Number(row.total), 0);
+  const before = daily.filter((row) => row.date >= previousStart && row.date < start).reduce((sum, row) => sum + Number(row.total), 0);
   const total = inRange.reduce((sum, row) => sum + Number(row.total), 0);
   const count = inRange.reduce((sum, row) => sum + Number(row.count), 0);
   const cost = restricted ? 0 : inRange.reduce((sum, row) => sum + Number(row.cost), 0);
@@ -82,6 +96,14 @@ export async function dashboardMetrics(user: User, requested: string | undefined
     id: row.customerId, name: namesById.get(row.customerId) || "Socio", amount: Number(row.amount),
     count: Number(row.count), tier: tier(lifetimeById.get(row.customerId) || 0, settings),
   }));
+  const pulse = customerSummary[0];
+  const outlook = calculateOutlook(today, daily.map((row) => ({ date: row.date, total: Number(row.total) })), {
+    firstSaleDate: pulse?.firstSaleDate || null,
+    buyers28: Number(pulse?.buyers28 || 0),
+    repeatBuyers28: Number(pulse?.repeatBuyers28 || 0),
+    buyersPrevious28: Number(pulse?.buyersPrevious28 || 0),
+    repeatBuyersPrevious28: Number(pulse?.repeatBuyersPrevious28 || 0),
+  });
   return {
     start, previousStart, length, total, before, cost, count, expenses,
     monthlyExpenses,
@@ -95,5 +117,6 @@ export async function dashboardMetrics(user: User, requested: string | undefined
     }),
     owners: ownerRows.map((row) => ({ ownerId: row.ownerId, revenue: Number(row.revenue), cost: restricted ? 0 : Number(row.cost) })),
     topVolume: top(sortedVolume), topFrequency: top(sortedFrequency),
+    outlook,
   };
 }

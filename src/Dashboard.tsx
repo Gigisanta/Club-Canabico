@@ -23,10 +23,7 @@ import {
   Package,
   Plus,
   UsersThree,
-  WarningCircle,
-  Clock,
   ArrowRight,
-  TrendUp,
 } from "@phosphor-icons/react";
 import {
   useClub,
@@ -45,6 +42,9 @@ import {
   ActionLink,
   Empty,
 } from "./ui";
+import { DashboardSignals, type DashboardDecision } from "./DashboardSignals";
+import type { DashboardOutlook } from "../shared/outlook";
+import "./dashboard.css";
 interface DashboardMetrics {
   start: string;
   length: number;
@@ -62,6 +62,7 @@ interface DashboardMetrics {
   owners: { ownerId: string; revenue: number; cost: number }[];
   topVolume: { id: string; name: string; tier: string; amount: number; count: number }[];
   topFrequency: { id: string; name: string; tier: string; amount: number; count: number }[];
+  outlook: DashboardOutlook;
 }
 export function Dashboard({ onSale }: { onSale: () => void }) {
   const { state, money, owner, setOwner, canSell, user } = useClub();
@@ -114,6 +115,48 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
   );
   const change = before ? ((total - before) / before) * 100 : null;
   const financial = user.role !== "cashier";
+  const outlook = data.outlook;
+  const repeatShare = outlook.buyers28 ? outlook.repeatBuyers28 / outlook.buyers28 : null;
+  const previousRepeatShare = outlook.buyersPrevious28 ? outlook.repeatBuyersPrevious28 / outlook.buyersPrevious28 : null;
+  const firstBuyers = outlook.buyers28 - outlook.repeatBuyers28;
+  const previousFirstBuyers = outlook.buyersPrevious28 - outlook.repeatBuyersPrevious28;
+  const decisions: DashboardDecision[] = [];
+  if (low.length) decisions.push({
+    title: `Reponer ${low.length} ${low.length === 1 ? "lote" : "lotes"} con stock bajo`,
+    detail: `Empezá por ${low[0].name}. ${low.length > 1 ? `Hay ${low.length - 1} ${low.length === 2 ? "lote más" : "lotes más"} debajo del mínimo.` : "Revisá cantidad disponible y próxima compra."}`,
+    action: "Revisar inventario", path: "/inventario?filter=low",
+  });
+  if (outlook.revenue7 !== null && outlook.previous14 > 0 && outlook.recent14 < outlook.previous14 * 0.85) decisions.push({
+    title: "Investigar la baja en ventas",
+    detail: `Los últimos 14 días suman ${money(outlook.recent14)}, frente a ${money(outlook.previous14)} en los 14 anteriores.`,
+    action: "Ver ventas", path: "/ventas",
+  });
+  if (previousRepeatShare !== null && repeatShare !== null && outlook.buyers28 >= 8 &&
+    repeatShare < previousRepeatShare - 0.05) decisions.push({
+    title: "Revisar la recompra",
+    detail: `La proporción de compradores recurrentes bajó de ${Math.round(previousRepeatShare * 100)}% a ${Math.round(repeatShare * 100)}% entre períodos de 28 días.`,
+    action: "Ver socios", path: "/socios",
+  });
+  if (previousFirstBuyers >= 5 && firstBuyers < previousFirstBuyers * 0.8) decisions.push({
+    title: "Revisar las primeras compras",
+    detail: `${firstBuyers} socios compraron por primera vez en 28 días, frente a ${previousFirstBuyers} en los 28 anteriores.`,
+    action: "Ver socios", path: "/socios",
+  });
+  if (inactive > 0) decisions.push({
+    title: `Revisar ${inactive} ${inactive === 1 ? "socio inactivo" : "socios inactivos"}`,
+    detail: `No registran compras hace al menos ${inactiveDays} días. Verificá sus fichas antes de definir una acción.`,
+    action: "Ver segmento", path: `/socios?segment=inactive&days=${inactiveDays}`,
+  });
+  if (financial && state.settings.budget > 0 && monthlyExpenses > state.settings.budget * 0.85) decisions.push({
+    title: "Revisar el presupuesto de gastos",
+    detail: `Los gastos registrados del mes ya alcanzan ${Math.round(monthlyExpenses / state.settings.budget * 100)}% del presupuesto.`,
+    action: "Ver gastos", path: "/gastos",
+  });
+  if (expiring.length) decisions.push({
+    title: `Revisar ${expiring.length} ${expiring.length === 1 ? "lote próximo" : "lotes próximos"} a vencer`,
+    detail: `Hay stock con vencimiento dentro de 30 días; empezá por ${expiring[0].name}.`,
+    action: "Ver inventario", path: `/inventario?q=${encodeURIComponent(expiring[0].name)}`,
+  });
   return (
     <>
       <PageHeader
@@ -192,6 +235,10 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
           </div>
         </div>
       </div>
+      <div className="dashboard-section-title">
+        <h2>Estado del período</h2>
+        <p>Resultados registrados hasta hoy. Las estimaciones aparecen debajo.</p>
+      </div>
       <div className="metrics-grid">
         <Metric
           title="Ventas del período"
@@ -226,6 +273,11 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
               : `${count} ventas registradas`
           }
         />
+      </div>
+      <DashboardSignals outlook={outlook} money={money} decisions={decisions.slice(0, 3)} onNavigate={navigate} />
+      <div className="dashboard-section-title dashboard-section-title-lower">
+        <h2>Evolución y composición</h2>
+        <p>Explorá las ventas, el inventario y el comportamiento de los socios.</p>
       </div>
       <div className="dashboard-charts">
         <Panel
@@ -345,7 +397,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
               Ventas realizadas <strong>{count}</strong>
             </span>
             <span>
-              Tasa de recompra{" "}
+              Compraron 2+ veces{" "}
               <strong>
                 {active ? Math.round((returning / active) * 100) : 0}%
               </strong>
@@ -533,104 +585,32 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
             {!top.length && <Empty title="Sin ventas en este período" />}
           </div>
         </Panel>
-        <div className="attention-column">
-          <Panel
-            title={
-              <>
-                <span className="attention-title">
-                  <WarningCircle size={19} />
-                  Necesitan tu atención
-                </span>
-              </>
-            }
-            action={
-              <span className="count-pill">{low.length + expiring.length}</span>
-            }
-          >
-            <div className="attention-list">
-              {low.slice(0, 3).map((p) => (
-                <button
-                  key={p.id}
-                  onClick={() =>
-                    navigate("/inventario?q=" + encodeURIComponent(p.name))
-                  }
-                >
-                  <span className="alert-symbol">
-                    <Package size={19} />
-                  </span>
-                  <span>
-                    <strong>{p.name}</strong>
-                    <small>
-                      {number(p.stock / 1000)} {p.unit} disponibles · Mín.{" "}
-                      {p.minimum / 1000} {p.unit}
-                    </small>
-                  </span>
-                  <Badge tone="amber">Stock bajo</Badge>
-                </button>
-              ))}
-              {expiring.slice(0, 1).map((p) => (
-                <button
-                  key={p.id}
-                  onClick={() =>
-                    navigate("/inventario?q=" + encodeURIComponent(p.name))
-                  }
-                >
-                  <span className="alert-symbol neutral">
-                    <Clock size={19} />
-                  </span>
-                  <span>
-                    <strong>{p.name}</strong>
-                    <small>Vencimiento: {shortDate(p.expires!)}</small>
-                  </span>
-                  <ArrowRight size={16} />
-                </button>
-              ))}
-              {!low.length && !expiring.length && (
-                <Empty title="Tu inventario está al día" />
-              )}
-            </div>
-          </Panel>
-          <section className="retention-card">
-            <div className="retention-head">
-              <span>
-                <UsersThree size={19} /> Volvamos a conectar
-              </span>
-              <select
-                aria-label="Días de inactividad"
-                value={inactiveDays}
-                onChange={(e) => setInactiveDays(Number(e.target.value))}
-              >
-                {[
-                  30,
-                  60,
-                  90,
-                  ...(![30, 60, 90].includes(inactiveDays)
-                    ? [inactiveDays]
-                    : []),
-                ].map((d) => (
-                  <option key={d} value={d}>
-                    {d} días
-                  </option>
-                ))}
+        <Panel title="Cómo compran los socios" sub="Compradores únicos en los últimos 28 días; comparación con los 28 anteriores." className="customer-pulse-panel">
+          <div className="customer-pulse-total">
+            <strong>{number(outlook.buyers28)}</strong>
+            <span>socios con compras recientes</span>
+            <small>Antes: {number(outlook.buyersPrevious28)}</small>
+          </div>
+          <div className="customer-pulse-rows">
+            <div><span>Primera compra</span><strong>{number(firstBuyers)}</strong><small>Antes: {number(previousFirstBuyers)}</small></div>
+            <div><span>Ya habían comprado</span><strong>{number(outlook.repeatBuyers28)}</strong><small>Antes: {number(outlook.repeatBuyersPrevious28)}</small></div>
+          </div>
+          <div className="customer-pulse-share">
+            <span>Participación de compradores recurrentes</span>
+            <strong>{repeatShare === null ? "—" : `${Math.round(repeatShare * 100)}%`}</strong>
+            <small>{previousRepeatShare === null ? "Sin comparación previa" : `Antes: ${Math.round(previousRepeatShare * 100)}%`}</small>
+          </div>
+          <div className="customer-inactive">
+            <div>
+              <span>Sin actividad en</span>
+              <select aria-label="Días de inactividad" value={inactiveDays} onChange={(e) => setInactiveDays(Number(e.target.value))}>
+                {[30, 60, 90, ...(![30, 60, 90].includes(inactiveDays) ? [inactiveDays] : [])].map((days) => <option key={days} value={days}>{days} días</option>)}
               </select>
             </div>
-            <strong>
-              {inactive} <span>socios inactivos</span>
-            </strong>
-            <p>
-              Hace más de {inactiveDays} días que no visitan el club.
-              <br />
-              Un buen momento para volver a acercarse.
-            </p>
-            <button
-              onClick={() =>
-                navigate(`/socios?segment=inactive&days=${inactiveDays}`)
-              }
-            >
-              Ver socios inactivos <ArrowRight size={16} />
-            </button>
-          </section>
-        </div>
+            <strong>{number(inactive)} socios</strong>
+            <button onClick={() => navigate(`/socios?segment=inactive&days=${inactiveDays}`)}>Revisar fichas <ArrowRight size={15} /></button>
+          </div>
+        </Panel>
       </div>
       {financial && (
         <div className="dashboard-charts lower">
