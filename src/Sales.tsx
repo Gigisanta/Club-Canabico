@@ -29,6 +29,7 @@ import {
 } from "./ui";
 import { priceSale } from "../shared/domain";
 import "./sales.css";
+import "./operation.css";
 const payments: Record<string, string> = {
   cash: "Efectivo",
   card: "Tarjeta",
@@ -139,8 +140,9 @@ export default function Sales({ onSale }: { onSale: () => void }) {
   const canClose = ["owner", "admin", "cashier"].includes(user.role);
   const sales = page.data?.items || [];
   return (
-    <>
+    <div className="operation-page sales-page">
       <PageHeader
+        className="sales-heading"
         eyebrow="UNA CAJA CLARA, CADA DÍA"
         title="Ventas y caja"
         description="Registrá operaciones y consultá cada comprobante."
@@ -193,6 +195,7 @@ export default function Sales({ onSale }: { onSale: () => void }) {
         </div>
       </div>
       <Panel
+        className="sales-history-panel"
         title="Historial de ventas"
         action={<span className="muted small">{page.data?.total ?? "…"} operaciones</span>}
       >
@@ -214,7 +217,7 @@ export default function Sales({ onSale }: { onSale: () => void }) {
             </button>
           )}
         </div>
-        <div className="table-scroll">
+        <div className="table-scroll sales-history-table">
           <table>
             <thead>
               <tr>
@@ -229,7 +232,7 @@ export default function Sales({ onSale }: { onSale: () => void }) {
             <tbody>
               {sales.map((s) => (
                 <tr key={s.id}>
-                  <td>
+                  <td data-label="Comprobante">
                     <strong className="ticket-id">
                       {s.id.startsWith("V-")
                         ? s.id
@@ -237,21 +240,21 @@ export default function Sales({ onSale }: { onSale: () => void }) {
                     </strong>
                     <small className="cell-small">{shortDate(s.date)}</small>
                   </td>
-                  <td>
+                  <td data-label="Socio">
                     {s.customerName || "Socio"}
                   </td>
-                  <td>
+                  <td data-label="Productos">
                     <span className="truncate">
                       {s.items
                         .map((i) => `${i.name} (${number(i.quantity / 1000)})`)
                         .join(", ")}
                     </span>
                   </td>
-                  <td>
+                  <td data-label="Pago">
                     <Badge tone="gray">{payments[s.payment]}</Badge>
                   </td>
-                  <td className="numeric amount">{money(s.total)}</td>
-                  <td>
+                  <td className="numeric amount" data-label="Total">{money(s.total)}</td>
+                  <td data-label="Comprobante">
                     <button
                       className="icon-button"
                       aria-label={`Ver ticket ${s.id}`}
@@ -265,9 +268,28 @@ export default function Sales({ onSale }: { onSale: () => void }) {
             </tbody>
           </table>
           {page.loading && <p role="status" className="table-note">Buscando comprobantes…</p>}
-          {!page.loading && !sales.length && <Empty title="No hay ventas para mostrar" />}
+          {!page.loading && !page.error && !sales.length && (
+            <div className="sales-empty-state">
+              <Empty
+                title={query || date ? "No hay ventas con estos filtros" : "Todavía no hay ventas"}
+                description={query || date ? "Probá otra búsqueda o quitá los filtros para ver el historial completo." : "Las ventas registradas van a aparecer en este historial."}
+              />
+              {query || date ? (
+                <button className="button" onClick={() => {
+                  setQuery("");
+                  setDate("");
+                  const next = new URLSearchParams(params);
+                  next.delete("q");
+                  next.delete("date");
+                  setParams(next, { replace: true });
+                }}>Quitar filtros</button>
+              ) : canSell && !closed ? (
+                <button className="button primary" onClick={onSale}><Plus size={17} /> Registrar primera venta</button>
+              ) : null}
+            </div>
+          )}
         </div>
-        {page.error && <p role="alert">{page.error}</p>}
+        {page.error && <div className="operation-error" role="alert"><p>{page.error}</p><button className="button small-button" onClick={() => void page.reload()}>Reintentar</button></div>}
         {(previous.length > 0 || page.data?.nextCursor) && <div className="table-pagination">
           <button className="button" disabled={!previous.length} onClick={() => { setCursor(previous.at(-1) || null); setPrevious((s) => s.slice(0, -1)); }}>Anterior</button>
           <span>Página {previous.length + 1} · {page.data?.total || 0} operaciones</span>
@@ -308,6 +330,7 @@ export default function Sales({ onSale }: { onSale: () => void }) {
         open={close}
         onClose={() => setClose(false)}
       >
+        <div className="operation-dialog-content sales-close-content">
         <div className="note-box">
           Efectivo esperado: <strong>{money(cash)}</strong>
           <p>
@@ -335,9 +358,10 @@ export default function Sales({ onSale }: { onSale: () => void }) {
             <textarea name="note" />
           </Field>
         </Form>
+        </div>
       </Modal>
       <Ticket sale={ticket} onClose={() => setTicket(null)} />
-    </>
+    </div>
   );
 }
 export function SaleModal({
@@ -411,6 +435,7 @@ export function SaleModal({
         onClose={onClose}
         wide
       >
+        <div className="operation-dialog-content sales-checkout-content">
         <Form
           submit="Confirmar venta"
           onCancel={onClose}
@@ -470,6 +495,9 @@ export function SaleModal({
           {insights.error && customerId && <p role="alert" className="table-note">{insights.error}</p>}
           <section className="sale-section" aria-labelledby="sale-products-title">
           <div className="sale-section-head"><span className="sale-step">02</span><div><h3 id="sale-products-title">Productos</h3><p>Elegí cada lote y ajustá la cantidad.</p></div></div>
+          {productData.loading && <p className="operation-inline-status" role="status">Cargando lotes disponibles…</p>}
+          {productData.error && <div className="operation-error" role="alert"><p>{productData.error}</p><button type="button" className="button small-button" onClick={() => void productData.reload()}>Reintentar</button></div>}
+          {!productData.loading && !productData.error && !products.some((product) => product.stock > 0 && (!product.expires || product.expires >= state.today)) && <div className="sale-products-empty" role="status"><p>No hay lotes disponibles para vender.</p><button type="button" className="button small-button" onClick={() => void productData.reload()}>Actualizar productos</button></div>}
           <div className="sale-lines">
             {lines.map((l, i) => {
               const product = products.find((p) => p.id === l.productId);
@@ -610,6 +638,7 @@ export function SaleModal({
             </p>
           )}
         </Form>
+        </div>
       </Modal>
       <Ticket sale={ticket} onClose={() => setTicket(null)} />
     </>
@@ -626,7 +655,7 @@ export function Ticket({
   return (
     <Modal title="Comprobante de venta" description="Registro interno de la operación. Disponible para imprimir." open={!!sale} onClose={onClose}>
       {sale && (
-        <>
+        <div className="sales-ticket-content">
           <div className="print-ticket" data-receipt-version="1">
             <div className="ticket-heading">
               <img className="ticket-logo" src="/brand/bombo-olive.webp" alt="Bombo" />
@@ -671,7 +700,7 @@ export function Ticket({
             <Printer />
             Imprimir comprobante
           </button>
-        </>
+        </div>
       )}
     </Modal>
   );

@@ -5,6 +5,7 @@ import { Wallet, Package, ChartBar, ArrowRight } from "@phosphor-icons/react";
 import { useClub, send, offsetDate, shortDate, number, useResource } from "./lib";
 import type { CashEntry, Page } from "../shared/types";
 import { PageHeader, Panel, Modal, Form, Field, Metric, Empty } from "./ui";
+import "./panorama.css";
 
 const categories: Record<string, string> = {
   opening_balance: "Saldo inicial",
@@ -41,15 +42,16 @@ export default function Finance() {
   const revenue = state.periodRevenue;
   const cogs = state.periodCost;
   const expenses = state.periodExpense;
-  let running = cash;
   const weeks = Array.from({ length: 13 }, (_, i) => {
     const from = offsetDate(today, i * 7 + 1);
     const to = offsetDate(today, (i + 1) * 7);
     const plans = state.cashPlans.filter((p) => p.scenario === scenario && p.date >= from && p.date <= to);
     const change = plans.reduce((n, p) => n + p.amount, 0);
-    running += change;
-    return { from, to, change, balance: running, count: plans.length };
+    return { from, to, change, count: plans.length };
   });
+  const minChange = Math.min(0, ...weeks.map((week) => week.change));
+  const maxChange = Math.max(0, ...weeks.map((week) => week.change));
+  const maxAbsChange = Math.max(1, ...weeks.map((week) => Math.abs(week.change)));
   const annual = Array.from({ length: 12 }, (_, i) => {
     const period = `2027-${String(i + 1).padStart(2, "0")}`;
     const plans = state.cashPlans.filter((p) => p.scenario === scenario && p.date.startsWith(period));
@@ -69,20 +71,25 @@ export default function Finance() {
     await reload();
     if (mode === "entry") { setCashCursor(null); setCashPrevious([]); await cashPage.reload(); }
   }
-  return <>
+  return <div className="panorama-finance">
     <PageHeader eyebrow="BASE FINANCIERA · EN CONCILIACIÓN" title="Caja y planificación" description="Seguí el dinero real, el capital en stock y los compromisos que vienen. Validá cada cifra contra AppSheet, Sheets y comprobantes." actions={<>
       <button className="button" onClick={() => setMode("plan")}>Agregar proyección</button>
       <button className="button primary" onClick={() => { setEntryKey(crypto.randomUUID()); setMode("entry"); }}>Registrar movimiento</button>
     </>} />
     <div className="metrics-grid three">
-      <Metric title="Saldo registrado" value={money(cash)} icon={<Wallet />} detail="Caja y banco · falta conciliar saldo inicial" />
+      <Metric title="Movimientos netos registrados" value={money(cash)} icon={<Wallet />} detail="Suma de caja y banco · no equivale a saldo disponible" />
       <Metric title="Stock a costo" value={money(stock)} icon={<Package />} detail={`${state.products.length} lotes con costo cargado`} />
       <Metric title="Resultado local preliminar" value={money(revenue - cogs - expenses)} icon={<ChartBar />} detail="Ventas en app − costo vendido − gastos" />
     </div>
+    <div className="finance-reading-key" role="group" aria-label="Cómo leer los indicadores financieros">
+      <span><i className="is-recorded" />Registrado · caja y banco</span>
+      <span><i className="is-valued" />Valuación · stock a costo</span>
+      <span><i className="is-estimate" />Preliminar · resultado local</span>
+    </div>
     <div className="finance-nav" role="group" aria-label="Vistas de caja y planificación">
-      <button className={view === "overview" ? "active" : ""} aria-pressed={view === "overview"} onClick={() => setView("overview")}>Panorama</button>
-      <button className={view === "forecast" ? "active" : ""} aria-pressed={view === "forecast"} onClick={() => setView("forecast")}>Proyección</button>
-      <button className={view === "activity" ? "active" : ""} aria-pressed={view === "activity"} onClick={() => setView("activity")}>Movimientos reales</button>
+      <button type="button" className={view === "overview" ? "active" : ""} aria-pressed={view === "overview"} onClick={() => setView("overview")}>Panorama</button>
+      <button type="button" className={view === "forecast" ? "active" : ""} aria-pressed={view === "forecast"} onClick={() => setView("forecast")}>Proyección</button>
+      <button type="button" className={view === "activity" ? "active" : ""} aria-pressed={view === "activity"} onClick={() => setView("activity")}>Movimientos reales</button>
     </div>
     {view === "overview" && <div className="finance-section">
       <div className="finance-callout">
@@ -98,16 +105,32 @@ export default function Finance() {
     {view === "forecast" && <div className="finance-section">
     <div className="forecast-bar">
       <div><span>ESCENARIO ACTIVO</span><select aria-label="Escenario de planificación" value={scenario} onChange={(e) => setScenario(e.target.value as typeof scenario)}>{scenarios.map((s) => <option key={s} value={s}>{scenarioNames[s]}</option>)}</select></div>
-      <div><span>HOY · REGISTRADO</span><strong>{money(cash)}</strong></div>
-      <ArrowRight size={19} aria-hidden="true" />
-      <div><span>EN 13 SEMANAS · PROYECTADO</span><strong>{money(weeks.at(-1)?.balance || 0)}</strong></div>
+      <div><span>MOVIMIENTOS NETOS · REGISTRADOS</span><strong>{money(cash)}</strong></div>
+      <div><span>SALDO FINAL · 13 SEMANAS</span><strong>No disponible</strong></div>
+    </div>
+    <div className="finance-missing-opening" role="status" aria-live="polite">
+      <strong>Falta una apertura conciliada</strong>
+      <p>Mostramos los movimientos planificados, pero no calculamos saldos de cierre hasta recibir una apertura verificada con fecha y cuenta.</p>
     </div>
     {!currentPlans.length && <div className="forecast-empty"><div><strong>Este escenario todavía no tiene partidas.</strong><p>Agregá cobros, pagos y compromisos para que la proyección sirva para decidir.</p></div><button className="button" onClick={() => setMode("plan")}>Agregar primera partida <ArrowRight size={16} /></button></div>}
-    <Panel title="Flujo de caja proyectado · 13 semanas" sub="Saldo real registrado más cobros y pagos planificados. Cargá todos los compromisos antes de usarlo para decidir.">
-      <div className="table-scroll"><table><thead><tr><th>Semana</th><th className="numeric">Movimiento previsto</th><th className="numeric">Saldo proyectado</th><th className="numeric">Partidas</th></tr></thead><tbody>{weeks.map((w, i) => <tr key={w.from}><td className="table-name"><span className="week-index">{String(i + 1).padStart(2, "0")}</span>{shortDate(w.from)} – {shortDate(w.to)}</td><td className="numeric">{money(w.change)}</td><td className="numeric amount">{money(w.balance)}</td><td className="numeric">{w.count}</td></tr>)}</tbody></table></div>
+    <Panel title="Movimientos planificados · 13 semanas" sub="Ingresos y egresos previstos por semana. Los saldos de cierre quedan pendientes hasta contar con una apertura conciliada.">
+      <figure className="forecast-visual">
+        <figcaption><span>Movimiento neto previsto por semana</span><strong>Ingresos y egresos</strong></figcaption>
+        <div className="forecast-bars" role="img" aria-label={`Movimientos netos previstos entre ${money(minChange)} y ${money(maxChange)} durante las próximas 13 semanas; no representa saldo de caja`}>
+          {weeks.map((week, index) => {
+            const height = week.change === 0 ? 5 : Math.max(8, (Math.abs(week.change) / maxAbsChange) * 91);
+            return <div className="forecast-bar-cell" key={week.from}>
+              <i className={week.change < 0 ? "is-negative" : ""} style={{ height: `${height}%` }} title={`${shortDate(week.from)}: movimiento neto previsto ${money(week.change)}`} />
+              <small>{String(index + 1).padStart(2, "0")}</small>
+            </div>;
+          })}
+        </div>
+        <div className="forecast-scale"><span>{money(minChange)}</span><span>{money(maxChange)}</span></div>
+      </figure>
+      <div className="table-scroll"><table><thead><tr><th>Semana</th><th className="numeric">Movimiento neto previsto</th><th>Saldo al cierre</th><th className="numeric">Partidas</th></tr></thead><tbody>{weeks.map((w, i) => <tr key={w.from}><td className="table-name"><span className="week-index">{String(i + 1).padStart(2, "0")}</span>{shortDate(w.from)} – {shortDate(w.to)}</td><td className="numeric">{money(w.change)}</td><td><span className="missing-value" title="Falta una apertura conciliada">No disponible</span></td><td className="numeric">{w.count}</td></tr>)}</tbody></table></div>
     </Panel>
     <Panel title="Plan mensual 2027" sub="Ingresos y egresos previstos del escenario elegido; el costo de personal debe cargarse como partida explícita.">
-      <div className="table-scroll"><table><thead><tr><th>Mes</th><th className="numeric">Ingresos</th><th className="numeric">Egresos</th><th className="numeric">Neto</th></tr></thead><tbody>{annual.map((m) => <tr key={m.period}><td className="table-name">{new Date(`${m.period}-01T12:00:00`).toLocaleDateString("es-AR", { month: "long", year: "numeric" })}</td><td className="numeric">{money(m.income)}</td><td className="numeric">{money(m.outflow)}</td><td className="numeric amount">{money(m.income - m.outflow)}</td></tr>)}</tbody><tfoot><tr><th>Total 2027</th><th className="numeric">{money(annual.reduce((n, m) => n + m.income, 0))}</th><th className="numeric">{money(annual.reduce((n, m) => n + m.outflow, 0))}</th><th className="numeric">{money(annual.reduce((n, m) => n + m.income - m.outflow, 0))}</th></tr></tfoot></table></div>
+      <div className="table-scroll"><table><thead><tr><th>Mes</th><th className="numeric">Ingresos</th><th className="numeric">Egresos</th><th className="numeric">Flujo neto</th></tr></thead><tbody>{annual.map((m) => <tr key={m.period}><td className="table-name">{new Date(`${m.period}-01T12:00:00`).toLocaleDateString("es-AR", { month: "long", year: "numeric" })}</td><td className="numeric">{money(m.income)}</td><td className="numeric">{money(m.outflow)}</td><td className="numeric amount">{money(m.income - m.outflow)}</td></tr>)}</tbody><tfoot><tr><th>Total 2027</th><th className="numeric">{money(annual.reduce((n, m) => n + m.income, 0))}</th><th className="numeric">{money(annual.reduce((n, m) => n + m.outflow, 0))}</th><th className="numeric">{money(annual.reduce((n, m) => n + m.income - m.outflow, 0))}</th></tr></tfoot></table></div>
     </Panel>
     <Panel title="Partidas planificadas" sub="Detalle del escenario elegido. Conservá los supuestos y acuerdos de cada revisión mensual.">
       <div className="table-scroll"><table><thead><tr><th>Fecha</th><th>Cuenta</th><th>Categoría</th><th>Detalle</th><th className="numeric">Importe</th></tr></thead><tbody>{currentPlans.map((p) => <tr key={p.id}><td>{shortDate(p.date)}</td><td>{p.account === "cash" ? "Efectivo" : "Banco"}</td><td>{categories[p.category] || p.category}</td><td className="table-name">{p.description}</td><td className="numeric amount">{money(p.amount)}</td></tr>)}</tbody></table></div>
@@ -118,7 +141,7 @@ export default function Finance() {
     <div className="finance-callout activity"><span className="finance-callout-index">03 / REGISTRO</span><div><strong>Movimientos reales</strong><p>Las ventas locales entran automáticamente. Un gasto cargado en Gastos se refleja en caja cuando registrás su pago acá.</p></div><button onClick={() => { setEntryKey(crypto.randomUUID()); setMode("entry"); }}>Nuevo movimiento <ArrowRight size={16} /></button></div>
     <Panel title="Movimientos reales" sub="Historial por páginas. Las ventas locales se registran automáticamente. Los gastos cargados en Gastos descuentan caja al registrar su pago aquí.">
       {cashPage.loading && <p role="status" className="muted">Cargando movimientos…</p>}
-      {cashPage.error && <p role="alert">{cashPage.error}</p>}
+      {cashPage.error && <div className="panorama-inline-error" role="alert"><p>{cashPage.error}</p><button className="button" onClick={() => void cashPage.reload()}>Reintentar carga</button></div>}
       <div className="table-scroll"><table><thead><tr><th>Fecha</th><th>Cuenta</th><th>Categoría</th><th>Detalle</th><th>Origen</th><th className="numeric">Importe</th></tr></thead><tbody>{cashPage.data?.items.map((e) => <tr key={e.id}><td>{shortDate(e.date)}</td><td>{e.account === "cash" ? "Efectivo" : "Banco"}</td><td>{categories[e.category] || e.category}</td><td className="table-name">{e.description}</td><td><span className="source-id" title={e.sourceSystem && e.sourceId ? `${e.sourceSystem} · ${e.sourceId}` : "App local"}>{e.sourceSystem && e.sourceId ? `${e.sourceSystem} · ${e.sourceId}` : "App local"}</span></td><td className="numeric amount">{money(e.amount)}</td></tr>)}</tbody></table></div>
       {cashPage.data && !cashPage.data.items.length && <Empty title="Todavía no hay movimientos" description="Registrá un saldo inicial conciliado o el primer movimiento real." />}
       {cashPage.data && <div className="list-pagination"><span>Página {cashPrevious.length + 1} · {cashPage.data.total} movimientos</span><div><button className="button" disabled={!cashPrevious.length} onClick={() => { setCashCursor(cashPrevious.at(-1) || null); setCashPrevious((rows) => rows.slice(0, -1)); }}>Anterior</button><button className="button" disabled={!cashPage.data.nextCursor} onClick={() => { setCashPrevious((rows) => [...rows, cashCursor]); setCashCursor(cashPage.data!.nextCursor); }}>Siguiente</button></div></div>}
@@ -133,5 +156,5 @@ export default function Finance() {
         <Field label="Detalle / comprobante de referencia"><input name="description" maxLength={180} required /></Field>
       </Form>
     </Modal>
-  </>;
+  </div>;
 }

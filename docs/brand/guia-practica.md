@@ -36,7 +36,7 @@ Contraste calculado para los pares principales: oliva/crema **9,26:1**, texto se
 ## Aplicación
 
 - `scripts/prepare-brand-assets.py` regenera los assets seleccionados desde la carpeta original sin modificarla.
-- `src/app-brand.css` aplica tokens a panel, navegación, tarjetas, tablas, formularios, diálogos, alertas e impresión.
+- `src/brand-system.css` define tokens, tipografía y comportamiento compartido; `src/app-brand.css` conserva estilos específicos del panel.
 - `src/public-site.css` compone landing, categorías, vidriera, ficha y contacto para escritorio y móvil.
 - `src/ui.tsx` usa el logotipo oficial en todas las superficies internas.
 - La información pública proviene de fichas curadas independientes de `Product`. Ni precio, ni stock, ni reservas salen en la API pública.

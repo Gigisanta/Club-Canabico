@@ -149,7 +149,7 @@ La API pública de vista previa agrega `GET /api/site`, `GET /api/site/showcase`
 
 ## Pruebas
 
-`npm run check` valida tipos, pruebas unitarias y compilación. Para las pruebas de integración, configurá `TEST_DATABASE_URL` con una base PostgreSQL desechable y ejecutá `npm test`; cada ejecución crea y elimina su propio esquema. El circuito de navegador se ejecuta con `npm run test:e2e` contra una instancia demo aislada (`E2E_URL`). Las pruebas de navegador dejan lotes, socios, ventas y proyecciones QA persistidos en esa demo; conviene usar una base de demostración desechable.
+`npm run check` valida tipos, pruebas unitarias e integración y compilación. Para no omitir las pruebas con PostgreSQL, configurá `TEST_DATABASE_URL` con una base local dedicada `bombo_ui_*`, distinta de `DATABASE_URL`. Las pruebas crean y eliminan esquemas temporales. `npm run test:e2e` inicia API y Vite en puertos locales efímeros con un esquema desechable, aplica migraciones y seed, y elimina el esquema al terminar. El runner rechaza hosts externos, la base principal y nombres que no empiecen por `bombo_ui_`; no uses un túnel local hacia otra base.
 
 ### Medición de carga
 
@@ -175,18 +175,18 @@ npm test
 npm run build
 ```
 
-Las pruebas de dominio siempre se ejecutan. Para ejecutar también la suite API, configurar `TEST_DATABASE_URL` contra una base **de pruebas**. La suite crea un esquema `test_<uuid>`, aplica todas las migraciones SQL, prepara fixtures y elimina solo ese esquema al terminar. No usa los datos de la demo. Sin esta variable, las pruebas API se marcan explícitamente como omitidas.
+Las pruebas de dominio siempre se ejecutan. La suite API crea un esquema `test_<uuid>` en la base local de pruebas, aplica migraciones SQL, prepara fixtures y elimina solo ese esquema al terminar. No usa los datos de la demo. Sin `TEST_DATABASE_URL`, las pruebas API se marcan explícitamente como omitidas.
 
 La suite cubre descuentos/puntos, zona horaria, recurrencias, CSV, autenticación/origen, aislamiento por responsable, lectura sin permisos de escritura, venta atómica, idempotencia, stock insuficiente, concurrencia, traspasos históricos, ocultación de costos al cajero, importación atómica, permisos de socios, movimientos de caja, bloqueo legal por defecto, formatos de exportación y cierre.
 
-Con una demo local en ejecución:
+Con una base PostgreSQL local de pruebas dedicada:
 
 ```sh
-npx playwright install chromium
-npm run test:e2e
+TEST_DATABASE_URL='postgresql://usuario:clave@127.0.0.1:5432/bombo_ui_pruebas' npm run check
+TEST_DATABASE_URL='postgresql://usuario:clave@127.0.0.1:5432/bombo_ui_pruebas' npm run test:e2e
 ```
 
-Se puede configurar `E2E_URL` y `BROWSER_PATH` si se usa otro puerto o un Chromium instalado. La prueba de navegador crea productos y socios prefijados `QA`, registra una venta y verifica su persistencia. Ejecutarla solo sobre datos de demostración. También comprueba navegación móvil, alcance del responsable y vista previa CSV.
+`BROWSER_PATH` permite elegir otro Chromium instalado. `E2E_URL` no se usa: el runner elige puertos temporales y sólo acepta el origen que crea. La suite verifica ventas, stock, socios, permisos, navegación móvil, vista previa CSV, publicación de fichas y consultas; todos sus datos se eliminan con el esquema de pruebas.
 
 ## Producción y alcance
 

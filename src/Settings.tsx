@@ -3,16 +3,16 @@ import {
   GearSix,
   ShieldCheck,
   UploadSimple,
-  FileCsv,
   Plus,
   DownloadSimple,
   CheckCircle,
   Globe,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
-import { useClub, send, roleLabels, type Settings as Config } from "./lib";
+import { useClub, send, roleLabels } from "./lib";
 import { PageHeader, Panel, Form, Field, Avatar, Badge, Modal } from "./ui";
 import PublicChannelsSettings from "./PublicChannelsSettings";
+import "./site-admin.css";
 interface ImportResult {
   count: number;
   skipped: number;
@@ -82,35 +82,51 @@ export default function Settings() {
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
   return (
-    <>
+    <div className="presence-admin presence-settings-admin">
       <PageHeader
-        eyebrow="A LA MEDIDA DE TU CLUB"
-        title="Configuración"
-        description="Reglas de fidelidad, equipo y migración de tus datos."
+        eyebrow={tab === "public" ? "PRESENCIA PÚBLICA" : "A LA MEDIDA DE TU CLUB"}
+        title={tab === "public" ? "Canales del club" : "Configuración"}
+        description={
+          tab === "public"
+            ? "Elegí qué canales oficiales mostrar en la vista previa y cuáles mantener ocultos."
+            : "Reglas de fidelidad, equipo y migración de tus datos."
+        }
+        className="presence-page-heading"
       />
-      <div className="settings-tabs">
+      <div className="settings-tabs presence-settings-tabs" role="group" aria-label="Secciones de configuración">
         <button
+          type="button"
           className={tab === "general" ? "active" : ""}
+          aria-pressed={tab === "general"}
           onClick={() => setTab("general")}
         >
           <GearSix />
           General y fidelización
         </button>
         <button
+          type="button"
           className={tab === "team" ? "active" : ""}
+          aria-pressed={tab === "team"}
           onClick={() => setTab("team")}
         >
           <ShieldCheck />
           Equipo y permisos
         </button>
         {isManager && (
-          <button className={tab === "public" ? "active" : ""} onClick={() => setTab("public")}>
+          <button
+            type="button"
+            className={tab === "public" ? "active" : ""}
+            aria-pressed={tab === "public"}
+            onClick={() => setTab("public")}
+          >
             <Globe /> Canales públicos
           </button>
         )}
         {isManager && (
           <button
+            type="button"
             className={tab === "import" ? "active" : ""}
+            aria-pressed={tab === "import"}
             onClick={() => setTab("import")}
           >
             <UploadSimple />
@@ -122,6 +138,7 @@ export default function Settings() {
       {tab === "general" && (
         <Panel
           title="Configuración del club"
+          className="presence-settings-panel"
           sub={
             isManager
               ? "Los cambios se aplican a las operaciones futuras."
@@ -267,6 +284,7 @@ export default function Settings() {
       {tab === "team" && (
         <Panel
           title="Equipo del club"
+          className="presence-settings-panel"
           sub="Los permisos se validan en cada operación de la API."
           action={
             user.role === "owner" && (
@@ -325,6 +343,7 @@ export default function Settings() {
       {tab === "import" && isManager && (
         <Panel
           title="De tu planilla a tu club"
+          className="presence-settings-panel"
           sub="Exportá Google Sheets como CSV. Validá el archivo antes de confirmar la importación."
         >
           <div className="import-content">
@@ -495,7 +514,7 @@ export default function Settings() {
           </Field>
         </Form>
       </Modal>
-    </>
+    </div>
   );
 }
 function numberOfRows(csv: string) {

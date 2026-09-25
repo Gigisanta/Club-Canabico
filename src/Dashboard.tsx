@@ -45,6 +45,7 @@ import {
 import { DashboardSignals, type DashboardDecision } from "./DashboardSignals";
 import type { DashboardOutlook } from "../shared/outlook";
 import "./dashboard.css";
+import "./panorama.css";
 interface DashboardMetrics {
   start: string;
   length: number;
@@ -86,7 +87,20 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
     0,
   );
   const low = state.products.filter((p) => p.stock <= p.minimum);
-  if (!data) return <div className="page-loading" role="status">{metrics.error || "Calculando panorama del club…"}</div>;
+  if (!data) return (
+    <div className="panorama-dashboard">
+      {metrics.error ? (
+        <section className="panorama-load-state is-error" role="alert" aria-live="assertive">
+          <span className="signal-eyebrow">PANORAMA NO DISPONIBLE</span>
+          <h1>No pudimos cargar los indicadores</h1>
+          <p>{metrics.error}</p>
+          <button className="button primary" onClick={() => void metrics.reload()}>Reintentar</button>
+        </section>
+      ) : (
+        <div className="page-loading" role="status" aria-live="polite">Calculando panorama del club…</div>
+      )}
+    </div>
+  );
   const { start, total, before, cost, count, expenses, active, returning, inactive, customerTotal, monthlyExpenses, permitsToReview } = data;
   const chart = data.chart.map((row) => ({ ...row, label: shortDate(row.date) }));
   const owners = state.users
@@ -164,7 +178,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
     action: "Ver inventario", path: `/app/inventario?q=${encodeURIComponent(expiring[0].name)}`,
   });
   return (
-    <>
+    <div className="panorama-dashboard">
       <PageHeader
         eyebrow="PANORAMA DEL CLUB"
         title={`Hola, ${user.name.split(" ")[0]}.`}
@@ -194,10 +208,11 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
         }
       />
       <div className="dashboard-toolbar">
-        <div className="view-tabs">
-          <button className="active">Visión general</button>
+        <div className="dashboard-view-actions" role="group" aria-label="Vistas del club">
+          <span className="current-view" aria-current="page">Visión general</span>
           {financial && (
             <button
+              type="button"
               onClick={() =>
                 navigate(financial ? "/app/responsables" : "/app/inventario")
               }
@@ -291,9 +306,11 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
           sub="Evolución de ingresos en el período"
           className="revenue-panel"
           action={
-            <div className="segmented">
+            <div className="segmented" role="group" aria-label="Indicador del gráfico">
               <button
                 className={tab === "revenue" ? "active" : ""}
+                type="button"
+                aria-pressed={tab === "revenue"}
                 onClick={() => setTab("revenue")}
               >
                 Ingresos
@@ -301,6 +318,8 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
               {financial && (
                 <button
                   className={tab === "expenses" ? "active" : ""}
+                  type="button"
+                  aria-pressed={tab === "expenses"}
                   onClick={() => setTab("expenses")}
                 >
                   Gastos
@@ -448,11 +467,11 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
                     />
                   ))}
                 </Pie>
-                <Tooltip contentStyle={{ background: "#fffaf0", borderColor: "#d9d1bb", color: "#3e402e" }} itemStyle={{ color: "#3e402e" }} formatter={(v) => money(Number(v))} />
+                <Tooltip contentStyle={{ background: "#fffaf0", borderColor: "#d9d1bb", color: "#3e402e" }} itemStyle={{ color: "#3e402e" }} formatter={(v) => financial ? money(Number(v)) : `${number(Number(v))} lotes`} />
               </PieChart>
             </ResponsiveContainer>
             <div className="donut-center">
-              <small>Stock total</small>
+              <small>{financial ? "Stock a costo" : "Lotes en stock"}</small>
               <strong>
                 {financial ? money(stock) : `${state.products.length} lotes`}
               </strong>
@@ -683,6 +702,6 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
           </Panel>
         </div>
       )}
-    </>
+    </div>
   );
 }

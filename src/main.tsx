@@ -8,6 +8,7 @@ import "./styles.css";
 import "./inventory.css";
 import "./design.css";
 import "./app-brand.css";
+import "./brand-system.css";
 import "./public-site.css";
 function LegacyAppRedirect() {
   const location = useLocation();

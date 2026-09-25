@@ -1,4 +1,4 @@
-import { useEffect, useState, lazy, Suspense } from "react";
+import { useEffect, useRef, useState, lazy, Suspense } from "react";
 import {
   NavLink,
   Routes,
@@ -29,6 +29,7 @@ import {
   UploadSimple,
   Storefront,
   ChatCircleDots,
+  DotsThree,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import {
@@ -228,6 +229,8 @@ function Workspace({
   const [saleLoaded, setSaleLoaded] = useState(false);
   const openSale = () => { setSaleLoaded(true); setSaleOpen(true); };
   const [menu, setMenu] = useState(false);
+  const menuTrigger = useRef<HTMLButtonElement | null>(null);
+  const mainRegion = useRef<HTMLElement | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
@@ -253,19 +256,50 @@ function Workspace({
   const canManage = ["owner", "admin", "responsible"].includes(user.role);
   const canSell = user.role !== "viewer" && Boolean(state?.operationsEnabled);
   useEffect(() => {
+    if (menu) requestAnimationFrame(() => mainRegion.current?.focus());
     setMenu(false);
   }, [location.pathname]);
+  const closeMenu = () => {
+    setMenu(false);
+    requestAnimationFrame(() => menuTrigger.current?.focus());
+  };
+  const finishMenuNavigation = () => {
+    if (!menu) return;
+    setMenu(false);
+    requestAnimationFrame(() => mainRegion.current?.focus());
+  };
+  const openMenu = (trigger: HTMLButtonElement) => {
+    menuTrigger.current = trigger;
+    setMenu(true);
+  };
   useEffect(() => {
     if (!menu) return;
-    document.querySelector<HTMLAnchorElement>(".sidebar nav a")?.focus();
+    document.querySelector<HTMLButtonElement>("#app-navigation .sidebar-close")?.focus();
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setMenu(false);
-        document.querySelector<HTMLButtonElement>(".mobile-menu")?.focus();
+        closeMenu();
+        return;
+      }
+      if (event.key === "Tab") {
+        const focusable = [...document.querySelectorAll<HTMLElement>("#app-navigation a, #app-navigation button:not([disabled])")];
+        const first = focusable[0];
+        const last = focusable.at(-1);
+        if (!document.getElementById("app-navigation")?.contains(document.activeElement)) {
+          event.preventDefault();
+          (event.shiftKey ? last : first)?.focus();
+        } else if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last?.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first?.focus();
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => { window.removeEventListener("keydown", onKeyDown); document.body.style.overflow = previousOverflow; };
   }, [menu]);
   useEffect(() => {
     const fn = (e: KeyboardEvent) => {
@@ -309,6 +343,11 @@ function Workspace({
       (user.role !== "cashier" || !["/app/gastos", "/app/finanzas", "/app/reportes", "/app/responsables"].includes(n.path)) &&
       (isManager || !["/app/finanzas", "/app/vidriera", "/app/consultas"].includes(n.path)),
   );
+  const mobilePrimary = nav.slice(0, 4);
+  const mobileLabels: Record<string, string> = {
+    "/app": "Resumen", "/app/ventas": "Ventas", "/app/inventario": "Inventario", "/app/socios": "Socios",
+  };
+  const moreActive = !mobilePrimary.some(({ path }) => path === location.pathname.replace(/\/$/, ""));
   return (
     <ClubProvider
       value={{
@@ -329,15 +368,18 @@ function Workspace({
           <button
             className="sidebar-scrim"
             aria-label="Cerrar navegación"
-            onClick={() => { setMenu(false); document.querySelector<HTMLButtonElement>(".mobile-menu")?.focus(); }}
+            onClick={closeMenu}
           />
         )}
-        <aside className={`sidebar ${menu ? "open" : ""}`}>
+        <aside id="app-navigation" className={`sidebar ${menu ? "open" : ""}`} role={menu ? "dialog" : undefined} aria-modal={menu || undefined} aria-label={menu ? "Navegación del club" : undefined} onClickCapture={(event) => {
+          if ((event.target as HTMLElement).closest("a")) finishMenuNavigation();
+        }}>
           <Brand />
+          <button type="button" className="sidebar-close icon-button" aria-label="Cerrar navegación" onClick={closeMenu}><X size={21} /></button>
           <button
             className="club-switch"
             aria-label={`Configurar ${state.settings.clubName}`}
-            onClick={() => navigate("/app/configuracion")}
+            onClick={() => { navigate("/app/configuracion"); finishMenuNavigation(); }}
           >
             <span className="club-avatar">
               <img src="/brand/bombo-symbol.png" alt="" />
@@ -371,7 +413,7 @@ function Workspace({
           </nav>
           <div className="sidebar-bottom">
             {alerts > 0 ? (
-              <button className="club-health" onClick={() => navigate("/app/inventario?filter=low")}>
+              <button className="club-health" onClick={() => { navigate("/app/inventario?filter=low"); finishMenuNavigation(); }}>
                 <span className="club-health-icon"><Package size={20} /></span>
                 <span><strong>{alerts} {alerts === 1 ? "lote necesita" : "lotes necesitan"} atención</strong><small>Revisar stock bajo <ArrowRight size={13} /></small></span>
               </button>
@@ -401,13 +443,15 @@ function Workspace({
             </div>
           </div>
         </aside>
-        <div className="workspace">
+        <div className="workspace" inert={menu}>
           <header className="topbar">
             <div className="breadcrumb">
               <button
                 className="icon-button mobile-menu"
-                aria-label="Abrir navegación"
-                onClick={() => setMenu(true)}
+                aria-label={menu ? "Cerrar navegación" : "Abrir navegación"}
+                aria-expanded={menu}
+                aria-controls="app-navigation"
+                onClick={(event) => menu ? closeMenu() : openMenu(event.currentTarget)}
               >
                 <List size={23} />
               </button>
@@ -447,7 +491,7 @@ function Workspace({
               </button>
             </div>
           </header>
-          <main className="main-content">
+          <main className="main-content" ref={mainRegion} tabIndex={-1}>
             {state.demo && (
               <div className="demo-ribbon">
                 <span>
@@ -542,6 +586,26 @@ function Workspace({
             </footer>
           </main>
         </div>
+        <nav className="mobile-tabbar" aria-label="Accesos principales" inert={menu}>
+          {mobilePrimary.map(({ path, icon: Icon }) => (
+            <NavLink key={path} to={path} end={path === "/app"} aria-label={path === "/app/inventario" && alerts > 0 ? `${mobileLabels[path]}, ${alerts} alertas` : mobileLabels[path]}>
+              <Icon size={23} weight="duotone" aria-hidden="true" />
+              <span>{mobileLabels[path]}</span>
+              {path === "/app/inventario" && alerts > 0 && <i className="mobile-tabbar-alert" aria-hidden="true" />}
+            </NavLink>
+          ))}
+          <button
+            type="button"
+            className={moreActive || menu ? "active" : ""}
+            aria-label="Más secciones"
+            aria-expanded={menu}
+            aria-controls="app-navigation"
+            onClick={(event) => menu ? closeMenu() : openMenu(event.currentTarget)}
+          >
+            <DotsThree size={23} weight="bold" aria-hidden="true" />
+            <span>Más</span>
+          </button>
+        </nav>
       </div>
       <Suspense fallback={null}>
         {saleLoaded && <SaleModal open={saleOpen} onClose={() => setSaleOpen(false)} />}
