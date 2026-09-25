@@ -131,7 +131,7 @@ export default function Sales({ onSale }: { onSale: () => void }) {
   const page = useResource<Page<Sale, { pageCount: number }>>(
     `/list/sales?q=${encodeURIComponent(debouncedQuery)}${date ? `&date=${date}` : ""}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`,
   );
-  useEffect(() => { const refresh = () => void page.reload(); window.addEventListener("raiz:sale-changed", refresh); return () => window.removeEventListener("raiz:sale-changed", refresh); }, [page.reload]);
+  useEffect(() => { const refresh = () => void page.reload(); window.addEventListener("bombo:sale-changed", refresh); return () => window.removeEventListener("bombo:sale-changed", refresh); }, [page.reload]);
   const [ticket, setTicket] = useState<Sale | null>(null);
   const [close, setClose] = useState(false);
   const cash = state.cashExpected;
@@ -439,7 +439,7 @@ export function SaleModal({
             onClose();
             setTicket({ ...sale, customerName: customer?.name });
             await reload();
-            window.dispatchEvent(new Event("raiz:sale-changed"));
+            window.dispatchEvent(new Event("bombo:sale-changed"));
           }}
         >
           <section className="sale-section sale-buyer" aria-labelledby="sale-buyer-title">
@@ -629,10 +629,11 @@ export function Ticket({
         <>
           <div className="print-ticket" data-receipt-version="1">
             <div className="ticket-heading">
+              <img className="ticket-logo" src="/brand/bombo-olive.webp" alt="Bombo" />
               <span className="ticket-mark"><CheckCircle size={27} weight="fill" /></span>
               <span className="ticket-kicker">VENTA REGISTRADA</span>
-              <h2>{state.settings.clubName}</h2>
-              <p>Comprobante interno</p>
+              <h2>Comprobante interno</h2>
+              <p>{state.settings.clubName} · Registro de venta</p>
             </div>
             <div className="ticket-meta">
               <div><span>Número de operación</span><strong>{sale.id}</strong></div>

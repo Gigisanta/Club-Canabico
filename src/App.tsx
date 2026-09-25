@@ -27,6 +27,8 @@ import {
   ArrowRight,
   X,
   UploadSimple,
+  Storefront,
+  ChatCircleDots,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import {
@@ -57,15 +59,19 @@ const Reports = lazy(() =>
 );
 const Settings = lazy(() => import("./Settings"));
 const Finance = lazy(() => import("./Finance"));
+const ShowcaseAdmin = lazy(() => import("./ShowcaseAdmin"));
+const InquiriesAdmin = lazy(() => import("./InquiriesAdmin"));
 const navigation = [
-  { path: "/", label: "Resumen general", icon: SquaresFour },
-  { path: "/ventas", label: "Ventas y caja", icon: Receipt },
-  { path: "/inventario", label: "Inventario", icon: Package },
-  { path: "/socios", label: "Socios y fidelización", icon: Users },
-  { path: "/gastos", label: "Gastos", icon: Wallet },
-  { path: "/finanzas", label: "Caja y planificación", icon: ChartBar },
-  { path: "/responsables", label: "Responsables", icon: Plant },
-  { path: "/reportes", label: "Reportes", icon: ChartBar },
+  { path: "/app", label: "Resumen general", icon: SquaresFour },
+  { path: "/app/ventas", label: "Ventas y caja", icon: Receipt },
+  { path: "/app/inventario", label: "Inventario", icon: Package },
+  { path: "/app/socios", label: "Socios y fidelización", icon: Users },
+  { path: "/app/gastos", label: "Gastos", icon: Wallet },
+  { path: "/app/finanzas", label: "Caja y planificación", icon: ChartBar },
+  { path: "/app/responsables", label: "Responsables", icon: Plant },
+  { path: "/app/reportes", label: "Reportes", icon: ChartBar },
+  { path: "/app/vidriera", label: "Vidriera", icon: Storefront },
+  { path: "/app/consultas", label: "Consultas", icon: ChatCircleDots },
 ];
 function Login({
   onLogin,
@@ -93,7 +99,7 @@ function Login({
             <Plant size={150} weight="duotone" />
           </div>
         </div>
-        <small>Gestión con raíces. Visión de futuro.</small>
+        <small>Gestión clara. Visión de futuro.</small>
       </div>
       <section className="login-form">
         <Brand />
@@ -229,9 +235,10 @@ function Workspace({
   const [profile, setProfile] = useState(false);
   const location = useLocation();
   const view = ({
-    "/": "dashboard", "/inventario": "inventory", "/socios": "customers",
-    "/ventas": "sales", "/gastos": "expenses", "/finanzas": "finance",
-    "/responsables": "responsibles", "/reportes": "reports", "/configuracion": "settings",
+    "/app": "dashboard", "/app/": "dashboard", "/app/inventario": "inventory", "/app/socios": "customers",
+    "/app/ventas": "sales", "/app/gastos": "expenses", "/app/finanzas": "finance",
+    "/app/responsables": "responsibles", "/app/reportes": "reports", "/app/configuracion": "settings",
+    "/app/vidriera": "settings", "/app/consultas": "settings",
   } as Record<string, string>)[location.pathname] || "dashboard";
   const resource = useResource<ClubState>(
     `/views/${view}?${new URLSearchParams({ ...(owner ? { owner } : {}), ...(view === "expenses" && new URLSearchParams(location.search).get("month") ? { month: new URLSearchParams(location.search).get("month")! } : {}) })}`,
@@ -248,6 +255,18 @@ function Workspace({
   useEffect(() => {
     setMenu(false);
   }, [location.pathname]);
+  useEffect(() => {
+    if (!menu) return;
+    document.querySelector<HTMLAnchorElement>(".sidebar nav a")?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMenu(false);
+        document.querySelector<HTMLButtonElement>(".mobile-menu")?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [menu]);
   useEffect(() => {
     const fn = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
@@ -287,8 +306,8 @@ function Workspace({
   const alerts = state.lowStockCount;
   const nav = navigation.filter(
     (n) =>
-      (user.role !== "cashier" || !["/gastos", "/finanzas", "/reportes", "/responsables"].includes(n.path)) &&
-      (isManager || n.path !== "/finanzas"),
+      (user.role !== "cashier" || !["/app/gastos", "/app/finanzas", "/app/reportes", "/app/responsables"].includes(n.path)) &&
+      (isManager || !["/app/finanzas", "/app/vidriera", "/app/consultas"].includes(n.path)),
   );
   return (
     <ClubProvider
@@ -310,7 +329,7 @@ function Workspace({
           <button
             className="sidebar-scrim"
             aria-label="Cerrar navegación"
-            onClick={() => setMenu(false)}
+            onClick={() => { setMenu(false); document.querySelector<HTMLButtonElement>(".mobile-menu")?.focus(); }}
           />
         )}
         <aside className={`sidebar ${menu ? "open" : ""}`}>
@@ -318,10 +337,10 @@ function Workspace({
           <button
             className="club-switch"
             aria-label={`Configurar ${state.settings.clubName}`}
-            onClick={() => navigate("/configuracion")}
+            onClick={() => navigate("/app/configuracion")}
           >
             <span className="club-avatar">
-              <Plant weight="duotone" size={23} />
+              <img src="/brand/bombo-symbol.png" alt="" />
             </span>
             <span>
               <strong>{state.settings.clubName}</strong>
@@ -332,10 +351,10 @@ function Workspace({
           <div className="nav-label">OPERACIÓN</div>
           <nav aria-label="Operación del club">
             {nav.slice(0, 4).map(({ path, label, icon: Icon }) => (
-              <NavLink key={path} to={path} end={path === "/"}>
+              <NavLink key={path} to={path} end={path === "/app"}>
                 <Icon size={20} weight="duotone" />
                 <span>{label}</span>
-                {path === "/inventario" && alerts > 0 && (
+                {path === "/app/inventario" && alerts > 0 && (
                   <span className="nav-count">{alerts}</span>
                 )}
               </NavLink>
@@ -352,7 +371,7 @@ function Workspace({
           </nav>
           <div className="sidebar-bottom">
             {alerts > 0 ? (
-              <button className="club-health" onClick={() => navigate("/inventario?filter=low")}>
+              <button className="club-health" onClick={() => navigate("/app/inventario?filter=low")}>
                 <span className="club-health-icon"><Package size={20} /></span>
                 <span><strong>{alerts} {alerts === 1 ? "lote necesita" : "lotes necesitan"} atención</strong><small>Revisar stock bajo <ArrowRight size={13} /></small></span>
               </button>
@@ -362,7 +381,7 @@ function Workspace({
                 <span><strong>Stock al día</strong><small>Sin lotes bajo el mínimo</small></span>
               </div>
             )}
-            <NavLink className="settings-link" to="/configuracion">
+            <NavLink className="settings-link" to="/app/configuracion">
               <GearSix size={21} />
               Configuración
             </NavLink>
@@ -395,7 +414,7 @@ function Workspace({
               <span>Espacio de trabajo</span>
               <span className="breadcrumb-slash">/</span>
               <strong aria-current="page">
-                {navigation.find((n) => n.path === location.pathname)?.label ||
+                {navigation.find((n) => n.path === location.pathname.replace(/\/$/, ""))?.label ||
                   "Configuración"}
               </strong>
             </div>
@@ -476,44 +495,46 @@ function Workspace({
             >
               <Routes key={location.pathname}>
                 <Route
-                  path="/"
+                  index
                   element={<Dashboard onSale={openSale} />}
                 />
-                <Route path="/inventario" element={<Inventory />} />
-                <Route path="/socios" element={<Customers />} />
-                <Route path="/finanzas" element={isManager ? <Finance /> : <Navigate to="/" replace />} />
+                <Route path="inventario" element={<Inventory />} />
+                <Route path="socios" element={<Customers />} />
+                <Route path="finanzas" element={isManager ? <Finance /> : <Navigate to="/app" replace />} />
                 <Route
-                  path="/ventas"
+                  path="ventas"
                   element={<Sales onSale={openSale} />}
                 />
                 <Route
-                  path="/gastos"
+                  path="gastos"
                   element={
-                    user.role === "cashier" ? <Navigate to="/" /> : <Expenses />
+                    user.role === "cashier" ? <Navigate to="/app" /> : <Expenses />
                   }
                 />
                 <Route
-                  path="/responsables"
+                  path="responsables"
                   element={
                     user.role === "cashier" ? (
-                      <Navigate to="/" />
+                      <Navigate to="/app" />
                     ) : (
                       <Responsibles />
                     )
                   }
                 />
                 <Route
-                  path="/reportes"
+                  path="reportes"
                   element={
-                    user.role === "cashier" ? <Navigate to="/" /> : <Reports />
+                    user.role === "cashier" ? <Navigate to="/app" /> : <Reports />
                   }
                 />
-                <Route path="/configuracion" element={<Settings />} />
-                <Route path="*" element={<Navigate to="/" replace />} />
+                <Route path="configuracion" element={<Settings />} />
+                <Route path="vidriera" element={isManager ? <ShowcaseAdmin /> : <Navigate to="/app" replace />} />
+                <Route path="consultas" element={isManager ? <InquiriesAdmin /> : <Navigate to="/app" replace />} />
+                <Route path="*" element={<Navigate to="/app" replace />} />
               </Routes>
             </Suspense>
             <footer className="app-footer">
-              <span>Raíz · Cada dato, una mejor decisión.</span>
+              <span>Bombo cannabis club · Cada dato, una mejor decisión.</span>
               <span>
                 <span className="live-dot" />{" "}
                 {resource.loading ? "Actualizando…" : "Datos conectados"}
@@ -594,7 +615,7 @@ function Workspace({
                 className="icon-button"
                 aria-label={`Ver ${p.name}`}
                 onClick={() => {
-                  navigate("/inventario?q=" + encodeURIComponent(p.name));
+                  navigate("/app/inventario?q=" + encodeURIComponent(p.name));
                   setNotifications(false);
                 }}
               >
@@ -643,7 +664,7 @@ function Workspace({
                     void send<{ user: User }>("/auth/demo", { id: r.id })
                       .then(({ user }) => {
                         onUser(user);
-                        navigate("/");
+                        navigate("/app");
                       })
                       .catch((e) => toast.error(e.message))
                   }

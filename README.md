@@ -1,18 +1,26 @@
-# Raíz · Club Manager
+# Bombo cannabis club
+
+## Identidad y web pública en vista previa
+
+La marca oficial suministrada por el club se documenta en [docs/brand/guia-practica.md](docs/brand/guia-practica.md). [docs/brand/inventario.csv](docs/brand/inventario.csv) registra los 262 archivos originales con hashes y usos propuestos; [docs/brand/fuentes-contenido.md](docs/brand/fuentes-contenido.md) separa hechos y aprobaciones pendientes; [docs/brand/catalogo-historico.md](docs/brand/catalogo-historico.md) detalla nombres, descriptores y errores de piezas antiguas. Los originales siguen en `/Users/gigi/Downloads/BOMBO ID` y `public/brand` contiene únicamente exportaciones optimizadas para la vista previa.
+
+`/` presenta la landing, `/productos` muestra las fichas curadas, `/productos/:slug` ofrece detalle y consulta, y `/app/*` contiene el panel. Los enlaces anteriores del panel redirigen a `/app/*` conservando búsqueda y fragmento. Las fichas se administran en `/app/vidriera` y las consultas en `/app/consultas`, ambos solo para dueño y gerente; los canales oficiales se configuran en **Configuración → Canales públicos**. La vidriera no consulta ni expone precios, stock o reservas del inventario. Las imágenes subidas se convierten a WebP y se guardan en PostgreSQL.
+
+La web queda **sin despliegue público ni indexación** hasta la aprobación de Tiziano. La compilación de producción muestra una página de espera a menos que `VITE_PUBLIC_SITE_APPROVED=true`; la API pública requiere también `PUBLIC_SITE_APPROVED=true`. La lista editorial, derechos de fotografías, política de contacto, canales y cualquier texto sobre REPROCANN requieren la revisión descrita en [docs/brand/salida-vista-previa.md](docs/brand/salida-vista-previa.md). Los catálogos históricos no se importan a la operación.
 
 **Apertura 2026:** el plan de diagnóstico, conciliación, base financiera y salida gradual está en [docs/implementacion-octubre-2026.md](docs/implementacion-octubre-2026.md). En bases reales las operaciones con cannabis están deshabilitadas por defecto; `CLUB_OPERATIONS_APPROVED=true` requiere validación documentada por el profesional del club. Los datos reales de AppSheet, Sheets y caja siguen pendientes de recibir y conciliar.
 
 Aplicación full-stack de gestión de inventario, socios, fidelización, caja, gastos y responsables de stock. Interfaz en español, responsive, con persistencia real en PostgreSQL. No usa localStorage como base de datos ni respuestas simuladas de API.
 
-Paleta violeta y negra. Inventario visual con tarjetas por lote, indicadores de stock mínimo, alertas de vencimiento, responsable visible y detalle expandible; también dispone de vista de tabla. Componentes Minimal Card y Expandable adaptados del código oficial de [Cult UI](https://www.cult-ui.com/docs/components/expandable) a CSS propio y Motion, con licencia en [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+La interfaz usa oliva y crema de la identidad oficial, Bricolage Grotesque y el logotipo suministrado. El inventario conserva tarjetas por lote, indicadores de stock mínimo, alertas de vencimiento, responsable visible, detalle expandible y vista de tabla. Los componentes Minimal Card y Expandable se adaptaron del código oficial de [Cult UI](https://www.cult-ui.com/docs/components/expandable) a CSS propio; su licencia figura en [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 La configuración inicial utiliza **pesos argentinos (ARS)**, formato `es-AR` y zona horaria de Buenos Aires. La demo usa precios ilustrativos en pesos (por ejemplo, $10.000 por gramo), 1 punto cada $10.000, canje de $100 por punto y presupuesto mensual de $8.000.000. No representa una cotización cambiaria ni precios de mercado. Las bases existentes conservan su configuración; cambiar el valor predeterminado no convierte registros históricos.
 
 ## Stack
 
-Se conservan las versiones solicitadas: React/React DOM **19.1.1**, TypeScript **5.9.2** estricto en frontend y backend, Vite **7.1.4**, plugin React **5.0.2**, React Router DOM **7.8.2**, Motion **12.23.12**, Radix Dialog **1.1.15**, Phosphor **2.1.10**, Recharts **3.1.2**, Sonner **2.0.7**, Manrope Variable **5.2.8**, CSS propio, Hooks/Context y `fetch` con `useResource`.
+Se conservan las versiones solicitadas: React/React DOM **19.1.1**, TypeScript **5.9.2** estricto en frontend y backend, Vite **7.1.4**, plugin React **5.0.2**, React Router DOM **7.8.2**, Radix Dialog **1.1.15**, Phosphor **2.1.10**, Recharts **3.1.2**, Sonner **2.0.7**, Bricolage Grotesque suministrada por el club, CSS propio, Hooks/Context y `fetch` con `useResource`.
 
-Backend: Node **22.12+** (validado con **24.14.1**), Express **5.1.0**, PostgreSQL **16**, Prisma/Client **6.19.0**, Zod **4.1.5**, JWT **9.0.2**, bcryptjs **3.0.2**, cookie-parser **1.4.7**, Helmet **8.1.0**, cors **2.8.5**, express-rate-limit **8.1.0**, dotenv **17.2.2**, PDFKit **0.17.2** y ExcelJS **4.4.0**. Exportación CSV propia; importación con `csv-parse` **7.0.2**. Playwright y Node Test Runner para pruebas.
+Backend: Node **22.12+** (validado con **24.14.1**), Express **5.1.0**, PostgreSQL **16**, Prisma/Client **6.19.0**, Zod **4.1.5**, JWT **9.0.2**, bcryptjs **3.0.2**, cookie-parser **1.4.7**, Helmet **8.1.0**, cors **2.8.5**, express-rate-limit **8.1.0**, dotenv **17.2.2**, PDFKit **0.17.2**, ExcelJS **4.4.0** y Sharp **0.34.x** para las imágenes de vidriera. Exportación CSV propia; importación con `csv-parse` **7.0.2**. Playwright y Node Test Runner para pruebas.
 
 ## Inicio local
 
@@ -46,7 +54,7 @@ npm run dev
 
 Frontend predeterminado: `http://127.0.0.1:5173`. API: `http://127.0.0.1:3001`. Los puertos se pueden cambiar con `VITE_PORT` y `PORT`; actualizar también `ALLOWED_ORIGIN`. El proxy de Vite sigue `PORT`.
 
-El seed nunca borra datos: si ya existen usuarios, termina sin modificar la base. Los datos de ejemplo tienen fechas relativas al día de ejecución. Las credenciales demo (`owner@demo.raiz.local`, `Demo-Raiz-2026!`) son públicas y exclusivas de pruebas.
+El seed nunca borra datos: si ya existen usuarios, termina sin modificar la base. Los datos de ejemplo tienen fechas relativas al día de ejecución. Las credenciales demo (`owner@demo.bombo.local`, `Demo-Bombo-2026!`) son públicas y exclusivas de pruebas.
 
 ## Funcionalidad
 
@@ -137,9 +145,11 @@ Todas las rutas de datos requieren JWT en cookie `HttpOnly`, `SameSite=Strict`; 
 | GET        | `/api/reports/:format?from=&to=&owner=`    | `csv`, `xlsx` o `pdf`                      |
 | GET        | `/api/health`                              | Comprueba conexión a PostgreSQL            |
 
+La API pública de vista previa agrega `GET /api/site`, `GET /api/site/showcase`, `GET /api/site/showcase/:slug`, `GET /api/site/showcase/:slug/image` y `POST /api/site/inquiries`. Las rutas `/api/site/admin/*` requieren sesión de dueño o gerente y gestionan canales, fichas, imágenes y consultas. Las consultas se paginan con `nextCursor` y no crean socios. En producción, las rutas públicas permanecen cerradas hasta establecer `PUBLIC_SITE_APPROVED=true`.
+
 ## Pruebas
 
-`npm run check` valida tipos, pruebas unitarias y compilación. Para las pruebas de integración, configurá `TEST_DATABASE_URL` con una base PostgreSQL desechable y ejecutá `npm test`; cada ejecución crea y elimina su propio esquema. El circuito de navegador se ejecuta con `npm run test:e2e` contra una instancia demo aislada (`E2E_URL`).
+`npm run check` valida tipos, pruebas unitarias y compilación. Para las pruebas de integración, configurá `TEST_DATABASE_URL` con una base PostgreSQL desechable y ejecutá `npm test`; cada ejecución crea y elimina su propio esquema. El circuito de navegador se ejecuta con `npm run test:e2e` contra una instancia demo aislada (`E2E_URL`). Las pruebas de navegador dejan lotes, socios, ventas y proyecciones QA persistidos en esa demo; conviene usar una base de demostración desechable.
 
 ### Medición de carga
 

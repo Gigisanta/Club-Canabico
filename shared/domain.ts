@@ -1,6 +1,6 @@
 import type { Settings } from "./types.js";
 export const defaults: Settings = {
-  clubName: "Raíz Social Club",
+  clubName: "Bombo cannabis club",
   currency: "ARS",
   timezone: "America/Argentina/Buenos_Aires",
   pointsEvery: 1000000,

@@ -380,7 +380,7 @@ export function Responsibles() {
               className="button full-width"
               onClick={() => {
                 setOwner(o.id);
-                navigate("/inventario");
+                navigate("/app/inventario");
               }}
             >
               Ver inventario <ArrowRight />

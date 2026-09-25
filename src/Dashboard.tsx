@@ -77,8 +77,8 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
   );
   useEffect(() => {
     const refresh = () => void metrics.reload();
-    window.addEventListener("raiz:sale-changed", refresh);
-    return () => window.removeEventListener("raiz:sale-changed", refresh);
+    window.addEventListener("bombo:sale-changed", refresh);
+    return () => window.removeEventListener("bombo:sale-changed", refresh);
   }, [metrics.reload]);
   const data = metrics.data;
   const stock = state.products.reduce(
@@ -125,43 +125,43 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
   if (["owner", "admin"].includes(user.role) && permitsToReview > 0) decisions.push({
     title: `Revisar ${permitsToReview} ${permitsToReview === 1 ? "permiso" : "permisos"} de socios`,
     detail: "Hay verificaciones pendientes, vencidas o próximas a vencer en 14 días.",
-    action: "Ver pendientes", path: "/socios?segment=permits",
+    action: "Ver pendientes", path: "/app/socios?segment=permits",
   });
   if (low.length) decisions.push({
     title: `Reponer ${low.length} ${low.length === 1 ? "lote" : "lotes"} con stock bajo`,
     detail: `Empezá por ${low[0].name}. ${low.length > 1 ? `Hay ${low.length - 1} ${low.length === 2 ? "lote más" : "lotes más"} debajo del mínimo.` : "Revisá cantidad disponible y próxima compra."}`,
-    action: "Revisar inventario", path: "/inventario?filter=low",
+    action: "Revisar inventario", path: "/app/inventario?filter=low",
   });
   if (outlook.revenue7 !== null && outlook.previous14 > 0 && outlook.recent14 < outlook.previous14 * 0.85) decisions.push({
     title: "Investigar la baja en ventas",
     detail: `Los últimos 14 días suman ${money(outlook.recent14)}, frente a ${money(outlook.previous14)} en los 14 anteriores.`,
-    action: "Ver ventas", path: "/ventas",
+    action: "Ver ventas", path: "/app/ventas",
   });
   if (previousRepeatShare !== null && repeatShare !== null && outlook.buyers28 >= 8 &&
     repeatShare < previousRepeatShare - 0.05) decisions.push({
     title: "Revisar la recompra",
     detail: `La proporción de compradores recurrentes bajó de ${Math.round(previousRepeatShare * 100)}% a ${Math.round(repeatShare * 100)}% entre períodos de 28 días.`,
-    action: "Ver socios", path: "/socios",
+    action: "Ver socios", path: "/app/socios",
   });
   if (previousFirstBuyers >= 5 && firstBuyers < previousFirstBuyers * 0.8) decisions.push({
     title: "Revisar las primeras compras",
     detail: `${firstBuyers} socios compraron por primera vez en 28 días, frente a ${previousFirstBuyers} en los 28 anteriores.`,
-    action: "Ver socios", path: "/socios",
+    action: "Ver socios", path: "/app/socios",
   });
   if (inactive > 0) decisions.push({
     title: `Revisar ${inactive} ${inactive === 1 ? "socio inactivo" : "socios inactivos"}`,
     detail: `No registran compras hace al menos ${inactiveDays} días. Verificá sus fichas antes de definir una acción.`,
-    action: "Ver segmento", path: `/socios?segment=inactive&days=${inactiveDays}`,
+    action: "Ver segmento", path: `/app/socios?segment=inactive&days=${inactiveDays}`,
   });
   if (financial && state.settings.budget > 0 && monthlyExpenses > state.settings.budget * 0.85) decisions.push({
     title: "Revisar el presupuesto de gastos",
     detail: `Los gastos registrados del mes ya alcanzan ${Math.round(monthlyExpenses / state.settings.budget * 100)}% del presupuesto.`,
-    action: "Ver gastos", path: "/gastos",
+    action: "Ver gastos", path: "/app/gastos",
   });
   if (expiring.length) decisions.push({
     title: `Revisar ${expiring.length} ${expiring.length === 1 ? "lote próximo" : "lotes próximos"} a vencer`,
     detail: `Hay stock con vencimiento dentro de 30 días; empezá por ${expiring[0].name}.`,
-    action: "Ver inventario", path: `/inventario?q=${encodeURIComponent(expiring[0].name)}`,
+    action: "Ver inventario", path: `/app/inventario?q=${encodeURIComponent(expiring[0].name)}`,
   });
   return (
     <>
@@ -199,7 +199,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
           {financial && (
             <button
               onClick={() =>
-                navigate(financial ? "/responsables" : "/inventario")
+                navigate(financial ? "/app/responsables" : "/app/inventario")
               }
             >
               Por responsable <ArrowUpRight size={13} />
@@ -330,27 +330,27 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
               >
                 <defs>
                   <linearGradient id="incomeFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#4b815b" stopOpacity={0.24} />
-                    <stop offset="95%" stopColor="#4b815b" stopOpacity={0.01} />
+                    <stop offset="0%" stopColor="#6e772f" stopOpacity={0.24} />
+                    <stop offset="95%" stopColor="#6e772f" stopOpacity={0.01} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid
                   strokeDasharray="3 5"
                   vertical={false}
-                  stroke="#e3e9df"
+                  stroke="#e1dbc7"
                 />
                 <XAxis
                   dataKey="label"
                   tickLine={false}
                   axisLine={false}
                   minTickGap={40}
-                  tick={{ fontSize: 10, fill: "#6e806f" }}
+                  tick={{ fontSize: 10, fill: "#686b57" }}
                   dy={8}
                 />
                 <YAxis
                   tickLine={false}
                   axisLine={false}
-                  tick={{ fontSize: 10, fill: "#6e806f" }}
+                  tick={{ fontSize: 10, fill: "#686b57" }}
                   tickFormatter={(v) =>
                     `${v >= 1000 ? `${number(v / 1000)}k` : v}`
                   }
@@ -358,9 +358,9 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
                 <Tooltip
                   contentStyle={{
                     borderRadius: 10,
-                    border: "1px solid #d9e4d7",
-                    background: "#fffefa",
-                    color: "#20382c",
+                    border: "1px solid #d9d1bb",
+                    background: "#fffaf0",
+                    color: "#3e402e",
                     fontSize: 12,
                   }}
                   formatter={(v, name) => [
@@ -377,7 +377,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
                     type="monotone"
                     dataKey="previous"
                     fill="transparent"
-                    stroke="#9fb5a0"
+                    stroke="#c4bca8"
                     strokeWidth={1.5}
                     strokeDasharray="5 5"
                     isAnimationActive={false}
@@ -386,7 +386,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
                 <Area
                   type="monotone"
                   dataKey={tab}
-                  stroke="#4b815b"
+                  stroke="#6e772f"
                   strokeWidth={2.5}
                   fill="url(#incomeFill)"
                   isAnimationActive={false}
@@ -421,7 +421,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
             <button
               className="icon-button"
               aria-label="Ver responsables"
-              onClick={() => navigate("/responsables")}
+              onClick={() => navigate("/app/responsables")}
             >
               <ArrowUpRight size={20} />
             </button>
@@ -444,11 +444,11 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
                   {owners.map((o, i) => (
                     <Cell
                       key={o.id}
-                      fill={["#315e43", "#7b9e69", "#c2a266", "#a6c8b1"][i % 4]}
+                      fill={["#3e402e", "#6e772f", "#ff7b1c", "#b4aaff"][i % 4]}
                     />
                   ))}
                 </Pie>
-                <Tooltip contentStyle={{ background: "#fffefa", borderColor: "#d9e4d7", color: "#20382c" }} itemStyle={{ color: "#20382c" }} formatter={(v) => money(Number(v))} />
+                <Tooltip contentStyle={{ background: "#fffaf0", borderColor: "#d9d1bb", color: "#3e402e" }} itemStyle={{ color: "#3e402e" }} formatter={(v) => money(Number(v))} />
               </PieChart>
             </ResponsiveContainer>
             <div className="donut-center">
@@ -465,7 +465,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
                 <span>
                   <i
                     style={{
-                      background: ["#315e43", "#7b9e69", "#c2a266", "#a6c8b1"][
+                      background: ["#3e402e", "#6e772f", "#ff7b1c", "#b4aaff"][
                         i % 4
                       ],
                     }}
@@ -488,7 +488,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
           </div>
           <button
             className="panel-bottom-link"
-            onClick={() => navigate("/responsables")}
+            onClick={() => navigate("/app/responsables")}
           >
             Ver distribución de inventario <ArrowRight size={15} />
           </button>
@@ -499,7 +499,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
           title="Los que más eligen tu club"
           sub="Top 10 socios en el período seleccionado"
           action={
-            <ActionLink onClick={() => navigate("/socios")}>
+            <ActionLink onClick={() => navigate("/app/socios")}>
               Ver socios
             </ActionLink>
           }
@@ -559,7 +559,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
                             className="text-button"
                             onClick={() =>
                               navigate(
-                                "/socios?q=" + encodeURIComponent(c.name),
+                                "/app/socios?q=" + encodeURIComponent(c.name),
                               )
                             }
                           >
@@ -614,7 +614,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
               </select>
             </div>
             <strong>{number(inactive)} socios</strong>
-            <button onClick={() => navigate(`/socios?segment=inactive&days=${inactiveDays}`)}>Revisar fichas <ArrowRight size={15} /></button>
+            <button onClick={() => navigate(`/app/socios?segment=inactive&days=${inactiveDays}`)}>Revisar fichas <ArrowRight size={15} /></button>
           </div>
         </Panel>
       </div>
@@ -624,7 +624,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
             title="El aporte de cada responsable"
             sub="Ventas y rentabilidad del período"
             action={
-              <ActionLink onClick={() => navigate("/responsables")}>
+              <ActionLink onClick={() => navigate("/app/responsables")}>
                 Comparar
               </ActionLink>
             }
@@ -677,7 +677,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
             <p className="muted small">
               Los gastos incluyen costos fijos y variables registrados.
             </p>
-            <ActionLink onClick={() => navigate("/gastos")}>
+            <ActionLink onClick={() => navigate("/app/gastos")}>
               Revisar gastos
             </ActionLink>
           </Panel>

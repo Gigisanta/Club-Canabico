@@ -37,7 +37,7 @@ async function seed() {
   }
   if (process.env.NODE_ENV === "production")
     throw new Error("Seed demo deshabilitado en producción");
-  const password = await bcrypt.hash("Demo-Raiz-2026!", 12);
+  const password = await bcrypt.hash("Demo-Bombo-2026!", 12);
   const people: [string, string, Role, string][] = [
     ["owner", "Tiziano", "owner", "#9b78e6"],
     ["r1", "Lucía Fernández", "responsible", "#b39cc9"],
@@ -63,7 +63,7 @@ async function seed() {
             role,
             color,
             password,
-            email: `${id}@demo.raiz.local`,
+            email: `${id}@demo.bombo.local`,
           },
         });
       const names = [

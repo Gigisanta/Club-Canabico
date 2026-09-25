@@ -1,5 +1,7 @@
 import type { Response } from "express";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import ExcelJS from "exceljs";
 import PDFDocument from "pdfkit";
 import { Prisma, type User } from "@prisma/client";
@@ -56,7 +58,7 @@ async function* batches(user: User, requested: string | undefined, from?: string
 export async function exportReport(res: Response, user: User, requested: string | undefined, format: "csv" | "xlsx" | "pdf", from?: string, to?: string) {
   const settings = await getSettings();
   const today = businessDate(settings);
-  res.setHeader("Content-Disposition", `attachment; filename="raiz-reporte-${today}.${format}"`);
+  res.setHeader("Content-Disposition", `attachment; filename="bombo-reporte-${today}.${format}"`);
   if (format === "csv") {
     res.type("text/csv; charset=utf-8");
     res.write("\uFEFF" + columns.map(csvCell).join(",") + "\r\n");
@@ -75,7 +77,7 @@ export async function exportReport(res: Response, user: User, requested: string 
     const sheet = book.addWorksheet("Ventas");
     sheet.columns = columns.map((key) => ({ header: key, key, width: key === "Ticket" ? 30 : 22 }));
     sheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
-    sheet.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF315E43" } };
+    sheet.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF3E402E" } };
     sheet.getRow(1).commit();
     for (const key of ["Ingresos", "Costo", "Margen"]) sheet.getColumn(key).numFmt = `"${settings.currency}" #,##0.00`;
     for await (const batch of batches(user, requested, from, to)) {
@@ -108,13 +110,17 @@ export async function exportReport(res: Response, user: User, requested: string 
   const salesCount = Number(totals[0]?.count || 0);
   const total = Number(totals[0]?.total || 0);
   const cost = Number(totals[0]?.cost || 0);
-  const doc = new PDFDocument({ margin: 45, size: "A4", info: { Title: "Liquidación por responsable · Raíz" } });
+  const doc = new PDFDocument({ margin: 45, size: "A4", info: { Title: "Liquidación por responsable · Bombo cannabis club" } });
   res.type("application/pdf");
   doc.pipe(res);
   const money = (n: number) => new Intl.NumberFormat("es-AR", { style: "currency", currency: settings.currency }).format(n / 100);
-  doc.fontSize(24).fillColor("#315e43").text(settings.clubName);
-  doc.moveDown(0.5).fontSize(12).fillColor("#222222").text("Liquidación por responsable");
-  doc.fontSize(10).fillColor("#666666").text(`${from || "Inicio"} a ${to || today} · Emitido ${today} · ${settings.currency}`);
+  const logo = resolve("public/brand/bombo-olive.png");
+  const headingFont = resolve("public/brand/BricolageGrotesque_72pt-SemiBold.ttf");
+  if (existsSync(logo)) { doc.image(logo, 45, 45, { width: 140 }); doc.y = 92; }
+  if (existsSync(headingFont)) doc.font(headingFont);
+  doc.fontSize(19).fillColor("#3E402E").text("Liquidación por responsable");
+  doc.moveDown(0.3).fontSize(11).fillColor("#3E402E").text(settings.clubName);
+  doc.fontSize(10).fillColor("#686B57").text(`${from || "Inicio"} a ${to || today} · Emitido ${today} · ${settings.currency}`);
   doc.moveDown(2);
   for (const row of ownerRows) {
     if (doc.y > 680) doc.addPage();

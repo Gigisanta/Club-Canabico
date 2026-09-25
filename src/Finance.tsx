@@ -88,7 +88,7 @@ export default function Finance() {
       <div className="finance-callout">
         <span className="finance-callout-index">01 / CONCILIACIÓN</span>
         <div><strong>{withoutSupplier ? `${withoutSupplier} ${withoutSupplier === 1 ? "lote sin proveedor" : "lotes sin proveedor"}` : "Proveedores cargados"}</strong><p>El valor a costo es preliminar hasta cotejar proveedor, factura y conteo físico de cada lote.</p></div>
-        <button onClick={() => navigate("/inventario")}>Revisar inventario <ArrowRight size={16} /></button>
+        <button onClick={() => navigate("/app/inventario")}>Revisar inventario <ArrowRight size={16} /></button>
       </div>
     <Panel title="Capital en inventario" sub="Valuación por lote y proveedor · cantidad actual por costo unitario cargado.">
       <div className="table-scroll"><table><thead><tr><th>Lote</th><th>Proveedor</th><th>Producto</th><th className="numeric">Cantidad</th><th className="numeric">Costo unitario</th><th className="numeric">Valor a costo</th></tr></thead><tbody>{state.products.map((p) => <tr key={p.id}><td className="table-code">{p.lot}</td><td>{p.supplier || <span className="missing-value">Sin proveedor</span>}</td><td className="table-name">{p.name}</td><td className="numeric">{number(p.stock / 1000)} {p.unit}</td><td className="numeric">{money(p.cost)}</td><td className="numeric amount">{money(Math.round(p.stock * p.cost / 1000))}</td></tr>)}</tbody></table></div>

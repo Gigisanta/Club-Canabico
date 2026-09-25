@@ -24,7 +24,7 @@ test("purchase history helps service without extra entry", async ({ page }) => {
 test("dashboard separates actuals, projections and recommended actions", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.goto("/");
+  await page.goto("/app");
   await page.getByRole("button", { name: "Explorar club de demostración" }).click();
   await expect(page.getByRole("heading", { name: "Estado del período" })).toBeVisible();
   const outlook = page.getByRole("region", { name: "Lo que sugiere el ritmo reciente" });
@@ -198,7 +198,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
 }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  await page.goto("/");
+  await page.goto("/app");
   await page
     .getByRole("button", { name: "Explorar club de demostración" })
     .click();
@@ -359,7 +359,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
 test("responsible: scope cannot be switched; foreign lots and settings actions absent", async ({
   page,
 }) => {
-  await page.goto("/");
+  await page.goto("/app");
   await page
     .getByRole("button", { name: "Explorar club de demostración" })
     .click();
@@ -389,7 +389,7 @@ test("mobile: navigation, filters and sale modal fit the viewport", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await page.goto("/app");
   await page
     .getByRole("button", { name: "Explorar club de demostración" })
     .click();

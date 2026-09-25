@@ -7,10 +7,12 @@ import {
   Plus,
   DownloadSimple,
   CheckCircle,
+  Globe,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import { useClub, send, roleLabels, type Settings as Config } from "./lib";
 import { PageHeader, Panel, Form, Field, Avatar, Badge, Modal } from "./ui";
+import PublicChannelsSettings from "./PublicChannelsSettings";
 interface ImportResult {
   count: number;
   skipped: number;
@@ -102,6 +104,11 @@ export default function Settings() {
           Equipo y permisos
         </button>
         {isManager && (
+          <button className={tab === "public" ? "active" : ""} onClick={() => setTab("public")}>
+            <Globe /> Canales públicos
+          </button>
+        )}
+        {isManager && (
           <button
             className={tab === "import" ? "active" : ""}
             onClick={() => setTab("import")}
@@ -111,6 +118,7 @@ export default function Settings() {
           </button>
         )}
       </div>
+      {tab === "public" && isManager && <PublicChannelsSettings />}
       {tab === "general" && (
         <Panel
           title="Configuración del club"

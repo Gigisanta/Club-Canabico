@@ -147,7 +147,7 @@
   .page-heading.page-heading {
     gap: 12px;
   }
-  h1 {
+  .workspace h1 {
     font-size: 25px !important;
   }
   .global-search > span,

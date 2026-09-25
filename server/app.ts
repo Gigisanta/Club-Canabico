@@ -40,6 +40,7 @@ import { resolveLocation, locationKey, locationName } from "./locations.js";
 import { exportReport } from "./reports.js";
 import { productCatalog } from "./product-catalog.js";
 import { customerInsights } from "./customer-insights.js";
+import { publicSite, adminSite } from "./site.js";
 declare global {
   namespace Express {
     interface Request {
@@ -59,6 +60,10 @@ const allowedOrigins = (
 ).split(",");
 export const app = express();
 app.disable("x-powered-by");
+app.use((_req, res, next) => {
+  if (process.env.PUBLIC_SITE_APPROVED !== "true") res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+  next();
+});
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -140,6 +145,7 @@ app.get("/api/health", async (_req, res) => {
   res.json({ ok: true });
 });
 app.get("/api/config", (_req, res) => res.json({ demo }));
+app.use("/api/site", publicSite);
 app.post(
   "/api/auth/login",
   rateLimit({
@@ -186,6 +192,7 @@ app.get("/api/auth/me", auth, (req, res) =>
   }),
 );
 app.use("/api", auth);
+app.use("/api/site/admin", roles("owner", "admin"), adminSite);
 app.get("/api/views/:view", async (req, res) =>
   res.json(
     await getState(
@@ -1002,6 +1009,12 @@ app.use("/api", (_req, res) =>
   res.status(404).json({ error: "Ruta no encontrada" }),
 );
 if (existsSync(resolve("dist/index.html"))) {
+  app.use("/brand", (req, res, next) => {
+    if (process.env.NODE_ENV === "production" && process.env.PUBLIC_SITE_APPROVED !== "true" &&
+      /^\/(home|club|flores|aceite|topicos|comestibles)\.webp$/.test(req.path))
+      return res.sendStatus(404);
+    next();
+  });
   app.use(express.static(resolve("dist")));
   app.get("/{*path}", (_req, res) => res.sendFile(resolve("dist/index.html")));
 }

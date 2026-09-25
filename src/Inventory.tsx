@@ -377,6 +377,7 @@ export default function Inventory() {
   return (
     <>
       <PageHeader
+        className="inventory-heading"
         eyebrow="CADA LOTE, EN SU LUGAR"
         title="Inventario"
         description="Cada lote, su stock y su responsable. Importes en pesos argentinos (ARS)."

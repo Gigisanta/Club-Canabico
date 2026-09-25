@@ -241,3 +241,50 @@ model Setting {
   id Int @id @default(1)
   value Json
 }
+
+// Public editorial content is intentionally independent of inventory and prices.
+model ShowcaseItem {
+  id String @id @default(cuid())
+  slug String @unique
+  title String
+  category String
+  description String @db.Text
+  status String @default("draft")
+  sortOrder Int @default(0)
+  image ShowcaseImage?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([status, sortOrder, createdAt])
+}
+
+model ShowcaseImage {
+  itemId String @id
+  item ShowcaseItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  data Bytes
+  mime String
+  width Int
+  height Int
+  updatedAt DateTime @updatedAt
+}
+
+model PublicInquiry {
+  id String @id @default(cuid())
+  name String
+  contact String
+  interest String
+  message String @db.Text
+  source String
+  status String @default("new")
+  notes String @default("") @db.Text
+  consentAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([status, createdAt])
+}
+
+model SiteChannels {
+  id Int @id @default(1)
+  whatsappPhone String @default("")
+  instagramUrl String @default("")
+  updatedAt DateTime @updatedAt
+}

@@ -120,8 +120,8 @@ export async function globalSearch(user: User, requested: string | undefined, ra
     }, orderBy: { name: "asc" }, take: 6, select: { name: true } }),
   ]);
   return { items: [
-    ...products.map((p) => ({ name: p.name, type: p.lot, path: "/inventario" })),
-    ...customers.map((c) => ({ name: c.name, type: "Socio", path: "/socios" })),
+    ...products.map((p) => ({ name: p.name, type: p.lot, path: "/app/inventario" })),
+    ...customers.map((c) => ({ name: c.name, type: "Socio", path: "/app/socios" })),
   ] };
 }
 

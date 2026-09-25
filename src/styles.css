@@ -12,7 +12,7 @@
   text-decoration: underline;
 }
 :root {
-  font-family: "Manrope Variable", sans-serif;
+  font-family: Bricolage, sans-serif;
   color: var(--text);
   background: var(--surface);
   font-synthesis: none;

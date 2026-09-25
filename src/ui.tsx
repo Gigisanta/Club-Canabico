@@ -15,21 +15,15 @@ import {
   ArrowDownRight,
   ArrowRight,
   CircleNotch,
-  Leaf,
   MagnifyingGlass,
   Tray,
 } from "@phosphor-icons/react";
 import { initials } from "./lib";
 export function Brand() {
   return (
-    <div className="brand">
-      <span className="brand-mark">
-        <Leaf size={25} weight="fill" />
-      </span>
-      <span>
-        raíz<span className="brand-dot">.</span>
-      </span>
-      <span className="brand-caption">GESTIÓN DEL CLUB</span>
+    <div className="brand" role="img" aria-label="Bombo">
+      <img className="brand-on-dark" src="/brand/bombo-white.webp" alt="" aria-hidden="true" />
+      <img className="brand-on-light" src="/brand/bombo-olive.webp" alt="" aria-hidden="true" />
     </div>
   );
 }
@@ -330,14 +324,16 @@ export function PageHeader({
   title,
   description,
   actions,
+  className,
 }: {
   eyebrow?: string;
   title: string;
   description: string;
   actions?: ReactNode;
+  className?: string;
 }) {
   return (
-    <div className="page-heading">
+    <div className={`page-heading${className ? ` ${className}` : ""}`}>
       <div>
         {eyebrow && <p className="eyebrow">{eyebrow}</p>}
         <h1>{title}</h1>

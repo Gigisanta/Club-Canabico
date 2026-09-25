@@ -5,7 +5,7 @@ await db.$connect();
 const port = Number(process.env.PORT || 3001);
 const host = process.env.HOST || "127.0.0.1";
 const server = app.listen(port, host, () =>
-  console.log(`Raíz API en http://${host}:${port}`),
+  console.log(`Bombo cannabis club API en http://${host}:${port}`),
 );
 for (const signal of ["SIGINT", "SIGTERM"])
   process.on(signal, () =>
