@@ -41,5 +41,5 @@ Generada a partir de `/Users/gigi/Downloads/BOMBO ID` (solo lectura).
 - `Promociones/ BOMBO PROMO.pdf`
   - `Promociones/BOMBO PROMO.pdf`
 
-El CSV registra tamaño, fecha, SHA-256, dimensiones o páginas, duplicados y uso propuesto por archivo. 
+El CSV registra tamaño, fecha, SHA-256, dimensiones o páginas, duplicados y uso propuesto por archivo.
 Las fechas reflejan metadatos de archivo y no acreditan fecha de creación o licencia.
