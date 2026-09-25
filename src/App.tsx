@@ -1,4 +1,4 @@
-import { useEffect, useState, lazy, Suspense } from "react";
+import { useEffect, useRef, useState, lazy, Suspense } from "react";
 import {
   NavLink,
   Routes,
@@ -8,13 +8,8 @@ import {
   useNavigate,
 } from "react-router-dom";
 import {
-  SquaresFour,
   Package,
-  Users,
-  Receipt,
-  Wallet,
   Plant,
-  ChartBar,
   GearSix,
   Bell,
   MagnifyingGlass,
@@ -26,9 +21,8 @@ import {
   ShieldCheck,
   ArrowRight,
   X,
-  UploadSimple,
-  Storefront,
-  ChatCircleDots,
+  DotsThree,
+  CaretDown,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import {
@@ -42,7 +36,13 @@ import {
   type ClubState,
 } from "./lib";
 import { Avatar, Brand, Modal, Field, Form, Empty } from "./ui";
+import { canVisit, currentDestination, hubsForRole, searchDestinations } from "./navigation";
+const Today = lazy(() => import("./Today"));
 const Dashboard = lazy(() => import("./Dashboard").then((m) => ({ default: m.Dashboard })));
+const DecisionCenter = lazy(() => import("./DecisionCenter"));
+const DecisionAnalysis = lazy(() => import("./DecisionAnalysis"));
+const DecisionInputs = lazy(() => import("./DecisionInputs"));
+const DataImportStudio = lazy(() => import("./DataImportStudio"));
 const Sales = lazy(() => import("./Sales"));
 const SaleModal = lazy(() => import("./Sales").then((m) => ({ default: m.SaleModal })));
 const Inventory = lazy(() => import("./Inventory"));
@@ -61,18 +61,6 @@ const Settings = lazy(() => import("./Settings"));
 const Finance = lazy(() => import("./Finance"));
 const ShowcaseAdmin = lazy(() => import("./ShowcaseAdmin"));
 const InquiriesAdmin = lazy(() => import("./InquiriesAdmin"));
-const navigation = [
-  { path: "/app", label: "Resumen general", icon: SquaresFour },
-  { path: "/app/ventas", label: "Ventas y caja", icon: Receipt },
-  { path: "/app/inventario", label: "Inventario", icon: Package },
-  { path: "/app/socios", label: "Socios y fidelización", icon: Users },
-  { path: "/app/gastos", label: "Gastos", icon: Wallet },
-  { path: "/app/finanzas", label: "Caja y planificación", icon: ChartBar },
-  { path: "/app/responsables", label: "Responsables", icon: Plant },
-  { path: "/app/reportes", label: "Reportes", icon: ChartBar },
-  { path: "/app/vidriera", label: "Vidriera", icon: Storefront },
-  { path: "/app/consultas", label: "Consultas", icon: ChatCircleDots },
-];
 function Login({
   onLogin,
   demo,
@@ -228,16 +216,26 @@ function Workspace({
   const [saleLoaded, setSaleLoaded] = useState(false);
   const openSale = () => { setSaleLoaded(true); setSaleOpen(true); };
   const [menu, setMenu] = useState(false);
+  const menuTrigger = useRef<HTMLButtonElement | null>(null);
+  const mainRegion = useRef<HTMLElement | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [notifications, setNotifications] = useState(false);
   const [profile, setProfile] = useState(false);
   const location = useLocation();
+  const [openHub, setOpenHub] = useState<string | null>("inicio");
+  const hubs = hubsForRole(user.role);
+  const current = currentDestination(location.pathname, location.search, user.role);
+  useEffect(() => {
+    const destination = currentDestination(location.pathname, location.search, user.role);
+    if (destination) setOpenHub(destination.hub.id);
+  }, [location.pathname, location.search, user.role]);
   const view = ({
-    "/app": "dashboard", "/app/": "dashboard", "/app/inventario": "inventory", "/app/socios": "customers",
+    "/app": "dashboard", "/app/": "dashboard", "/app/panorama": "dashboard", "/app/decisiones": "dashboard", "/app/inventario": "inventory", "/app/socios": "customers",
     "/app/ventas": "sales", "/app/gastos": "expenses", "/app/finanzas": "finance",
-    "/app/responsables": "responsibles", "/app/reportes": "reports", "/app/configuracion": "settings",
+    "/app/decisiones/stock": "dashboard", "/app/decisiones/comercial": "dashboard", "/app/decisiones/caja": "dashboard", "/app/decisiones/socios": "dashboard",
+    "/app/responsables": "responsibles", "/app/reportes": "reports", "/app/configuracion": "settings", "/app/importar": "settings", "/app/preparar": "settings",
     "/app/vidriera": "settings", "/app/consultas": "settings",
   } as Record<string, string>)[location.pathname] || "dashboard";
   const resource = useResource<ClubState>(
@@ -253,19 +251,50 @@ function Workspace({
   const canManage = ["owner", "admin", "responsible"].includes(user.role);
   const canSell = user.role !== "viewer" && Boolean(state?.operationsEnabled);
   useEffect(() => {
+    if (menu) requestAnimationFrame(() => mainRegion.current?.focus());
     setMenu(false);
   }, [location.pathname]);
+  const closeMenu = () => {
+    setMenu(false);
+    requestAnimationFrame(() => menuTrigger.current?.focus());
+  };
+  const finishMenuNavigation = () => {
+    if (!menu) return;
+    setMenu(false);
+    requestAnimationFrame(() => mainRegion.current?.focus());
+  };
+  const openMenu = (trigger: HTMLButtonElement) => {
+    menuTrigger.current = trigger;
+    setMenu(true);
+  };
   useEffect(() => {
     if (!menu) return;
-    document.querySelector<HTMLAnchorElement>(".sidebar nav a")?.focus();
+    document.querySelector<HTMLButtonElement>("#app-navigation .sidebar-close")?.focus();
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setMenu(false);
-        document.querySelector<HTMLButtonElement>(".mobile-menu")?.focus();
+        closeMenu();
+        return;
+      }
+      if (event.key === "Tab") {
+        const focusable = [...document.querySelectorAll<HTMLElement>("#app-navigation a, #app-navigation button:not([disabled])")];
+        const first = focusable[0];
+        const last = focusable.at(-1);
+        if (!document.getElementById("app-navigation")?.contains(document.activeElement)) {
+          event.preventDefault();
+          (event.shiftKey ? last : first)?.focus();
+        } else if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last?.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first?.focus();
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => { window.removeEventListener("keydown", onKeyDown); document.body.style.overflow = previousOverflow; };
   }, [menu]);
   useEffect(() => {
     const fn = (e: KeyboardEvent) => {
@@ -304,11 +333,9 @@ function Workspace({
       </div>
     );
   const alerts = state.lowStockCount;
-  const nav = navigation.filter(
-    (n) =>
-      (user.role !== "cashier" || !["/app/gastos", "/app/finanzas", "/app/reportes", "/app/responsables"].includes(n.path)) &&
-      (isManager || !["/app/finanzas", "/app/vidriera", "/app/consultas"].includes(n.path)),
-  );
+  const mobilePrimary = hubs.filter((hub) => ["inicio", "ventas", "stock", "socios"].includes(hub.id));
+  const mobileLabels: Record<string, string> = { inicio: "Inicio", ventas: "Ventas", stock: "Stock", socios: "Socios" };
+  const moreActive = !mobilePrimary.some((hub) => hub.id === current?.hub.id);
   return (
     <ClubProvider
       value={{
@@ -329,15 +356,18 @@ function Workspace({
           <button
             className="sidebar-scrim"
             aria-label="Cerrar navegación"
-            onClick={() => { setMenu(false); document.querySelector<HTMLButtonElement>(".mobile-menu")?.focus(); }}
+            onClick={closeMenu}
           />
         )}
-        <aside className={`sidebar ${menu ? "open" : ""}`}>
+        <aside id="app-navigation" className={`sidebar ${menu ? "open" : ""}`} role={menu ? "dialog" : undefined} aria-modal={menu || undefined} aria-label={menu ? "Navegación del club" : undefined} onClickCapture={(event) => {
+          if ((event.target as HTMLElement).closest("a")) finishMenuNavigation();
+        }}>
           <Brand />
+          <button type="button" className="sidebar-close icon-button" aria-label="Cerrar navegación" onClick={closeMenu}><X size={21} /></button>
           <button
             className="club-switch"
             aria-label={`Configurar ${state.settings.clubName}`}
-            onClick={() => navigate("/app/configuracion")}
+            onClick={() => { navigate("/app/configuracion"); finishMenuNavigation(); }}
           >
             <span className="club-avatar">
               <img src="/brand/bombo-symbol.png" alt="" />
@@ -348,30 +378,30 @@ function Workspace({
             </span>
             <ArrowRight size={14} />
           </button>
-          <div className="nav-label">OPERACIÓN</div>
-          <nav aria-label="Operación del club">
-            {nav.slice(0, 4).map(({ path, label, icon: Icon }) => (
-              <NavLink key={path} to={path} end={path === "/app"}>
-                <Icon size={20} weight="duotone" />
-                <span>{label}</span>
-                {path === "/app/inventario" && alerts > 0 && (
-                  <span className="nav-count">{alerts}</span>
-                )}
-              </NavLink>
-            ))}
-          </nav>
-          {nav.length > 4 && <div className="nav-label secondary">ADMINISTRACIÓN</div>}
-          <nav aria-label="Administración del club">
-            {nav.slice(4).map(({ path, label, icon: Icon }) => (
-              <NavLink key={path} to={path}>
-                <Icon size={20} weight="duotone" />
-                <span>{label}</span>
-              </NavLink>
-            ))}
+          <nav className="hub-navigation" aria-label="Áreas del club">
+            {hubs.map((hub) => {
+              const Icon = hub.icon;
+              const expanded = openHub === hub.id;
+              const selected = current?.hub.id === hub.id;
+              const main = hub.items[0];
+              return <div className={`hub-group${selected ? " is-current" : ""}`} key={hub.id}>
+                <div className="hub-heading">
+                  <NavLink className="hub-link" to={main.path} aria-label={hub.label}>
+                    <Icon size={20} weight="duotone" aria-hidden="true" />
+                    <span>{hub.label}</span>
+                    {hub.id === "stock" && alerts > 0 && <span className="nav-count" aria-label={`${alerts} alertas`}>{alerts}</span>}
+                  </NavLink>
+                  <h2 className="hub-toggle-heading"><button id={`hub-toggle-${hub.id}`} type="button" className="hub-toggle" aria-label={`Opciones de ${hub.label}`} aria-expanded={expanded} aria-controls={`hub-items-${hub.id}`} onClick={() => setOpenHub(expanded ? null : hub.id)}><CaretDown size={16} aria-hidden="true" /></button></h2>
+                </div>
+                <div id={`hub-items-${hub.id}`} className="hub-items" role="region" aria-labelledby={`hub-toggle-${hub.id}`} hidden={!expanded}>
+                  {hub.items.map((item) => <NavLink key={item.path} to={item.path} end={item.path === "/app"} className={current?.item.path === item.path ? "is-selected" : ""} aria-current={current?.item.path === item.path ? "page" : undefined}>{item.label}</NavLink>)}
+                </div>
+              </div>;
+            })}
           </nav>
           <div className="sidebar-bottom">
             {alerts > 0 ? (
-              <button className="club-health" onClick={() => navigate("/app/inventario?filter=low")}>
+              <button className="club-health" onClick={() => { navigate("/app/inventario?filter=low"); finishMenuNavigation(); }}>
                 <span className="club-health-icon"><Package size={20} /></span>
                 <span><strong>{alerts} {alerts === 1 ? "lote necesita" : "lotes necesitan"} atención</strong><small>Revisar stock bajo <ArrowRight size={13} /></small></span>
               </button>
@@ -381,10 +411,6 @@ function Workspace({
                 <span><strong>Stock al día</strong><small>Sin lotes bajo el mínimo</small></span>
               </div>
             )}
-            <NavLink className="settings-link" to="/app/configuracion">
-              <GearSix size={21} />
-              Configuración
-            </NavLink>
             <div className="sidebar-user">
               <Avatar name={user.name} color={user.color} />
               <div>
@@ -401,22 +427,21 @@ function Workspace({
             </div>
           </div>
         </aside>
-        <div className="workspace">
+        <div className="workspace" inert={menu}>
           <header className="topbar">
             <div className="breadcrumb">
               <button
                 className="icon-button mobile-menu"
-                aria-label="Abrir navegación"
-                onClick={() => setMenu(true)}
+                aria-label={menu ? "Cerrar navegación" : "Abrir navegación"}
+                aria-expanded={menu}
+                aria-controls="app-navigation"
+                onClick={(event) => menu ? closeMenu() : openMenu(event.currentTarget)}
               >
                 <List size={23} />
               </button>
-              <span>Espacio de trabajo</span>
+              <span>{current?.hub.label || "Inicio"}</span>
               <span className="breadcrumb-slash">/</span>
-              <strong aria-current="page">
-                {navigation.find((n) => n.path === location.pathname.replace(/\/$/, ""))?.label ||
-                  "Configuración"}
-              </strong>
+              <strong aria-current="page">{current?.item.label || "Resumen de hoy"}</strong>
             </div>
             <div className="top-actions">
               <span className="topbar-date">{new Date(`${state.today}T12:00:00`).toLocaleDateString("es-AR", { day: "numeric", month: "long", year: "numeric" })}</span>
@@ -447,7 +472,7 @@ function Workspace({
               </button>
             </div>
           </header>
-          <main className="main-content">
+          <main className="main-content" ref={mainRegion} tabIndex={-1}>
             {state.demo && (
               <div className="demo-ribbon">
                 <span>
@@ -494,42 +519,37 @@ function Workspace({
               }
             >
               <Routes key={location.pathname}>
-                <Route
-                  index
-                  element={<Dashboard onSale={openSale} />}
-                />
+                <Route index element={<Today onSale={openSale} />} />
+                <Route path="panorama" element={<Dashboard onSale={openSale} />} />
+                <Route path="decisiones" element={canVisit("/app/decisiones", user.role) ? <DecisionCenter /> : <Navigate to="/app" replace />} />
+                <Route path="importar" element={canVisit("/app/importar", user.role) ? <DataImportStudio /> : <Navigate to="/app" replace />} />
+                <Route path="preparar" element={canVisit("/app/preparar", user.role) ? <DecisionInputs /> : <Navigate to="/app" replace />} />
+                <Route path="decisiones/stock" element={canVisit("/app/decisiones/stock", user.role) ? <DecisionAnalysis section="stock" /> : <Navigate to="/app" replace />} />
+                <Route path="decisiones/comercial" element={canVisit("/app/decisiones/comercial", user.role) ? <DecisionAnalysis section="commercial" /> : <Navigate to="/app" replace />} />
+                <Route path="decisiones/caja" element={canVisit("/app/decisiones/caja", user.role) ? <DecisionAnalysis section="cash" /> : <Navigate to="/app" replace />} />
+                <Route path="decisiones/socios" element={canVisit("/app/decisiones/socios", user.role) ? <DecisionAnalysis section="members" /> : <Navigate to="/app" replace />} />
                 <Route path="inventario" element={<Inventory />} />
                 <Route path="socios" element={<Customers />} />
-                <Route path="finanzas" element={isManager ? <Finance /> : <Navigate to="/app" replace />} />
+                <Route path="finanzas" element={canVisit("/app/finanzas", user.role) ? <Finance /> : <Navigate to="/app" replace />} />
                 <Route
                   path="ventas"
                   element={<Sales onSale={openSale} />}
                 />
                 <Route
                   path="gastos"
-                  element={
-                    user.role === "cashier" ? <Navigate to="/app" /> : <Expenses />
-                  }
+                  element={canVisit("/app/gastos", user.role) ? <Expenses /> : <Navigate to="/app" replace />}
                 />
                 <Route
                   path="responsables"
-                  element={
-                    user.role === "cashier" ? (
-                      <Navigate to="/app" />
-                    ) : (
-                      <Responsibles />
-                    )
-                  }
+                  element={canVisit("/app/responsables", user.role) ? <Responsibles /> : <Navigate to="/app" replace />}
                 />
                 <Route
                   path="reportes"
-                  element={
-                    user.role === "cashier" ? <Navigate to="/app" /> : <Reports />
-                  }
+                  element={canVisit("/app/reportes", user.role) ? <Reports /> : <Navigate to="/app" replace />}
                 />
-                <Route path="configuracion" element={<Settings />} />
-                <Route path="vidriera" element={isManager ? <ShowcaseAdmin /> : <Navigate to="/app" replace />} />
-                <Route path="consultas" element={isManager ? <InquiriesAdmin /> : <Navigate to="/app" replace />} />
+                <Route path="configuracion" element={canVisit("/app/configuracion", user.role) ? <Settings /> : <Navigate to="/app" replace />} />
+                <Route path="vidriera" element={canVisit("/app/vidriera", user.role) ? <ShowcaseAdmin /> : <Navigate to="/app" replace />} />
+                <Route path="consultas" element={canVisit("/app/consultas", user.role) ? <InquiriesAdmin /> : <Navigate to="/app" replace />} />
                 <Route path="*" element={<Navigate to="/app" replace />} />
               </Routes>
             </Suspense>
@@ -542,6 +562,28 @@ function Workspace({
             </footer>
           </main>
         </div>
+        <nav className="mobile-tabbar" aria-label="Accesos principales" inert={menu}>
+          {mobilePrimary.map((hub) => {
+            const Icon = hub.icon;
+            const path = hub.items[0].path;
+            return <NavLink key={hub.id} to={path} end={path === "/app"} className={current?.hub.id === hub.id ? "active" : ""} aria-label={hub.id === "stock" && alerts > 0 ? `${mobileLabels[hub.id]}, ${alerts} alertas` : mobileLabels[hub.id]}>
+              <Icon size={23} weight="duotone" aria-hidden="true" />
+              <span>{mobileLabels[hub.id]}</span>
+              {hub.id === "stock" && alerts > 0 && <i className="mobile-tabbar-alert" aria-hidden="true" />}
+            </NavLink>;
+          })}
+          <button
+            type="button"
+            className={moreActive || menu ? "active" : ""}
+            aria-label="Más secciones"
+            aria-expanded={menu}
+            aria-controls="app-navigation"
+            onClick={(event) => menu ? closeMenu() : openMenu(event.currentTarget)}
+          >
+            <DotsThree size={23} weight="bold" aria-hidden="true" />
+            <span>Más</span>
+          </button>
+        </nav>
       </div>
       <Suspense fallback={null}>
         {saleLoaded && <SaleModal open={saleOpen} onClose={() => setSaleOpen(false)} />}
@@ -562,22 +604,15 @@ function Workspace({
         </div>
         <div className="search-results">
           {[
-            ...nav.map((n) => ({
-              name: n.label,
-              type: "Sección",
-              path: n.path,
-            })),
-            ...(searchData.data?.items || []),
+            ...searchDestinations(user.role, query),
+            ...(searchData.data?.items || []).filter((x) => x.name.toLocaleLowerCase("es-AR").includes(query.toLocaleLowerCase("es-AR"))),
           ]
-            .filter((x) => x.name.toLowerCase().includes(query.toLowerCase()))
             .slice(0, 12)
             .map((x, i) => (
               <button
                 key={i}
                 onClick={() => {
-                  navigate(
-                    `${x.path}${query ? "?q=" + encodeURIComponent(query) : ""}`,
-                  );
+                  navigate(x.type === "Sección" || hubs.some((hub) => hub.label === x.type) ? x.path : `${x.path}${query ? "?q=" + encodeURIComponent(query) : ""}`);
                   setSearchOpen(false);
                 }}
               >

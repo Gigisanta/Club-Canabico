@@ -20,7 +20,7 @@ Definir quién autoriza cada verificación, quién registra caja, cómo se atien
 
 Resultado de gestión mensual = ingresos netos − costo histórico de unidades entregadas − gastos operativos devengados. Compras de stock aumentan inventario y reducen caja cuando se pagan; no son gasto operativo por segunda vez. Inversiones del local, aportes y retiros se muestran fuera del resultado. Valuación de stock = suma por lote de cantidad actual × costo unitario cargado. Un costo sin factura o con diferencia de unidad queda pendiente de validación.
 
-El libro de caja registra hechos pagados/cobrados por cuenta, categoría, fecha e identificador de origen. Antes de usar el saldo, cargar y conciliar saldo inicial de efectivo y banco. Una venta local crea su movimiento automáticamente; el gasto del módulo Gastos no se considera pagado hasta crear su salida de caja. La proyección de 13 semanas parte del saldo registrado y agrega partidas planificadas por fecha y escenario. Cada fila sin partida o sin saldo inicial indica falta de información, no caja cero confirmada.
+El libro de caja registra hechos pagados/cobrados por cuenta, categoría, fecha e identificador de origen. Antes de usar el saldo, cargar y conciliar efectivo y banco por cuenta y fecha. Una venta local crea su movimiento automáticamente; el gasto del módulo Gastos no se considera pagado hasta crear su salida de caja. La proyección verificable de 13 semanas usa un saldo conciliado del día y partidas fechadas en los tres escenarios; exige confirmar la cobertura completa del período. El plan de caja anterior de la app sirve de referencia operativa, pero no habilita por sí solo una proyección certificada. Cada fila sin partida o sin saldo indica falta de información, no caja cero confirmada.
 
 Preparar tres escenarios para diciembre de 2026 y un plan mensual de enero a diciembre de 2027. Para cada uno, explicitar volumen de atención, precio, costo de stock, gastos del local, inversiones y fecha e importe de posible contratación. Cargar cada supuesto como partida de proyección; **cada escenario es autónomo**, así que sus costos comunes se cargan también en ese escenario. Revisar mensualmente desvío real vs plan, causa, decisión, responsable y fecha de seguimiento. Las recomendaciones sobre activos de inversión específicos requieren profesional habilitado.
 
@@ -34,13 +34,15 @@ La app local es fuente del **local**. AppSheet permanece fuente del **delivery**
 
 La ficha de socio guarda solo estado y vigencia del permiso; dueño/gerente pueden cambiarlo, cajero puede verlo, otros roles no reciben detalle de verificación. En bases reales, el endpoint de operaciones con cannabis está deshabilitado por defecto. Activar `CLUB_OPERATIONS_APPROVED=true` solo tras validación documentada por el profesional del club de la figura jurídica, permisos, roles y alcance del flujo. Incluso entonces cada operación exige socio con verificación vigente. El estado global no reemplaza controles documentales externos. No habilitar mensajería ni autogestión en esta etapa.
 
-Los indicadores de caja y resultado se rotulan preliminares hasta conciliar fuentes. El resultado mostrado en la app cubre solo ventas locales, costo vendido en la app y gastos registrados; el consolidado con delivery se elabora a partir de AppSheet y comprobantes. El panel existente de gastos ya no se presenta como flujo de caja. Stock a costo depende de costos por lote confirmados.
+Los indicadores de caja y resultado se rotulan preliminares hasta conciliar fuentes. El resultado mostrado en la app cubre solo ventas locales, costo vendido en la app y gastos registrados; el delivery importado queda separado hasta poder enlazar ventas, costos y cobros sin duplicación. El panel existente de gastos ya no se presenta como flujo de caja. Stock a costo depende de costos por lote confirmados.
+
+En octubre también se calculan y comparan **precios, promociones y segmentos** para revisión humana. Camila revisa la propuesta y Tiziano aprueba cualquier decisión comercial; la app no envía mensajes ni aplica campañas automáticamente. La simulación muestra contribución y volumen adicional de equilibrio, sin atribuir causalidad a comparaciones históricas.
 
 ## 4. Uso gradual, última semana de octubre
 
 Capacitar por rol con una base de prueba. Durante siete días, comparar cada día caja contada, ingresos y salidas de caja, stock por lote y cambios de socios contra los registros actuales. Guardar una tabla de diferencias con explicación y corrección autorizada. Activar primero administración interna y después el flujo del local permitido por la revisión legal. AppSheet continúa como respaldo y como fuente del delivery hasta conformidad expresa de Tiziano sobre la conciliación. Si faltan permisos o datos, mantener deshabilitado el flujo afectado.
 
-Pendientes de etapa posterior: autogestión, promociones, mensajes automáticos, balanza y reemplazo completo del delivery.
+Pendientes de etapa posterior: autogestión, ejecución automática de promociones, mensajes automáticos, balanza y reemplazo completo del delivery.
 
 ## Propuesta comercial para revisión
 

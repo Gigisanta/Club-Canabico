@@ -1,5 +1,4 @@
-/* Official Bombo palette and typography layered over the existing operational UI. */
-:root { --accent: #3e402e; --accent-hover: #626a32; --accent-soft: #c4e780; --muted: #686b57; --border: #d9d1bb; --text: #3e402e; --surface: #fffaf0; --surface-raised: #f1e8d3; --canvas: #f6efdd; --sidebar: #3e402e; --sidebar-text: #f6efdd; --warm: #d75f13; background: var(--canvas); color: var(--text); color-scheme: light; font-family: Bricolage,sans-serif; font-weight: 300; font-size: 15px; }
+/* Official Bombo module styling. Shared tokens live in brand-system.css. */
 body { background: var(--canvas); color: var(--text); }
 button, input, select, textarea { font-family: Bricolage,sans-serif; }
 button { font-weight: 600; }
@@ -25,7 +24,7 @@ h1, h2, h3, .page-heading h1, .panel-head h2, .modal-head h2, .minimal-card-titl
 .sidebar-user strong { color: #f6efdd; }
 .sidebar-user .icon-button { color: #f6efdd; }
 .club-health, .club-health.is-clear { background: #ffffff10; color: #f6efdd; border-color: #f6efdd35; }
-.nav-count { background: #ff7b1c; color: #3e402e; }
+.nav-count { background: #ff7b1c; color: #26281c; }
 .topbar { background: #f6efddec; border-color: var(--border); }
 .breadcrumb, .topbar-date { color: var(--muted); font-size: 13px; }
 .breadcrumb strong { color: var(--text); }

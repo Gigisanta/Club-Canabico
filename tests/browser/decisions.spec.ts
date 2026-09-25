@@ -1,0 +1,37 @@
+import { test, expect } from "./isolated";
+
+test("manager can follow the three decisions and prepare evidence without invented figures", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Explorar club de demostración" }).click();
+  await expect(page.getByRole("heading", { name: "Resumen de hoy" })).toBeVisible();
+  await page.goto("/app/decisiones");
+  await expect(page.getByRole("heading", { name: "Centro de decisiones" })).toBeVisible();
+  await expect(page.locator(".dc-decision-card")).toHaveCount(3);
+  await expect(page.getByRole("note")).toContainText("Modo demostración");
+  await page.locator(".dc-decision-card--replenishment").getByRole("link", { name: "Abrir acción" }).click();
+  await expect(page.getByRole("heading", { name: "Análisis de stock" })).toBeVisible();
+  await expect(page.getByRole("tabpanel", { name: "Stock" })).toContainText("Lotes locales");
+  await page.goto("/app/decisiones/comercial");
+  await expect(page.getByRole("heading", { name: "Margen de una promoción" })).toBeVisible();
+  await page.goto("/app/decisiones/caja");
+  await expect(page.getByRole("heading", { name: "Caja a trece semanas" })).toBeVisible();
+  await page.getByText("Comparar dos meses en pesos constantes con IPC").click();
+  await page.getByLabel("Mes base", { exact: true }).fill("2026-07");
+  await page.getByLabel("Importe del mes base (ARS)").fill("100");
+  await page.getByLabel("IPC del mes base").fill("100");
+  await page.getByLabel("Mes comparado", { exact: true }).fill("2026-08");
+  await page.getByLabel("Importe del mes comparado (ARS)").fill("150");
+  await page.getByLabel("IPC del mes comparado").fill("125");
+  await page.getByLabel("Publicación de la serie").fill(new Date().toISOString().slice(0, 10));
+  await page.getByLabel("Versión / tabla").fill("Caso QA sintético");
+  await page.getByLabel("URL de la tabla de INDEC").fill("https://www.indec.gob.ar/ftp/cuadros/economia/fixture.pdf");
+  await page.getByRole("button", { name: "Comparar en pesos constantes" }).click();
+  await expect(page.getByRole("region", { name: "Comparación de inflación" })).toContainText("25,00");
+  await page.goto("/app/preparar");
+  await expect(page.getByRole("heading", { name: "Preparar decisiones" })).toBeVisible();
+  await page.goto("/app/importar");
+  await expect(page.getByRole("heading", { name: "Importación de datos" })).toBeVisible();
+  expect(errors).toEqual([]);
+});

@@ -39,6 +39,7 @@ import {
   Empty,
 } from "./ui";
 import { StockCard } from "./StockCard";
+import "./operation.css";
 
 type CatalogProduct = Pick<Product, "name" | "strain" | "type" | "unit">;
 type ProductCatalog = { products: CatalogProduct[]; profiles: string[]; nextCursor: string | null; cursor: string | null };
@@ -170,7 +171,7 @@ function ProductIdentityFields({ edit }: { edit: Product | null }) {
         <input name="strain" value={profile} onChange={(e) => { setProfile(e.target.value); setProfileEdited(true); }} maxLength={180} placeholder="Sativa, CBD…" autoComplete="off" />
         {!!catalog.data?.profiles.length && <div className="profile-suggestions" aria-label="Perfiles guardados">
           {catalog.data.profiles.slice(0, 5).map((saved) =>
-            <button key={saved} type="button" className={profile === saved ? "selected" : ""} onClick={() => { setProfile(saved); setProfileEdited(true); }}>{saved}</button>)}
+            <button key={saved} type="button" className={profile === saved ? "selected" : ""} aria-pressed={profile === saved} onClick={() => { setProfile(saved); setProfileEdited(true); }}>{saved}</button>)}
         </div>}
       </Field>
       <Field label="Tipo">
@@ -247,7 +248,7 @@ export default function Inventory() {
   const [params, setParams] = useSearchParams();
   const [query, setQuery] = useState(params.get("q") || "");
   const [filter, setFilter] = useState(params.get("filter") === "low" ? "low" : "all");
-  const [view, setView] = useState<"cards" | "table">("cards");
+  const [view, setView] = useState<"cards" | "table">("table");
   const [type, setType] = useState(params.get("type") || "all");
   const [supplierFilter, setSupplierFilter] = useState(params.get("supplier") || "all");
   const [showSuppliers, setShowSuppliers] = useState(false);
@@ -306,6 +307,31 @@ export default function Inventory() {
       : null,
   );
   const products = page.data?.items || [];
+  const hasFilters = !!query || filter !== "all" || type !== "all" || supplierFilter !== "all";
+  const clearFilters = () => {
+    setQuery("");
+    setFilter("all");
+    setType("all");
+    setSupplierFilter("all");
+    const next = new URLSearchParams(params);
+    ["q", "filter", "type", "supplier"].forEach((key) => next.delete(key));
+    setParams(next, { replace: true });
+  };
+  const handleViewTabsKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    const nextView = event.key === "Home"
+      ? "cards"
+      : event.key === "End"
+        ? "table"
+        : event.key === "ArrowRight"
+          ? (view === "cards" ? "table" : "cards")
+          : event.key === "ArrowLeft"
+            ? (view === "table" ? "cards" : "table")
+            : null;
+    if (!nextView) return;
+    event.preventDefault();
+    setView(nextView);
+    document.getElementById(`inventory-tab-${nextView}`)?.focus();
+  };
   async function save(fd: FormData) {
     const existing = editor !== "new" ? editor : null;
     const data = {
@@ -375,7 +401,7 @@ export default function Inventory() {
   }
   const edit = editor && editor !== "new" ? editor : null;
   return (
-    <>
+    <div className="operation-page inventory-page">
       <PageHeader
         className="inventory-heading"
         eyebrow="CADA LOTE, EN SU LUGAR"
@@ -383,20 +409,6 @@ export default function Inventory() {
         description="Cada lote, su stock y su responsable. Importes en pesos argentinos (ARS)."
         actions={
           <>
-            <button className="button" onClick={() => setHistory(true)}>
-              <ClockCounterClockwise size={18} />
-              Movimientos
-            </button>
-            {user.role === "owner" && (
-              <button className="button" onClick={() => setShowSuppliers((v) => !v)} aria-expanded={showSuppliers}>
-                <Truck size={18} /> Proveedores
-              </button>
-            )}
-            {user.role === "owner" && (
-              <button className="button" onClick={() => setShowLocations((v) => !v)} aria-expanded={showLocations}>
-                <MapPin size={18} /> Ubicaciones
-              </button>
-            )}
             {canManage && (
               <button
                 className="button primary"
@@ -409,94 +421,42 @@ export default function Inventory() {
           </>
         }
       />
-      <div className="mini-stats inventory-summary">
-        <span>
-          <Package /> <strong>{page.data?.summary.total ?? "…"}</strong> lotes registrados
-        </span>
-        <span>
-          <WarningCircle />{" "}
-          <strong>
-            {page.data?.summary.low ?? "…"}
-          </strong>{" "}
-          con stock bajo
-        </span>
-        {user.role !== "cashier" && (
-          <span>
-            Valor de inventario{" "}
-            <strong>
-              {money(page.data?.summary.value || 0)}
-            </strong>
-          </span>
-        )}
-      </div>
-      {showSuppliers && user.role === "owner" && (
-        <Panel title="Proveedores guardados" sub="Elegí uno al crear cada lote. El predeterminado se selecciona automáticamente."
-          action={<button className="button primary" onClick={() => setSupplierEditor("new")}><Plus size={17} /> Nuevo proveedor</button>}>
-          {suppliers.loading && <p role="status" className="table-note">Cargando proveedores…</p>}
-          {suppliers.error && <p role="alert" className="form-error">{suppliers.error}</p>}
-          {!suppliers.loading && !suppliers.data?.items.length && <Empty title="Todavía no hay proveedores" description="Guardá el primero para seleccionarlo al crear un lote." />}
-          <div className="supplier-grid">
-            {suppliers.data?.items.map((supplier) => (
-              <article className={`supplier-card${supplier.active ? "" : " is-archived"}`} key={supplier.id}>
-                <div className="supplier-card-top"><span className="supplier-icon"><Truck size={19} /></span>
-                  <div><strong>{supplier.name}</strong><small>{supplier.active ? `${supplier.lotCount} ${supplier.lotCount === 1 ? "lote vinculado" : "lotes vinculados"}` : "Archivado"}</small></div>
-                  {supplier.isDefault && <span className="supplier-default"><Star size={13} weight="fill" /> Predeterminado</span>}
-                </div>
-                {(supplier.contactName || supplier.phone || supplier.email) && <p className="supplier-contact">{[supplier.contactName, supplier.phone, supplier.email].filter(Boolean).join(" · ")}</p>}
-                {supplier.notes && <p className="supplier-note">{supplier.notes}</p>}
-                <div className="supplier-actions">
-                  <button className="button" onClick={() => setSupplierEditor(supplier)}>Editar</button>
-                  <button className="button" onClick={() => void toggleSupplier(supplier).catch((e) => toast.error(e.message))}>{supplier.active ? "Archivar" : "Activar"}</button>
-                </div>
-              </article>
-            ))}
-          </div>
-        </Panel>
-      )}
-      {showLocations && user.role === "owner" && (
-        <Panel title="Ubicaciones guardadas" sub="Organizá depósitos, estantes o sectores. Elegí una predeterminada para el stock nuevo."
-          action={<button className="button primary" onClick={() => setLocationEditor("new")}><Plus size={17} /> Nueva ubicación</button>}>
-          {locations.loading && <p role="status" className="table-note">Cargando ubicaciones…</p>}
-          {locations.error && <p role="alert" className="form-error">{locations.error}</p>}
-          {!locations.loading && !locations.data?.items.length && <Empty title="Todavía no hay ubicaciones" description="Guardá la primera para seleccionarla al crear stock." />}
-          <div className="supplier-grid">
-            {locations.data?.items.map((location) => (
-              <article className={`supplier-card${location.active ? "" : " is-archived"}`} key={location.id}>
-                <div className="supplier-card-top"><span className="supplier-icon"><MapPin size={19} /></span>
-                  <div><strong>{location.name}</strong><small>{location.active ? `${location.lotCount} ${location.lotCount === 1 ? "lote vinculado" : "lotes vinculados"}` : "Archivada"}</small></div>
-                  {location.isDefault && <span className="supplier-default"><Star size={13} weight="fill" /> Predeterminada</span>}
-                </div>
-                <div className="supplier-actions">
-                  <button className="button" onClick={() => setLocationEditor(location)}>Editar</button>
-                  <button className="button" onClick={() => void toggleLocation(location).catch((e) => toast.error(e.message))}>{location.active ? "Archivar" : "Activar"}</button>
-                </div>
-              </article>
-            ))}
-          </div>
-        </Panel>
-      )}
+      {state.lowStockCount > 0 && <button className="inventory-low-alert" onClick={() => { setFilter("low"); updateParams("filter", "low"); }}><WarningCircle size={18} />{state.lowStockCount} {state.lowStockCount === 1 ? "lote con stock bajo" : "lotes con stock bajo"} · Ver alertas</button>}
       <Panel
+        className="inventory-products-panel"
         title="Todos los productos"
         action={
           <div className="inventory-view">
             <span className="muted small">{page.data?.total ?? "…"} lotes</span>
             <div
               className="segmented"
-              role="group"
+              role="tablist"
               aria-label="Vista del inventario"
             >
               <button
+                id="inventory-tab-cards"
+                type="button"
+                role="tab"
                 className={view === "cards" ? "active" : ""}
                 aria-label="Vista de tarjetas"
-                aria-pressed={view === "cards"}
+                aria-selected={view === "cards"}
+                aria-controls="inventory-panel-cards"
+                tabIndex={view === "cards" ? 0 : -1}
+                onKeyDown={handleViewTabsKeyDown}
                 onClick={() => setView("cards")}
               >
                 <SquaresFour size={17} />
               </button>
               <button
+                id="inventory-tab-table"
+                type="button"
+                role="tab"
                 className={view === "table" ? "active" : ""}
                 aria-label="Vista de tabla"
-                aria-pressed={view === "table"}
+                aria-selected={view === "table"}
+                aria-controls="inventory-panel-table"
+                tabIndex={view === "table" ? 0 : -1}
+                onKeyDown={handleViewTabsKeyDown}
                 onClick={() => setView("table")}
               >
                 <ListBullets size={17} />
@@ -511,17 +471,7 @@ export default function Inventory() {
             onChange={(value) => { setQuery(value); updateParams("q", value); }}
             placeholder="Buscar producto, lote o responsable…"
           />
-          <div className="filter-group">
-            <select
-              aria-label="Tipo de producto"
-              value={type}
-              onChange={(e) => { setType(e.target.value); updateParams("type", e.target.value); }}
-            >
-              <option value="all">Todos los tipos</option>
-              {["Flor", "Extracto", "Aceite", "Accesorio"].map((t) => (
-                <option key={t}>{t}</option>
-              ))}
-            </select>
+          <div className="filter-group inventory-status-filter">
             <select
               aria-label="Estado del stock"
               value={filter}
@@ -531,16 +481,25 @@ export default function Inventory() {
               <option value="low">Stock bajo</option>
               <option value="expired">Vencidos</option>
             </select>
+          </div>
+          <details className="inventory-advanced">
+            <summary>Filtros avanzados{type !== "all" || supplierFilter !== "all" ? " · activos" : ""}</summary>
+            <div className="filter-group">
+              <select aria-label="Tipo de producto" value={type} onChange={(e) => { setType(e.target.value); updateParams("type", e.target.value); }}>
+                <option value="all">Todos los tipos</option>
+                {["Flor", "Extracto", "Aceite", "Accesorio"].map((t) => <option key={t}>{t}</option>)}
+              </select>
             {canManage && <select aria-label="Filtrar por proveedor" value={supplierFilter}
               onChange={(e) => { setSupplierFilter(e.target.value); updateParams("supplier", e.target.value); }}>
               <option value="all">Todos los proveedores</option>
               {suppliers.data?.items.map((s) => <option key={s.id} value={s.id}>{s.name}{s.active ? "" : " (archivado)"}</option>)}
               <option value="unassigned">Sin proveedor</option>
             </select>}
-          </div>
+            </div>
+          </details>
         </div>
-        {view === "cards" ? (
-          <>
+        <div id="inventory-panel-cards" role="tabpanel" aria-labelledby="inventory-tab-cards" tabIndex={0} className="inventory-view-panel" hidden={view !== "cards"}>
+          {view === "cards" && <>
             <div className="stock-grid">
               {products.map((p) => (
                 <StockCard
@@ -554,15 +513,26 @@ export default function Inventory() {
                 />
               ))}
             </div>
-            {!page.loading && !products.length && (
-              <Empty
-                title="No encontramos productos"
-                description="Probá con otra búsqueda o creá el primer lote."
-              />
+            {!page.loading && !page.error && !products.length && (
+              <div className="inventory-empty-state">
+                <Empty
+                  title={hasFilters ? "No hay lotes con estos filtros" : "Todavía no hay lotes"}
+                  description={hasFilters ? "Ajustá la búsqueda o quitá los filtros para ver el inventario completo." : "Los lotes que registres van a aparecer acá."}
+                />
+                {hasFilters ? <button className="button" onClick={clearFilters}>Quitar filtros</button> : canManage ? <button className="button primary" onClick={() => setEditor("new")}><Plus size={17} /> Crear primer lote</button> : null}
+              </div>
             )}
-          </>
-        ) : (
-          <div className="table-scroll">
+          </>}
+        </div>
+        <div id="inventory-panel-table" role="tabpanel" aria-labelledby="inventory-tab-table" tabIndex={0} className="table-scroll inventory-table" hidden={view !== "table"}>
+          {view === "table" && <>
+            <div className="inventory-compact-list" aria-label="Lotes de inventario">
+              {products.map((p) => <article key={p.id} className="inventory-compact-row">
+                <div><strong>{p.name}</strong><small>{p.lot} · {state.users.find((member) => member.id === p.ownerId)?.name || "Sin responsable"}</small></div>
+                <div className="inventory-compact-meta"><strong>{number(p.stock / 1000)} {p.unit}</strong><Badge tone={p.expires && p.expires <= state.today ? "red" : p.stock <= p.minimum ? "amber" : "green"}>{p.expires && p.expires <= state.today ? "Vencido" : p.stock <= p.minimum ? "Stock bajo" : "Disponible"}</Badge></div>
+                {canManage && <div className="inventory-compact-actions"><button className="button small-button" onClick={() => setEditor(p)}>Editar</button><button className="button small-button" onClick={() => { setMoveType("entry"); setMovement(p); }}>Movimiento</button></div>}
+              </article>)}
+            </div>
             <table>
               <thead>
                 <tr>
@@ -678,22 +648,91 @@ export default function Inventory() {
                 })}
               </tbody>
             </table>
-            {!page.loading && !products.length && (
-              <Empty
-                title="No encontramos productos"
-                description="Probá con otra búsqueda o creá el primer lote."
-              />
-            )}
-          </div>
-        )}
+            {!page.loading && !page.error && !products.length && <div className="inventory-empty-state"><Empty title={hasFilters ? "No hay lotes con estos filtros" : "Todavía no hay lotes"} description={hasFilters ? "Ajustá la búsqueda o quitá los filtros para ver el inventario completo." : "Los lotes que registres van a aparecer acá."} />{hasFilters ? <button className="button" onClick={clearFilters}>Quitar filtros</button> : canManage ? <button className="button primary" onClick={() => setEditor("new")}><Plus size={17} /> Crear primer lote</button> : null}</div>}
+          </>}
+        </div>
         {page.loading && <p role="status" className="table-note">Buscando lotes…</p>}
-        {page.error && <p role="alert">{page.error}</p>}
+        {page.error && <div className="operation-error" role="alert"><p>{page.error}</p><button className="button small-button" onClick={() => void page.reload()}>Reintentar</button></div>}
         {(previous.length > 0 || page.data?.nextCursor) && <div className="table-pagination">
           <button className="button" disabled={!previous.length} onClick={() => { setCursor(previous.at(-1) || null); setPrevious((s) => s.slice(0, -1)); }}>Anterior</button>
           <span>Página {previous.length + 1} · {page.data?.total || 0} lotes</span>
           <button className="button" disabled={!page.data?.nextCursor} onClick={() => { setPrevious((s) => [...s, cursor]); setCursor(page.data!.nextCursor); }}>Siguiente</button>
         </div>}
       </Panel>
+      <div className="mini-stats inventory-summary">
+        <span>
+          <Package /> <strong>{page.data?.summary.total ?? "…"}</strong> lotes registrados
+        </span>
+        <span>
+          <WarningCircle />{" "}
+          <strong>
+            {page.data?.summary.low ?? "…"}
+          </strong>{" "}
+          con stock bajo
+        </span>
+        {user.role !== "cashier" && (
+          <span>
+            Valor de inventario{" "}
+            <strong>
+              {money(page.data?.summary.value || 0)}
+            </strong>
+          </span>
+        )}
+      </div>
+      <details className="operation-secondary inventory-tools">
+        <summary>Movimientos, proveedores y ubicaciones</summary>
+        <div className="inventory-tool-actions">
+          <button className="button" onClick={() => setHistory(true)}><ClockCounterClockwise size={18} /> Movimientos</button>
+          {user.role === "owner" && <button className="button" onClick={() => setShowSuppliers((value) => !value)} aria-expanded={showSuppliers}><Truck size={18} /> Proveedores</button>}
+          {user.role === "owner" && <button className="button" onClick={() => setShowLocations((value) => !value)} aria-expanded={showLocations}><MapPin size={18} /> Ubicaciones</button>}
+        </div>
+      </details>
+      {showSuppliers && user.role === "owner" && (
+        <Panel title="Proveedores guardados" sub="Elegí uno al crear cada lote. El predeterminado se selecciona automáticamente."
+          action={<button className="button primary" onClick={() => setSupplierEditor("new")}><Plus size={17} /> Nuevo proveedor</button>}>
+          {suppliers.loading && <p role="status" className="table-note">Cargando proveedores…</p>}
+        {suppliers.error && <div className="operation-error" role="alert"><p>{suppliers.error}</p><button className="button small-button" onClick={() => void suppliers.reload()}>Reintentar</button></div>}
+          {!suppliers.loading && !suppliers.error && !suppliers.data?.items.length && <Empty title="Todavía no hay proveedores" description="Guardá el primero para seleccionarlo al crear un lote." />}
+          <div className="supplier-grid">
+            {suppliers.data?.items.map((supplier) => (
+              <article className={`supplier-card${supplier.active ? "" : " is-archived"}`} key={supplier.id}>
+                <div className="supplier-card-top"><span className="supplier-icon"><Truck size={19} /></span>
+                  <div><strong>{supplier.name}</strong><small>{supplier.active ? `${supplier.lotCount} ${supplier.lotCount === 1 ? "lote vinculado" : "lotes vinculados"}` : "Archivado"}</small></div>
+                  {supplier.isDefault && <span className="supplier-default"><Star size={13} weight="fill" /> Predeterminado</span>}
+                </div>
+                {(supplier.contactName || supplier.phone || supplier.email) && <p className="supplier-contact">{[supplier.contactName, supplier.phone, supplier.email].filter(Boolean).join(" · ")}</p>}
+                {supplier.notes && <p className="supplier-note">{supplier.notes}</p>}
+                <div className="supplier-actions">
+                  <button className="button" onClick={() => setSupplierEditor(supplier)}>Editar</button>
+                  <button className="button" onClick={() => void toggleSupplier(supplier).catch((e) => toast.error(e.message))}>{supplier.active ? "Archivar" : "Activar"}</button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </Panel>
+      )}
+      {showLocations && user.role === "owner" && (
+        <Panel title="Ubicaciones guardadas" sub="Organizá depósitos, estantes o sectores. Elegí una predeterminada para el stock nuevo."
+          action={<button className="button primary" onClick={() => setLocationEditor("new")}><Plus size={17} /> Nueva ubicación</button>}>
+          {locations.loading && <p role="status" className="table-note">Cargando ubicaciones…</p>}
+        {locations.error && <div className="operation-error" role="alert"><p>{locations.error}</p><button className="button small-button" onClick={() => void locations.reload()}>Reintentar</button></div>}
+          {!locations.loading && !locations.error && !locations.data?.items.length && <Empty title="Todavía no hay ubicaciones" description="Guardá la primera para seleccionarla al crear stock." />}
+          <div className="supplier-grid">
+            {locations.data?.items.map((location) => (
+              <article className={`supplier-card${location.active ? "" : " is-archived"}`} key={location.id}>
+                <div className="supplier-card-top"><span className="supplier-icon"><MapPin size={19} /></span>
+                  <div><strong>{location.name}</strong><small>{location.active ? `${location.lotCount} ${location.lotCount === 1 ? "lote vinculado" : "lotes vinculados"}` : "Archivada"}</small></div>
+                  {location.isDefault && <span className="supplier-default"><Star size={13} weight="fill" /> Predeterminada</span>}
+                </div>
+                <div className="supplier-actions">
+                  <button className="button" onClick={() => setLocationEditor(location)}>Editar</button>
+                  <button className="button" onClick={() => void toggleLocation(location).catch((e) => toast.error(e.message))}>{location.active ? "Archivar" : "Activar"}</button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </Panel>
+      )}
       <Modal
         title={edit ? "Editar producto" : "Nuevo stock"}
         description="Precios en pesos argentinos (ARS), por unidad o gramo."
@@ -701,6 +740,7 @@ export default function Inventory() {
         onClose={() => setEditor(null)}
         wide
       >
+        <div className="operation-dialog-content inventory-dialog-content">
         <Form onSubmit={save} onCancel={() => setEditor(null)}>
           <div className="form-grid">
             <ProductIdentityFields key={edit?.id || "new"} edit={edit} />
@@ -764,10 +804,12 @@ export default function Inventory() {
             <PriceFields key={edit?.id || "new"} edit={edit} />
           </div>
         </Form>
+        </div>
       </Modal>
       <Modal title={supplierEditor === "new" ? "Nuevo proveedor" : "Editar proveedor"}
         description="Estos datos quedan guardados para los próximos lotes."
         open={!!supplierEditor} onClose={() => setSupplierEditor(null)}>
+        <div className="operation-dialog-content inventory-dialog-content">
         <Form onSubmit={saveSupplier} onCancel={() => setSupplierEditor(null)}>
           <div className="form-grid">
             <Field label="Nombre del proveedor"><input name="name" defaultValue={supplierEditor !== "new" ? supplierEditor?.name : ""} required maxLength={180} /></Field>
@@ -778,14 +820,17 @@ export default function Inventory() {
             <label className="supplier-default-choice"><input name="isDefault" type="checkbox" defaultChecked={supplierEditor !== "new" ? !!supplierEditor?.isDefault : false} /> Seleccionar por defecto en lotes nuevos</label>
           </div>
         </Form>
+        </div>
       </Modal>
       <Modal title={locationEditor === "new" ? "Nueva ubicación" : "Editar ubicación"}
         description="Se guarda para los próximos lotes. Si cambiás el nombre, también se actualizan los lotes vinculados."
         open={!!locationEditor} onClose={() => setLocationEditor(null)}>
+        <div className="operation-dialog-content inventory-dialog-content">
         <Form onSubmit={saveLocation} onCancel={() => setLocationEditor(null)}>
           <Field label="Nombre de la ubicación"><input name="name" defaultValue={locationEditor !== "new" ? locationEditor?.name : ""} required maxLength={180} placeholder="Ej.: Depósito · Estante A" /></Field>
           <label className="supplier-default-choice"><input name="isDefault" type="checkbox" disabled={locationEditor !== "new" && !locationEditor?.active} defaultChecked={locationEditor !== "new" ? !!locationEditor?.isDefault : false} /> Seleccionar por defecto al crear stock</label>
         </Form>
+        </div>
       </Modal>
       <Modal
         title={`Movimiento · ${movement?.name || ""}`}
@@ -793,6 +838,7 @@ export default function Inventory() {
         open={!!movement}
         onClose={() => setMovement(null)}
       >
+        <div className="operation-dialog-content inventory-dialog-content">
         <Form
           onCancel={() => setMovement(null)}
           onSubmit={async (fd) => {
@@ -861,6 +907,7 @@ export default function Inventory() {
             />
           </Field>
         </Form>
+        </div>
       </Modal>
       <Modal
         title="Historial de movimientos"
@@ -869,6 +916,7 @@ export default function Inventory() {
         onClose={() => setHistory(false)}
         wide
       >
+        <div className="operation-dialog-content inventory-history-content">
         <div className="table-scroll history-table">
           <table>
             <thead>
@@ -923,7 +971,9 @@ export default function Inventory() {
             </tbody>
           </table>
         </div>
-        {historyData.error && <p className="form-error">{historyData.error}</p>}
+        {historyData.loading && <p role="status" className="table-note">Cargando movimientos…</p>}
+        {!historyData.loading && !historyData.error && !historyData.data?.items.length && <Empty title="Todavía no hay movimientos" description="Las entradas, salidas, ajustes y traspasos aparecerán acá." />}
+        {historyData.error && <div className="operation-error" role="alert"><p>{historyData.error}</p><button className="button small-button" onClick={() => void historyData.reload()}>Reintentar</button></div>}
         <div className="pagination">
           <span>
             {historyData.loading
@@ -950,7 +1000,8 @@ export default function Inventory() {
             </button>
           </div>
         </div>
+        </div>
       </Modal>
-    </>
+    </div>
   );
 }

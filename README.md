@@ -44,7 +44,7 @@ npm run db:migrate
 
 Elegir uno de los dos modos antes de ejecutar el seed:
 
-- **Demo:** `DEMO_MODE=true` y `NODE_ENV=development`. El seed crea 7 usuarios, 24 socios, 12 lotes, 90 días de ventas y movimientos conciliados. El login muestra «Explorar club de demostración» y permite probar los roles. Todo cambio se persiste en la base de demostración.
+- **Demo:** `DEMO_MODE=true` y `NODE_ENV=development`. El seed crea 8 usuarios (incluye Tiziano, Camila y Gio), 24 socios, 12 lotes, 90 días de ventas y movimientos de ejemplo. El login muestra «Explorar club de demostración» y permite probar los roles. Todo cambio se persiste en la base de demostración.
 - **Club real:** `DEMO_MODE=false`, definir `ADMIN_EMAIL`, `ADMIN_NAME` y `ADMIN_PASSWORD` (12 caracteres mínimo). El seed crea solamente el administrador. Usar una base distinta de la demo; cambiar el flag no elimina registros ni usuarios de ejemplo.
 
 ```sh
@@ -58,6 +58,13 @@ El seed nunca borra datos: si ya existen usuarios, termina sin modificar la base
 
 ## Funcionalidad
 
+- **Navegación del panel:** `/app` abre Resumen de hoy. La barra agrupa los destinos permitidos por rol en Inicio, Ventas y caja, Stock, Socios, Web pública y Administración; cada grupo tiene una página principal y opciones internas. Panorama general está en `/app/panorama`.
+- **Centro de decisiones:** `/app/decisiones` abre tres prioridades con evidencia, fuente, fecha, responsable y límite del cálculo. La revisión mensual guarda real, plan, desvío, causa, decisión y seguimiento; el checklist semanal asigna conciliación, conteo, compras, promociones y socios.
+- **Análisis para decidir:** `/app/decisiones/stock`, `/comercial`, `/caja` y `/socios` muestran inventario por lote y ubicación, costo histórico y cotizaciones de reposición, demanda y faltantes, margen por producto/categoría/proveedor/canal, simulación de promociones, caja por escenarios y segmentación descriptiva. Las compras conjuntas quedan bloqueadas hasta confirmar el uso físico del stock. Las listas se revisan manualmente; no se envían mensajes.
+- **Pesos constantes:** la vista de caja compara dos importes con puntos de IPC suministrados desde una publicación de INDEC, período base y versión explícitos. El enlace se valida como dominio oficial, pero los valores requieren cotejo humano; el IPC no sustituye una cotización de reposición.
+- **Preparación de insumos:** `/app/preparar` registra el mapeo de ubicaciones, reglas de proveedor, cotizaciones, entregas pendientes, saldos por cuenta, partidas de caja y cobertura de fuentes. Sin saldo conciliado del día y cobertura futura completa, el pronóstico de caja no muestra saldo utilizable.
+- **Historial externo:** `/app/importar` acepta CSV/XLSX para ventas y líneas de delivery, compras y líneas (incluida fecha de pedido para medir plazos), stock/faltantes, gastos, caja/banco, socios y promociones. Muestra mapeo, vista previa, errores, conflictos e historial de lotes; confirmar es transaccional e idempotente. La conciliación exige revisor distinto, conteo y total de control externo cuando corresponde. Los IDs de socios se seudonimizan con una clave HMAC estable (`DATA_IMPORT_PII_SECRET` o `JWT_SECRET`). Los hechos del delivery quedan separados de caja y stock locales. Las anulaciones no se aplican automáticamente: un archivo con esos registros se rechaza para revisión hasta vincular la reversión.
+
 - **Dashboard:** períodos día, últimos 7 días y mes; comparación con período anterior equivalente; ventas, stock a costo, clientes activos, margen, ticket medio, recompra, top 10 por importe/frecuencia, inactivos 30/60/90 días, vencimientos, gastos/presupuesto y ranking de responsables.
 - **Inventario:** productos/lotes, cepa, tipo, gramos/unidades, precios, mínimos, ubicación, proveedor, responsable y vencimiento. El dueño guarda proveedores con contacto y notas, marca uno como predeterminado y puede archivarlos sin perder los lotes vinculados. Al crear un lote se elige un proveedor guardado; el inventario se puede filtrar por proveedor. Alta, edición de datos, entradas, salidas, ajustes por conteo y traspasos completos de lote. Historial completo paginado de 100 en 100.
 - **Socios:** altas/edición, notas internas, puntos, nivel por gasto acumulado, historial, frecuencia, segmentos top/inactivos/en riesgo.
@@ -67,7 +74,7 @@ El seed nunca borra datos: si ya existen usuarios, termina sin modificar la base
 - **Gastos:** fijos/variables, categorías, asignación opcional, recurrencia semanal/mensual, ingresos menos gastos y presupuesto. «Procesar recurrencias» materializa los vencimientos pendientes de forma idempotente; no se generan cargos bancarios ni se ejecutan pagos externos.
 - **Responsables:** vista consolidada y por responsable, costos/margen por producto, ventas históricas atribuidas al responsable original, ranking y rotación.
 - **Reportes:** ventas detalladas en CSV/XLSX y resumen de liquidación por responsable en PDF; filtros de fecha y ámbito aplicados en servidor.
-- **Migración:** productos, socios y movimientos de caja/banco mediante CSV exportado de Sheets/AppSheet, identificadores de origen, validación por fila, omitidos y conflictos, vista previa y confirmación atómica. Los cobros del delivery importados no crean ventas ni descuentan stock local. No requiere acceso a la cuenta de Google.
+- **Migración operativa anterior:** productos, socios y movimientos de caja/banco mediante CSV exportado de Sheets/AppSheet, identificadores de origen, validación por fila, omitidos y conflictos, vista previa y confirmación atómica. Esta ruta sigue disponible; el historial analítico externo se carga en `/app/importar`. Los cobros del delivery importados no crean ventas ni descuentan stock local. No requiere acceso a la cuenta de Google.
 - **Equipo:** creación de usuarios con rol desde la cuenta del dueño. Los permisos no dependen de ocultar botones.
 
 ## Permisos
@@ -114,7 +121,7 @@ Socios: `name,email,phone,notes,sourceSystem,sourceId`. Los dos últimos campos 
 
 Movimientos financieros: `date,account,category,amount,description,sourceSystem,sourceId`. `account` es `cash` o `bank`; importes con signo en ARS, decimal punto. Categorías: `opening_balance`, `operating_expense`, `stock_purchase`, `local_investment`, `capital_contribution`, `owner_draw`, `delivery_receipt`, `other_income`, `other_outflow`, `adjustment`. Un movimiento en efectivo previo a un cierre requiere conciliación antes de importar. Los movimientos del delivery no se suman a las ventas locales del resultado preliminar.
 
-Los importes del CSV se expresan en moneda principal (por ejemplo `12.50`), no en centavos; las cantidades en gramos/unidades, no en milésimas. `ownerId` usa el identificador real del usuario; la plantilla incluye un ejemplo válido. Fechas `AAAA-MM-DD`, separador coma o punto y coma, decimal punto. Lotes conflictivos o responsables desconocidos bloquean la confirmación completa; filas idénticas de la misma fuente se omiten. Límite 2.000 filas. La importación actual no importa ventas históricas ni saldos de puntos: requieren un mapeo específico de la planilla original para evitar asignaciones y totales incorrectos.
+Los importes del CSV se expresan en moneda principal (por ejemplo `12.50`), no en centavos; las cantidades en gramos/unidades, no en milésimas. `ownerId` usa el identificador real del usuario; la plantilla incluye un ejemplo válido. Fechas `AAAA-MM-DD`, separador coma o punto y coma, decimal punto. Lotes conflictivos o responsables desconocidos bloquean la confirmación completa; filas idénticas de la misma fuente se omiten. Límite 2.000 filas para esta importación operativa. Las ventas históricas de delivery se cargan con el nuevo estudio `/app/importar`, en su propia tabla analítica; no importan saldos de puntos.
 
 ## API
 
@@ -149,7 +156,7 @@ La API pública de vista previa agrega `GET /api/site`, `GET /api/site/showcase`
 
 ## Pruebas
 
-`npm run check` valida tipos, pruebas unitarias y compilación. Para las pruebas de integración, configurá `TEST_DATABASE_URL` con una base PostgreSQL desechable y ejecutá `npm test`; cada ejecución crea y elimina su propio esquema. El circuito de navegador se ejecuta con `npm run test:e2e` contra una instancia demo aislada (`E2E_URL`). Las pruebas de navegador dejan lotes, socios, ventas y proyecciones QA persistidos en esa demo; conviene usar una base de demostración desechable.
+`npm run check` valida tipos, pruebas unitarias e integración y compilación. Para no omitir las pruebas con PostgreSQL, configurá `TEST_DATABASE_URL` con una base local dedicada `bombo_ui_*`, distinta de `DATABASE_URL`. Las pruebas crean y eliminan esquemas temporales. `npm run test:e2e` inicia API y Vite en puertos locales efímeros con un esquema desechable, aplica migraciones y seed, y elimina el esquema al terminar. El runner rechaza hosts externos, la base principal y nombres que no empiecen por `bombo_ui_`; no uses un túnel local hacia otra base.
 
 ### Medición de carga
 
@@ -175,18 +182,18 @@ npm test
 npm run build
 ```
 
-Las pruebas de dominio siempre se ejecutan. Para ejecutar también la suite API, configurar `TEST_DATABASE_URL` contra una base **de pruebas**. La suite crea un esquema `test_<uuid>`, aplica todas las migraciones SQL, prepara fixtures y elimina solo ese esquema al terminar. No usa los datos de la demo. Sin esta variable, las pruebas API se marcan explícitamente como omitidas.
+Las pruebas de dominio siempre se ejecutan. La suite API crea un esquema `test_<uuid>` en la base local de pruebas, aplica migraciones SQL, prepara fixtures y elimina solo ese esquema al terminar. No usa los datos de la demo. Sin `TEST_DATABASE_URL`, las pruebas API se marcan explícitamente como omitidas.
 
 La suite cubre descuentos/puntos, zona horaria, recurrencias, CSV, autenticación/origen, aislamiento por responsable, lectura sin permisos de escritura, venta atómica, idempotencia, stock insuficiente, concurrencia, traspasos históricos, ocultación de costos al cajero, importación atómica, permisos de socios, movimientos de caja, bloqueo legal por defecto, formatos de exportación y cierre.
 
-Con una demo local en ejecución:
+Con una base PostgreSQL local de pruebas dedicada:
 
 ```sh
-npx playwright install chromium
-npm run test:e2e
+TEST_DATABASE_URL='postgresql://usuario:clave@127.0.0.1:5432/bombo_ui_pruebas' npm run check
+TEST_DATABASE_URL='postgresql://usuario:clave@127.0.0.1:5432/bombo_ui_pruebas' npm run test:e2e
 ```
 
-Se puede configurar `E2E_URL` y `BROWSER_PATH` si se usa otro puerto o un Chromium instalado. La prueba de navegador crea productos y socios prefijados `QA`, registra una venta y verifica su persistencia. Ejecutarla solo sobre datos de demostración. También comprueba navegación móvil, alcance del responsable y vista previa CSV.
+`BROWSER_PATH` permite elegir otro Chromium instalado. `E2E_URL` no se usa: el runner elige puertos temporales y sólo acepta el origen que crea. La suite verifica ventas, stock, socios, permisos, navegación móvil, vista previa CSV, publicación de fichas y consultas; todos sus datos se eliminan con el esquema de pruebas.
 
 ## Producción y alcance
 

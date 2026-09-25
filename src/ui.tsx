@@ -41,7 +41,7 @@ export function Avatar({
       className="avatar"
       style={{
         background: color ? `${color}28` : undefined,
-        color: color || "#315846",
+        color: color || "#3e402e",
         width: size,
         height: size,
       }}
@@ -98,7 +98,7 @@ export function Search({
         onChange={(e) => onChange(e.target.value)}
       />
       {value && (
-        <button aria-label="Limpiar búsqueda" onClick={() => onChange("")}>
+        <button type="button" aria-label="Limpiar búsqueda" onClick={() => onChange("")}>
           <X size={15} />
         </button>
       )}
@@ -185,7 +185,7 @@ export function ActionLink({
   onClick: () => void;
 }) {
   return (
-    <button className="action-link" onClick={onClick}>
+    <button type="button" className="action-link" onClick={onClick}>
       {children}
       <ArrowRight size={15} />
     </button>
@@ -206,6 +206,7 @@ export function Modal({
   children: ReactNode;
   wide?: boolean;
 }) {
+  const descriptionId = useId();
   return (
     <Dialog.Root
       open={open}
@@ -217,14 +218,14 @@ export function Modal({
         <Dialog.Overlay className="modal-overlay" />
         <Dialog.Content
           className={`modal ${wide ? "wide" : ""}`}
-          aria-describedby={description ? "dialog-desc" : undefined}
+          aria-describedby={description ? descriptionId : undefined}
         >
           <div className="modal-body">
             <div className="modal-head">
               <div>
                 <Dialog.Title>{title}</Dialog.Title>
                 {description && (
-                  <Dialog.Description id="dialog-desc">
+                  <Dialog.Description id={descriptionId}>
                     {description}
                   </Dialog.Description>
                 )}
@@ -305,17 +306,19 @@ export function Field({
   hint?: string;
 }) {
   const id = useId();
+  const hintId = useId();
   return (
     <div className="field">
       <label htmlFor={id}>{label}</label>
-      {Children.map(children, (child) =>
-        isValidElement(child) &&
-        typeof child.type === "string" &&
-        ["input", "select", "textarea"].includes(child.type)
-          ? cloneElement(child as ReactElement<{ id?: string }>, { id })
-          : child,
-      )}
-      {hint && <small>{hint}</small>}
+      {Children.map(children, (child) => {
+        if (!isValidElement(child) || typeof child.type !== "string" || !["input", "select", "textarea"].includes(child.type)) return child;
+        const control = child as ReactElement<{ id?: string; "aria-describedby"?: string }>;
+        return cloneElement(control, {
+          id,
+          "aria-describedby": hint ? [control.props["aria-describedby"], hintId].filter(Boolean).join(" ") : control.props["aria-describedby"],
+        });
+      })}
+      {hint && <small id={hintId}>{hint}</small>}
     </div>
   );
 }

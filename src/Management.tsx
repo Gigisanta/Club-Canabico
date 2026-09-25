@@ -36,6 +36,7 @@ import {
   Empty,
   Metric,
 } from "./ui";
+import "./panorama.css";
 export function Expenses() {
   const { state, money, canManage, isManager, user, owner, reload } = useClub();
   const [params, setParams] = useSearchParams();
@@ -65,8 +66,9 @@ export function Expenses() {
   const list = expenseData.data?.items || [];
   const total = expenseData.data?.summary.total || 0;
   const income = state.periodRevenue;
+  const budgetPercent = state.settings.budget ? (total / state.settings.budget) * 100 : 0;
   return (
-    <>
+    <div className="panorama-expenses">
       <PageHeader
         eyebrow="CUIDÁ LOS RECURSOS DEL CLUB"
         title="Gastos registrados"
@@ -117,6 +119,10 @@ export function Expenses() {
           icon={<ChartBar />}
           detail="Indicador preliminar: no descuenta costo vendido ni separa movimientos de caja"
         />
+      </div>
+      <div className={`expense-budget${budgetPercent >= 85 ? " is-near-limit" : ""}`}>
+        <div><span>Presupuesto mensual</span><strong>{state.settings.budget ? `${Math.round(budgetPercent)}% utilizado` : "Sin presupuesto configurado"}</strong></div>
+        {state.settings.budget > 0 && <div className="expense-budget-track" role="progressbar" aria-label="Presupuesto mensual utilizado" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, Math.round(budgetPercent))} aria-valuetext={`${Math.round(budgetPercent)}% utilizado`}><i style={{ width: `${Math.min(100, Math.max(0, budgetPercent))}%` }} /></div>}
       </div>
       <Panel title="Registro de gastos">
         <div className="table-toolbar">
@@ -185,9 +191,9 @@ export function Expenses() {
             </tbody>
           </table>
           {expenseData.loading && <p role="status" className="table-note">Buscando gastos…</p>}
-          {!expenseData.loading && !list.length && <Empty title="Sin gastos en este período" />}
+          {!expenseData.loading && !expenseData.error && expenseData.data && !list.length && <Empty title="Sin gastos con estos filtros" description="Probá otro mes, tipo o término de búsqueda; los gastos registrados aparecerán aquí." />}
         </div>
-        {expenseData.error && <p role="alert">{expenseData.error}</p>}
+        {expenseData.error && <div className="panorama-inline-error" role="alert"><p>{expenseData.error}</p><button className="button" onClick={() => void expenseData.reload()}>Reintentar carga</button></div>}
         {(previous.length > 0 || expenseData.data?.nextCursor) && <div className="table-pagination">
           <button className="button" disabled={!previous.length} onClick={() => { setCursor(previous.at(-1) || null); setPrevious((rows) => rows.slice(0, -1)); }}>Anterior</button>
           <span>Página {previous.length + 1} · {expenseData.data?.total || 0} gastos</span>
@@ -284,7 +290,7 @@ export function Expenses() {
           </div>
         </Form>
       </Modal>
-    </>
+    </div>
   );
 }
 export function Responsibles() {
@@ -318,29 +324,30 @@ export function Responsibles() {
     .sort((a, b) =>
       sort === "revenue" ? b.revenue - a.revenue : b.rotation - a.rotation,
     );
+  const leadingValue = Math.max(0, ...owners.map((o) => sort === "revenue" ? o.revenue : o.rotation));
   return (
-    <>
+    <div className="panorama-responsibles">
       <PageHeader
         eyebrow="CADA RESPONSABLE, SU APORTE"
         title="Responsables"
         description="Asignación clara, historial intacto y una visión compartida del club."
         actions={
-          <select
-            aria-label="Orden de responsables"
-            value={sort}
-            onChange={(e) => setSort(e.target.value)}
-          >
-            <option value="revenue">Ordenar por ventas</option>
-            <option value="rotation">Ordenar por rotación</option>
-          </select>
+          <div className="responsible-sort"><span>Ordenar</span><select
+              aria-label="Orden de responsables"
+              value={sort}
+              onChange={(e) => setSort(e.target.value)}
+            >
+              <option value="revenue">Por ventas</option>
+              <option value="rotation">Por rotación</option>
+            </select></div>
         }
       />
-      <div className="owner-cards">
+      {owners.length ? <div className="owner-cards">
         {owners.map((o, i) => (
           <section className="owner-card" key={o.id}>
             <div className="owner-card-top">
               <Avatar name={o.name} color={o.color} size={52} />
-              <span className="rank-badge">#{i + 1} del mes</span>
+              <span className="rank-badge">#{i + 1} · {sort === "revenue" ? "ventas" : "rotación"}</span>
             </div>
             <h2>{o.name}</h2>
             <p>Responsable del stock</p>
@@ -358,6 +365,10 @@ export function Responsibles() {
                   %
                 </strong>
               </div>
+            </div>
+            <div className="owner-score">
+              <div><span>{sort === "revenue" ? "Ventas relativas" : "Rotación relativa"}</span><strong>{leadingValue ? Math.round(((sort === "revenue" ? o.revenue : o.rotation) / leadingValue) * 100) : 0}%</strong></div>
+              <div className="owner-score-track" role="img" aria-label={`${sort === "revenue" ? "Ventas" : "Rotación"} relativa: ${leadingValue ? Math.round(((sort === "revenue" ? o.revenue : o.rotation) / leadingValue) * 100) : 0}% del primer puesto`}><i style={{ width: `${leadingValue ? ((sort === "revenue" ? o.revenue : o.rotation) / leadingValue) * 100 : 0}%` }} /></div>
             </div>
             <div className="owner-card-info">
               <span>
@@ -387,7 +398,7 @@ export function Responsibles() {
             </button>
           </section>
         ))}
-      </div>
+      </div> : <div className="panorama-empty"><strong>Aún no hay responsables para comparar</strong><p>Asigná lotes a responsables para empezar a ver ventas, stock y rotación.</p></div>}
       <Panel
         title="Rentabilidad por producto"
         sub="Período: mes actual. La responsabilidad de cada venta se conserva aunque el lote se traspase."
@@ -424,13 +435,14 @@ export function Responsibles() {
               })}
             </tbody>
           </table>
+          {!state.responsibleRows.length && <Empty title="Sin ventas registradas este mes" description="La rentabilidad por producto aparecerá cuando haya ventas en el período." />}
         </div>
       </Panel>
       <p className="muted small">
         Rotación = costo de productos vendidos en el mes / valor del stock
         actual a costo. No utiliza stock promedio histórico.
       </p>
-    </>
+    </div>
   );
 }
 export function Reports() {
@@ -438,7 +450,7 @@ export function Reports() {
   const [from, setFrom] = useState(state.today.slice(0, 7) + "-01");
   const [to, setTo] = useState(state.today);
   return (
-    <>
+    <div className="panorama-reports">
       <PageHeader
         eyebrow="DE LOS DATOS A LAS DECISIONES"
         title="Reportes y liquidaciones"
@@ -483,6 +495,7 @@ export function Reports() {
           </Field>
         </div>
       </Panel>
+      <p className="report-data-note"><strong>Resultados registrados</strong><span>{from && to ? `${from} → ${to}` : "Elegí un período para preparar la descarga."}</span></p>
       <div className="export-cards">
         {[
           {
@@ -529,10 +542,10 @@ export function Reports() {
         ))}
       </div>
       {from > to && (
-        <p className="form-error">
+        <p className="form-error" role="alert">
           La fecha inicial no puede superar la final.
         </p>
       )}
-    </>
+    </div>
   );
 }

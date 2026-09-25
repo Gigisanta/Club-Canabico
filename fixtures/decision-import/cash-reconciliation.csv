@@ -1,0 +1,2 @@
+recordType,sourceId,date,account,expected,counted
+cash_reconciliation,demo-cash-check-001,2026-09-05,caja,100.00,98.50

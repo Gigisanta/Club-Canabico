@@ -1,60 +1,144 @@
-.dashboard-section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 0 12px; }
-.dashboard-section-title h2 { margin: 0; font: 400 21px/1.2 Georgia, "Times New Roman", serif; letter-spacing: -.02em; }
-.dashboard-section-title p { margin: 0; color: var(--muted); font-size: 11px; }
-.dashboard-section-title-lower { margin-top: 25px; }
+.panorama-dashboard { min-width: 0; }
+.panorama-dashboard .dashboard-section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 0 14px; }
+.panorama-dashboard .dashboard-section-title h2 { margin: 0; font: 600 var(--type-section)/1.1 Bricolage, sans-serif; letter-spacing: -.045em; }
+.panorama-dashboard .dashboard-section-title p { margin: 0; color: var(--muted); font-size: 12px; }
+.panorama-dashboard .dashboard-section-title-lower { margin-top: 31px; }
+.panorama-dashboard .dashboard-toolbar { min-width: 0; margin-bottom: 25px; }
+.panorama-dashboard .dashboard-view-actions { display: flex; align-self: stretch; gap: 23px; }
+.panorama-dashboard .dashboard-view-actions :is(.current-view, button) { display: flex; align-items: center; gap: 5px; min-height: 46px; padding: 12px 0 14px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.panorama-dashboard .dashboard-view-actions .current-view { border-bottom-color: var(--accent); color: var(--text); }
+.panorama-dashboard .dashboard-view-actions button:hover { color: var(--text); }
+.panorama-dashboard .filter-group { flex-wrap: wrap; }
+.panorama-dashboard .select-wrap select { min-height: 42px; height: auto; font-size: 13px; }
+.panorama-dashboard .metrics-grid:not(.three) { gap: 15px; margin-bottom: 24px; }
+.panorama-dashboard .metrics-grid:not(.three) > .metric { min-width: 0; container-type: inline-size; }
+.panorama-dashboard .metric > strong { display: block; width: max-content; max-width: 100%; margin: 20px 0 15px; font-size: clamp(16px, 10cqi, 28px) !important; line-height: 1.08; letter-spacing: -.045em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.panorama-dashboard .metric .spark { display: none; }
+.panorama-dashboard .metrics-grid > .metric:first-child .metric-top { color: #f6efddc9; }
+.panorama-dashboard .metrics-grid > .metric:first-child .metric-icon { background: #ffffff18; color: var(--brand-lime); }
+.panorama-dashboard .metrics-grid > .metric:nth-child(2) .metric-icon { background: #dce9bd; color: var(--brand-olive); }
+.panorama-dashboard .metrics-grid > .metric:nth-child(3) .metric-icon { background: #e2ddf7; color: #625c99; }
+.panorama-dashboard .dashboard-charts,
+.panorama-dashboard .dashboard-bottom { align-items: stretch; gap: 17px; margin-bottom: 20px; }
+.panorama-dashboard .dashboard-charts > .panel,
+.panorama-dashboard .dashboard-bottom > .panel { min-width: 0; }
+.panorama-dashboard .revenue-panel .panel-head { align-items: flex-start; }
+.panorama-dashboard .chart-summary { min-width: 0; gap: 12px; padding-top: 3px; }
+.panorama-dashboard .chart-summary > strong { font-size: clamp(19px, 2.3vw, 28px); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.panorama-dashboard .chart-legend { flex-wrap: wrap; justify-content: flex-end; line-height: 1.5; }
+.panorama-dashboard .donut-center small { color: var(--muted); }
+.panorama-dashboard .donut-legend > div { min-width: 0; }
+.panorama-dashboard .top-table table { min-width: 660px; }
+.panorama-dashboard .top-table .rank-col { color: var(--muted); font-variant-numeric: tabular-nums; }
+.panorama-dashboard .owner-bar { overflow: hidden; border-radius: 99px; }
+.panorama-dashboard .owner-bar i { min-width: 3px; border-radius: inherit; }
+.panorama-dashboard .customer-pulse-panel { padding-top: 2px; }
+.panorama-dashboard .panorama-load-state { max-width: 560px; margin: 12vh auto; padding: clamp(22px, 5vw, 40px); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-card); }
+.panorama-dashboard .panorama-load-state.is-error { border-color: #d6a18b; }
+.panorama-dashboard .panorama-load-state h1 { margin: 9px 0; font-size: clamp(25px, 4vw, 36px); line-height: 1.05; letter-spacing: -.05em; }
+.panorama-dashboard .panorama-load-state p { color: var(--muted); line-height: 1.55; }
+.panorama-dashboard .panorama-load-state .button { margin-top: 8px; }
 
-.dashboard-signals { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(275px, 1fr); gap: 16px; margin-bottom: 15px; }
-.outlook-panel, .decision-panel { min-width: 0; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: 0 7px 18px #193b2110; }
-.outlook-panel { overflow: hidden; padding: 22px 23px 0; }
-.outlook-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
-.signal-eyebrow { display: block; margin-bottom: 7px; color: #648062; font-size: 9px; font-weight: 850; letter-spacing: .15em; }
-.outlook-head h2, .decision-head h2 { margin: 0; font: 400 23px/1.15 Georgia, "Times New Roman", serif; letter-spacing: -.025em; }
-.outlook-period { color: var(--muted); font-size: 10px; white-space: nowrap; }
-.outlook-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 0; margin-top: 19px; border-top: 1px solid var(--border); }
-.outlook-lead, .outlook-buyers { min-width: 0; padding: 19px 19px 17px 0; }
-.outlook-buyers { border-left: 1px solid var(--border); padding-left: 20px; padding-right: 0; }
-.outlook-icon { display: grid; place-items: center; width: 31px; height: 31px; border-radius: 8px; background: #e9f0e4; color: var(--accent); }
-.outlook-grid p { margin: 12px 0 3px; color: var(--muted); font-size: 11px; font-weight: 750; line-height: 1.4; }
-.outlook-grid strong { display: block; color: var(--text); font-size: clamp(23px, 2.25vw, 34px); line-height: 1.13; letter-spacing: -.045em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.outlook-grid small { display: block; min-height: 34px; margin-top: 10px; color: #64786a; font-size: 10px; line-height: 1.5; }
-.outlook-month { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 12px 0; border-top: 1px solid var(--border); }
-.outlook-month span { color: var(--muted); font-size: 11px; }
-.outlook-month strong { color: var(--text); font-size: 17px; font-weight: 800; letter-spacing: -.025em; font-variant-numeric: tabular-nums; text-align: right; }
-.outlook-method { margin: 0 -23px; padding: 11px 23px 13px; border-top: 1px solid #e2e9de; background: #f1f5ec; color: #52695a; font-size: 10px; line-height: 1.55; }
+.panorama-dashboard .dashboard-signals { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(275px, 1fr); gap: 17px; margin: 0 0 18px; }
+.panorama-dashboard .outlook-panel,
+.panorama-dashboard .decision-panel { min-width: 0; border: 1px solid var(--border); border-radius: 17px; background: var(--surface); box-shadow: var(--shadow-card); }
+.panorama-dashboard .outlook-panel { overflow: hidden; padding: 23px 24px 0; }
+.panorama-dashboard .outlook-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
+.panorama-dashboard .signal-eyebrow { display: block; margin-bottom: 8px; color: #626a32; font-size: 10px; font-weight: 800; letter-spacing: .14em; }
+.panorama-dashboard .outlook-head h2,
+.panorama-dashboard .decision-head h2 { margin: 0; font: 600 clamp(20px, 2vw, 26px)/1.1 Bricolage, sans-serif; letter-spacing: -.045em; }
+.panorama-dashboard .outlook-period { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.panorama-dashboard .outlook-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 0; margin-top: 20px; border-top: 1px solid var(--border); }
+.panorama-dashboard .outlook-lead,
+.panorama-dashboard .outlook-buyers { min-width: 0; container-type: inline-size; padding: 20px 20px 18px 0; }
+.panorama-dashboard .outlook-buyers { border-left: 1px solid var(--border); padding-left: 21px; padding-right: 0; }
+.panorama-dashboard .outlook-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 11px; background: #e9f0e4; color: var(--brand-olive); }
+.panorama-dashboard .outlook-grid p { margin: 13px 0 5px; color: var(--muted); font-size: 12px; font-weight: 600; line-height: 1.4; }
+.panorama-dashboard .outlook-grid strong { display: block; color: var(--text); font-size: clamp(19px, 9cqi, 34px); line-height: 1.08; letter-spacing: -.045em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.panorama-dashboard .outlook-grid small { display: block; min-height: 36px; margin-top: 10px; color: #52695a; font-size: 11px; line-height: 1.5; }
+.panorama-dashboard .outlook-month { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; container-type: inline-size; padding: 13px 0; border-top: 1px solid var(--border); }
+.panorama-dashboard .outlook-month span { color: var(--muted); font-size: 12px; }
+.panorama-dashboard .outlook-month strong { color: var(--text); font-size: clamp(14px, 5.5cqi, 20px); font-weight: 700; letter-spacing: -.025em; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.panorama-dashboard .outlook-method { margin: 0 -24px; padding: 12px 24px 14px; border-top: 1px solid #dce6cf; background: #edf2df; color: #4f5b38; font-size: 11px; line-height: 1.55; }
+.panorama-dashboard .decision-panel { padding: 23px 23px 12px; }
+.panorama-dashboard .decision-head p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.panorama-dashboard .decision-list { list-style: none; margin: 17px 0 0; padding: 0; }
+.panorama-dashboard .decision-list li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 11px; padding: 14px 0; border-top: 1px solid var(--border); }
+.panorama-dashboard .decision-index { color: #777c5e; font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.panorama-dashboard .decision-list strong { display: block; color: var(--text); font-size: 13px; line-height: 1.35; }
+.panorama-dashboard .decision-list p { margin: 5px 0 8px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.panorama-dashboard .decision-list button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 4px 0; border: 0; background: none; color: var(--accent); font-size: 12px; font-weight: 700; text-align: left; }
+.panorama-dashboard .decision-list button:hover { color: var(--accent-hover); text-decoration: underline; }
+.panorama-dashboard .decision-empty { padding: 20px 0 7px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 
-.decision-panel { padding: 22px 22px 11px; }
-.decision-head p { margin: 7px 0 0; color: var(--muted); font-size: 11px; }
-.decision-list { list-style: none; margin: 17px 0 0; padding: 0; }
-.decision-list li { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 10px; padding: 13px 0; border-top: 1px solid var(--border); }
-.decision-index { color: #9aa99a; font-size: 10px; font-weight: 850; font-variant-numeric: tabular-nums; }
-.decision-list strong { display: block; color: var(--text); font-size: 12px; line-height: 1.35; }
-.decision-list p { margin: 4px 0 7px; color: var(--muted); font-size: 10px; line-height: 1.45; }
-.decision-list button { display: inline-flex; align-items: center; gap: 6px; padding: 4px 0; border: 0; background: none; color: var(--accent); font-size: 11px; font-weight: 800; text-align: left; }
-.decision-list button:hover { color: var(--accent-hover); text-decoration: underline; }
-.decision-empty { padding: 20px 0 7px; color: var(--muted); font-size: 12px; }
+.panorama-dashboard .customer-pulse-panel { min-width: 0; padding-bottom: 0; }
+.panorama-dashboard .customer-pulse-total { display: flex; align-items: baseline; flex-wrap: wrap; column-gap: 8px; padding: 0 22px 16px; }
+.panorama-dashboard .customer-pulse-total strong { color: var(--text); font-size: 42px; line-height: 1; letter-spacing: -.055em; font-variant-numeric: tabular-nums; }
+.panorama-dashboard .customer-pulse-total span { color: var(--muted); font-size: 12px; }
+.panorama-dashboard .customer-pulse-total small { margin-left: auto; color: var(--muted); font-size: 11px; }
+.panorama-dashboard .customer-pulse-rows { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin: 0 22px; padding: 16px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.panorama-dashboard .customer-pulse-rows > div { display: flex; flex-direction: column; min-width: 0; gap: 5px; }
+.panorama-dashboard .customer-pulse-rows > div + div { padding-left: 15px; border-left: 1px solid var(--border); }
+.panorama-dashboard .customer-pulse-rows span,
+.panorama-dashboard .customer-pulse-share span { color: var(--muted); font-size: 11px; }
+.panorama-dashboard .customer-pulse-rows strong { color: var(--text); font-size: 25px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.panorama-dashboard .customer-pulse-rows small,
+.panorama-dashboard .customer-pulse-share small { color: var(--muted); font-size: 11px; }
+.panorama-dashboard .customer-pulse-share { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px 8px; margin: 0 22px; padding: 17px 0; }
+.panorama-dashboard .customer-pulse-share strong { color: var(--accent); font-size: 20px; font-variant-numeric: tabular-nums; }
+.panorama-dashboard .customer-pulse-share small { margin-left: auto; }
+.panorama-dashboard .customer-inactive { display: flex; align-items: center; flex-wrap: wrap; gap: 9px 12px; padding: 15px 22px; border-top: 1px solid var(--border); background: #edf2df; }
+.panorama-dashboard .customer-inactive > div { display: flex; align-items: center; gap: 7px; }
+.panorama-dashboard .customer-inactive span { color: var(--muted); font-size: 11px; }
+.panorama-dashboard .customer-inactive select { min-height: 34px; height: 34px; padding: 4px 7px; font-size: 12px; }
+.panorama-dashboard .customer-inactive strong { color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; }
+.panorama-dashboard .customer-inactive button { display: inline-flex; align-items: center; gap: 4px; min-height: 34px; margin-left: auto; padding: 3px 0; border: 0; background: none; color: var(--accent); font-size: 11px; font-weight: 700; }
+.panorama-dashboard .customer-inactive button:hover { text-decoration: underline; }
+.panorama-dashboard :is(button, select, a):focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 3px; }
 
-.customer-pulse-panel { min-width: 0; padding-bottom: 0; }
-.customer-pulse-total { display: flex; align-items: baseline; flex-wrap: wrap; column-gap: 8px; padding: 0 22px 16px; }
-.customer-pulse-total strong { color: var(--text); font-size: 39px; line-height: 1; letter-spacing: -.055em; font-variant-numeric: tabular-nums; }
-.customer-pulse-total span { color: var(--muted); font-size: 11px; }
-.customer-pulse-total small { margin-left: auto; color: var(--muted); font-size: 10px; }
-.customer-pulse-rows { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin: 0 22px; padding: 15px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-.customer-pulse-rows > div { display: flex; flex-direction: column; min-width: 0; gap: 4px; }
-.customer-pulse-rows > div + div { padding-left: 15px; border-left: 1px solid var(--border); }
-.customer-pulse-rows span, .customer-pulse-share span { color: var(--muted); font-size: 10px; }
-.customer-pulse-rows strong { color: var(--text); font-size: 23px; line-height: 1.1; font-variant-numeric: tabular-nums; }
-.customer-pulse-rows small, .customer-pulse-share small { color: var(--muted); font-size: 10px; }
-.customer-pulse-share { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px 8px; margin: 0 22px; padding: 16px 0; }
-.customer-pulse-share strong { color: var(--accent); font-size: 18px; font-variant-numeric: tabular-nums; }
-.customer-pulse-share small { margin-left: auto; }
-.customer-inactive { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 14px 22px; border-top: 1px solid var(--border); background: #f1f5ec; }
-.customer-inactive > div { display: flex; align-items: center; gap: 7px; }
-.customer-inactive span { color: var(--muted); font-size: 10px; }
-.customer-inactive select { min-height: 30px; height: 30px; padding: 3px 5px; font-size: 10px; }
-.customer-inactive strong { color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; }
-.customer-inactive button { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 3px 0; border: 0; background: none; color: var(--accent); font-size: 10px; font-weight: 800; }
-.customer-inactive button:hover { text-decoration: underline; }
-
-@media (max-width: 1120px) { .dashboard-signals { grid-template-columns: 1fr; } .decision-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; } .decision-list li { align-content: start; } }
-@media (max-width: 760px) { .dashboard-section-title { display: block; } .dashboard-section-title p { margin-top: 4px; } .outlook-head { display: block; } .outlook-period { display: block; margin-top: 7px; } .decision-list { display: block; } }
-@media (max-width: 520px) { .outlook-panel { padding: 19px 17px 0; } .outlook-grid { grid-template-columns: 1fr; } .outlook-lead { padding-right: 0; } .outlook-buyers { border-left: 0; border-top: 1px solid var(--border); padding: 17px 0; } .outlook-grid small { min-height: 0; } .outlook-method { margin: 0 -17px; padding: 11px 17px 13px; } .outlook-month { display: block; } .outlook-month strong { display: block; margin-top: 4px; text-align: left; } .customer-pulse-total small { width: 100%; margin-left: 0; } .customer-pulse-share small { width: 100%; margin-left: 0; } }
+@media (max-width: 1120px) {
+  .panorama-dashboard .dashboard-signals { grid-template-columns: 1fr; }
+  .panorama-dashboard .decision-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .panorama-dashboard .decision-list li { align-content: start; }
+}
+@media (max-width: 920px) {
+  .panorama-dashboard .metrics-grid:not(.three) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .panorama-dashboard .dashboard-charts,
+  .panorama-dashboard .dashboard-bottom { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .panorama-dashboard .dashboard-section-title { display: block; }
+  .panorama-dashboard .dashboard-section-title p { margin-top: 5px; }
+  .panorama-dashboard .dashboard-toolbar { align-items: stretch; }
+  .panorama-dashboard .dashboard-toolbar > .filter-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 0 0 12px; }
+  .panorama-dashboard .dashboard-toolbar .select-wrap { min-width: 0; }
+  .panorama-dashboard .dashboard-toolbar select { min-width: 0; }
+  .panorama-dashboard .outlook-head { display: block; }
+  .panorama-dashboard .outlook-period { display: block; margin-top: 8px; white-space: normal; }
+  .panorama-dashboard .decision-list { display: block; }
+  .panorama-dashboard .chart-summary { flex-wrap: wrap; }
+  .panorama-dashboard .chart-summary > strong { white-space: normal; }
+}
+@media (max-width: 520px) {
+  .panorama-dashboard .outlook-panel { padding: 19px 17px 0; }
+  .panorama-dashboard .outlook-grid { grid-template-columns: 1fr; }
+  .panorama-dashboard .outlook-lead { padding-right: 0; }
+  .panorama-dashboard .outlook-buyers { border-left: 0; border-top: 1px solid var(--border); padding: 18px 0; }
+  .panorama-dashboard .outlook-grid small { min-height: 0; }
+  .panorama-dashboard .outlook-method { margin: 0 -17px; padding: 12px 17px 14px; }
+  .panorama-dashboard .outlook-month { display: block; }
+  .panorama-dashboard .outlook-month strong { display: block; margin-top: 5px; text-align: left; }
+  .panorama-dashboard .customer-pulse-total small,
+  .panorama-dashboard .customer-pulse-share small { width: 100%; margin-left: 0; }
+  .panorama-dashboard .dashboard-toolbar > .filter-group { grid-template-columns: 1fr; }
+}
+@media (max-width: 460px) {
+  .panorama-dashboard .metrics-grid:not(.three) { grid-template-columns: minmax(0, 1fr); }
+  .panorama-dashboard .metrics-grid:not(.three) > .metric { min-height: 130px; }
+  .panorama-dashboard .metric > strong { font-size: clamp(17px, 10cqi, 28px) !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .panorama-dashboard *,
+  .panorama-dashboard *::before,
+  .panorama-dashboard *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}

@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./isolated";
 import { resolve } from "node:path";
 
 test("public preview and legacy deep links work on desktop and mobile", async ({ page }) => {
@@ -20,7 +20,7 @@ test("public preview and legacy deep links work on desktop and mobile", async ({
   await page.goto("/socios?segment=permits&q=Ana");
   await expect(page).toHaveURL(/\/app\/socios\?segment=permits&q=Ana$/);
   await page.getByRole("button", { name: "Explorar club de demostración" }).click();
-  await expect(page.getByRole("heading", { level: 1, name: "Socios y fidelización" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "Directorio de socios" })).toBeVisible();
 });
 
 test("owner curates a public ficha; inquiry lands only in its private inbox", async ({ page }) => {
@@ -28,6 +28,7 @@ test("owner curates a public ficha; inquiry lands only in its private inbox", as
   const slug = `vista-previa-qa-${suffix}`;
   const title = `Vista previa QA ${suffix}`;
   const contact = `bombo-qa-${suffix}@example.test`;
+  const origin = new URL(process.env.E2E_BASE_URL!).origin;
   let itemId = "";
   let inquiryId = "";
   let previousChannels: { whatsappPhone: string; instagramUrl: string } | null = null;
@@ -54,11 +55,10 @@ test("owner curates a public ficha; inquiry lands only in its private inbox", as
     await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
     await expect(page.locator(".public-detail-image img")).toHaveAttribute("src", new RegExp(slug));
     previousChannels = await (await page.request.get("/api/site/admin/channels")).json();
-    await page.request.put("/api/site/admin/channels", { headers: { Origin: "http://127.0.0.1:5173" }, data: { whatsappPhone: "5491111111111", instagramUrl: previousChannels.instagramUrl || "" } });
-    let savedBeforeWhatsApp = false;
-    await page.route("https://wa.me/**", async route => {
-      const inbox = await (await page.request.get("/api/site/admin/inquiries")).json();
-      savedBeforeWhatsApp = inbox.items.some((item: { contact: string }) => item.contact === contact);
+    await page.request.put("/api/site/admin/channels", { headers: { Origin: origin }, data: { whatsappPhone: "5491111111111", instagramUrl: previousChannels.instagramUrl || "" } });
+    let interceptedWhatsAppUrl = "";
+    await page.context().route("https://wa.me/**", async route => {
+      interceptedWhatsAppUrl = route.request().url();
       await route.fulfill({ status: 200, contentType: "text/html", body: "<h1>WhatsApp interceptado</h1>" });
     });
     await page.getByLabel("Tu nombre").fill("Persona QA");
@@ -66,24 +66,75 @@ test("owner curates a public ficha; inquiry lands only in its private inbox", as
     await page.getByLabel("Mensaje").fill("Quisiera conocer más sobre esta ficha.");
     await page.getByLabel(/Acepto que Bombo/).check();
     await page.getByRole("button", { name: "Enviar consulta" }).click();
-    await expect(page).toHaveURL(/https:\/\/wa\.me\/5491111111111/);
-    expect(savedBeforeWhatsApp).toBe(true);
-    expect(page.url()).not.toContain(contact);
-    expect(page.url()).not.toContain("Persona QA");
-    await page.goto("/app/consultas");
-    const inquiry = page.locator(".inquiry-card").filter({ hasText: contact });
-    await expect(inquiry).toContainText(title);
+    await expect(page.getByRole("status")).toContainText(/consulta quedó guardada/i);
+    const whatsAppCTA = page.getByRole("link", { name: /WhatsApp/i });
+    await expect(whatsAppCTA).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`/productos/${slug}$`));
+
+    const inboxPage = await page.context().newPage();
+    await inboxPage.goto("/app/consultas");
+    await inboxPage.getByRole("button", { name: new RegExp("Persona QA") }).first().click();
+    const inquiry = inboxPage.locator(".inquiry-card").filter({ hasText: contact });
     const inboxResponse = await page.request.get("/api/site/admin/inquiries");
     inquiryId = ((await inboxResponse.json()).items as { id: string; contact: string }[]).find(item => item.contact === contact)?.id || "";
     expect(inquiryId).not.toBe("");
+    await expect(inquiry).toContainText(title);
+    await inquiry.getByLabel("Notas internas").fill("Seguimiento pendiente en esta vista previa.");
+    await inboxPage.getByRole("button", { name: "Contactadas", exact: true }).click();
+    await inboxPage.getByRole("button", { name: "Todas", exact: true }).click();
+    await inboxPage.getByRole("button", { name: new RegExp("Persona QA") }).first().click();
+    await expect(inquiry.getByLabel("Notas internas")).toHaveValue("Seguimiento pendiente en esta vista previa.");
+    await inboxPage.close();
+
+    await whatsAppCTA.click();
+    await expect.poll(() => interceptedWhatsAppUrl).toMatch(/^https:\/\/wa\.me\/5491111111111/);
+    const whatsAppURL = new URL(interceptedWhatsAppUrl);
+    const whatsAppText = whatsAppURL.searchParams.get("text") || "";
+    expect(whatsAppText).toBe("Hola Bombo, envié una consulta desde la web.");
+    expect(interceptedWhatsAppUrl).not.toContain(contact);
+    expect(interceptedWhatsAppUrl).not.toContain("Persona QA");
+    expect(interceptedWhatsAppUrl).not.toContain(title);
+
     const searchResponse = await page.request.get(`/api/search?q=${encodeURIComponent(contact)}`);
     const searchBody = JSON.stringify(await searchResponse.json());
     expect(searchBody).not.toContain(contact);
   } finally {
-    if (previousChannels) await page.request.put("/api/site/admin/channels", { headers: { Origin: "http://127.0.0.1:5173" }, data: { whatsappPhone: previousChannels.whatsappPhone || "", instagramUrl: previousChannels.instagramUrl || "" } });
-    if (inquiryId) await page.request.delete(`/api/site/admin/inquiries/${inquiryId}`, { headers: { Origin: "http://127.0.0.1:5173" } });
-    if (itemId) await page.request.delete(`/api/site/admin/showcase/${itemId}`, { headers: { Origin: "http://127.0.0.1:5173" } });
+    if (previousChannels) await page.request.put("/api/site/admin/channels", { headers: { Origin: origin }, data: { whatsappPhone: previousChannels.whatsappPhone || "", instagramUrl: previousChannels.instagramUrl || "" } });
+    if (inquiryId) await page.request.delete(`/api/site/admin/inquiries/${inquiryId}`, { headers: { Origin: origin } });
+    if (itemId) await page.request.delete(`/api/site/admin/showcase/${itemId}`, { headers: { Origin: origin } });
   }
+});
+
+test("consultas ignores a delayed page from the previous filter", async ({ page }) => {
+  await page.goto("/app/consultas");
+  await page.getByRole("button", { name: "Explorar club de demostración" }).click();
+  const inquiry = {
+    id: "inquiry-stale-page", name: "Consulta de otra etapa", contact: "otra@example.test",
+    interest: "Club", message: "Consulta de verificación visual.", source: "test",
+    status: "new", notes: "", consentAt: new Date().toISOString(), createdAt: new Date().toISOString(),
+  };
+  let releaseOldPage: (() => void) | undefined;
+  let oldPageRequested!: () => void;
+  const oldRequest = new Promise<void>((resolve) => { oldPageRequested = resolve; });
+  await page.route("**/api/site/admin/inquiries*", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.has("cursor")) {
+      oldPageRequested();
+      await new Promise<void>((resolve) => { releaseOldPage = resolve; });
+      await route.fulfill({ json: { items: [inquiry], nextCursor: null } });
+    } else if (url.searchParams.get("status") === "closed") {
+      await route.fulfill({ json: { items: [], nextCursor: null } });
+    } else {
+      await route.fulfill({ json: { items: [], nextCursor: "next-page" } });
+    }
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "Mostrar más consultas" }).click();
+  await oldRequest;
+  await page.getByRole("button", { name: "Cerradas", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Sin resultados en esta etapa" })).toBeVisible();
+  releaseOldPage?.();
+  await expect(page.getByText("Consulta de otra etapa")).toHaveCount(0);
 });
 
 test("public admin pages and API reject non managers", async ({ page }) => {

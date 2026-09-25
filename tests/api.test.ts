@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import bcrypt from "bcryptjs";
 import { defaults } from "../shared/domain.js";
+import { splitSqlStatements } from "./migration-sql.js";
 test(
   "PostgreSQL API: isolation, atomic sales, cash closing and migration",
   { skip: !process.env.TEST_DATABASE_URL },
@@ -22,7 +23,7 @@ test(
     const migrationRoot=new URL('../prisma/migrations/',import.meta.url);
     for(const folder of (await readdir(migrationRoot,{withFileTypes:true})).filter(f=>f.isDirectory()).sort((a,b)=>a.name.localeCompare(b.name))){
       const sql=await readFile(new URL(`${folder.name}/migration.sql`,migrationRoot),'utf8');
-      for(const statement of sql.split(';').map(s=>s.trim()).filter(Boolean))await db.$executeRawUnsafe(statement);
+      for(const statement of splitSqlStatements(sql))await db.$executeRawUnsafe(statement);
     }
     const password = await bcrypt.hash("test-password-123", 4);
     for (const [id, role] of [

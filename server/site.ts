@@ -5,7 +5,19 @@ import { z } from "zod";
 import { db } from "./db.js";
 import { HttpError } from "./validation.js";
 
-const publicSiteApproved = process.env.NODE_ENV !== "production" || process.env.PUBLIC_SITE_APPROVED === "true";
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (normalized === "localhost" || normalized === "::1") return true;
+  const ipv4 = normalized.startsWith("::ffff:") ? normalized.slice(7) : normalized;
+  const octets = ipv4.split(".");
+  return octets.length === 4 && octets[0] === "127" &&
+    octets.every(octet => /^(0|[1-9]\d{0,2})$/.test(octet) && Number(octet) <= 255);
+}
+
+const localPreview = process.env.PUBLIC_SITE_PREVIEW === "true" &&
+  process.env.NODE_ENV === "development" &&
+  isLoopbackHost(process.env.HOST || "127.0.0.1");
+const publicSiteApproved = process.env.PUBLIC_SITE_APPROVED === "true" || localPreview;
 const previewOnly = Router();
 previewOnly.use((req, res, next) => {
   if (req.path.startsWith("/admin")) return next();
@@ -83,17 +95,23 @@ publicSite.post("/inquiries", rateLimit({
   message: { error: "Demasiados intentos. Reintentá más tarde." },
 }), async (req, res) => {
   const value = inquirySchema.parse(req.body);
+  let whatsappPhone: string | null = null;
+  try {
+    const channels = await db.siteChannels.findUnique({ where: { id: 1 } });
+    whatsappPhone = channels?.whatsappPhone || null;
+  } catch {
+    // Contact channels are optional; their unavailability must not block an inquiry.
+  }
   await db.publicInquiry.create({
     data: {
       name: value.name, contact: value.contact, interest: value.interest,
       message: value.message, source: value.source, consentAt: new Date(),
     },
   });
-  const channels = await db.siteChannels.findUnique({ where: { id: 1 } });
   const message = encodeURIComponent("Hola Bombo, envié una consulta desde la web.");
   res.status(201).json({
     saved: true,
-    whatsappUrl: channels?.whatsappPhone ? `https://wa.me/${channels.whatsappPhone}?text=${message}` : null,
+    whatsappUrl: whatsappPhone ? `https://wa.me/${whatsappPhone}?text=${message}` : null,
   });
 });
 

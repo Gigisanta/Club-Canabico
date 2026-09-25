@@ -5,7 +5,18 @@ import { defaults, businessDate } from "../shared/domain.js";
 const db = new PrismaClient();
 async function seed() {
   if (await db.user.count()) {
-    console.log("La base ya tiene usuarios; no se modificó.");
+    if (process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "production" &&
+        await db.user.findUnique({ where: { email: "owner@demo.bombo.local" }, select: { id: true } })) {
+      const password = await bcrypt.hash("Demo-Bombo-2026!", 12);
+      await db.$transaction(async (tx) => {
+        await tx.user.updateMany({ where: { id: "admin", email: "admin@demo.bombo.local", name: "Ana Martínez" },
+          data: { name: "Camila" } });
+        await tx.user.upsert({ where: { email: "gio@demo.bombo.local" },
+          create: { id: "gio", name: "Gio", email: "gio@demo.bombo.local", role: "admin", color: "#789b84", password },
+          update: {} });
+      });
+      console.log("Demo existente conservada; Camila y Gio disponibles si faltaban.");
+    } else console.log("La base ya tiene usuarios; no se modificó.");
     return;
   }
   const demo = process.env.DEMO_MODE === "true";
@@ -43,7 +54,8 @@ async function seed() {
     ["r1", "Lucía Fernández", "responsible", "#b39cc9"],
     ["r2", "Martín López", "responsible", "#d3b27e"],
     ["r3", "Sofía Rodríguez", "responsible", "#86a5be"],
-    ["admin", "Ana Martínez", "admin", "#9b78e6"],
+    ["admin", "Camila", "admin", "#9b78e6"],
+    ["gio", "Gio", "admin", "#789b84"],
     ["cashier", "Diego Ruiz", "cashier", "#b89682"],
     ["viewer", "Invitado", "viewer", "#92999f"],
   ];
@@ -267,7 +279,7 @@ async function seed() {
     { timeout: 120000 },
   );
   console.log(
-    "Demo creada: 7 usuarios, 24 socios, 12 lotes y 90 días de actividad.",
+    "Demo creada: 8 usuarios, 24 socios, 12 lotes y 90 días de actividad.",
   );
 }
 seed()

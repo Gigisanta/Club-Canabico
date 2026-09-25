@@ -1,0 +1,3 @@
+recordType,sourceId,date,productSourceId,itemLabel,locationSourceId,quantity,unit,lostQuantity
+observation,demo-stock-001,2026-09-03,product-demo-01,Flor demo,location-demo-01,2.500,g,
+stockout,demo-stockout-001,2026-09-04,product-demo-01,Flor demo,location-demo-01,,g,0.500

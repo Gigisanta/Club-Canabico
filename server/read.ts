@@ -28,6 +28,7 @@ export async function customerPage(user: User, requested: string | undefined, ra
   const v = pageQuery.extend({
     segment: z.enum(["all", "top", "inactive", "risk", "permits"]).default("all"),
     days: z.coerce.number().int().min(1).max(3650).default(60),
+    limit: z.coerce.number().int().min(10).max(50).optional(),
   }).parse(raw);
   if (v.segment === "permits" && !["owner", "admin"].includes(user.role)) throw new HttpError(403, "Segmento restringido");
   const cursor = decodeCursor(v.cursor);
@@ -126,7 +127,8 @@ export async function globalSearch(user: User, requested: string | undefined, ra
 }
 
 export async function salesPage(user: User, requested: string | undefined, raw: unknown) {
-  const v = pageQuery.extend({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).parse(raw);
+  const v = pageQuery.extend({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), limit: z.coerce.number().int().min(10).max(50).optional() }).parse(raw);
+  const salesPageSize = v.limit ?? pageSize;
   const cursor = decodeCursor(v.cursor);
   if (cursor && !cursor.createdAt) throw new HttpError(400, "Cursor inválido");
   const ownerId = ownerScope(user, requested);
@@ -144,13 +146,13 @@ export async function salesPage(user: User, requested: string | undefined, raw: 
     { createdAt: new Date(cursor.createdAt!), id: { lt: cursor.id } },
   ] }] } : where;
   const [sales, total] = await Promise.all([
-    db.sale.findMany({ where: pageWhere, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: pageSize + 1,
+    db.sale.findMany({ where: pageWhere, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: salesPageSize + 1,
       include: { customer: { select: { name: true } }, items: ownerId ? { where: { ownerId } } : true },
     }),
     db.sale.count({ where }),
   ]);
-  const hasNext = sales.length > pageSize;
-  const items = sales.slice(0, pageSize).map((s) => {
+  const hasNext = sales.length > salesPageSize;
+  const items = sales.slice(0, salesPageSize).map((s) => {
     const { customer, ...sale } = s;
     const scoped = ownerId ? {
       ...sale,

@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import bcrypt from "bcryptjs";
 import { defaults } from "../shared/domain.js";
+import { splitSqlStatements } from "./migration-sql.js";
 
 test("real club mode blocks regulated sales until club approval", { skip: !process.env.TEST_DATABASE_URL }, async () => {
   const schema = `test_${randomUUID().replaceAll("-", "")}`;
@@ -21,7 +22,7 @@ test("real club mode blocks regulated sales until club approval", { skip: !proce
   const migrationRoot = new URL("../prisma/migrations/", import.meta.url);
   for (const folder of (await readdir(migrationRoot, { withFileTypes: true })).filter((f) => f.isDirectory()).sort((a, b) => a.name.localeCompare(b.name))) {
     const sql = await readFile(new URL(`${folder.name}/migration.sql`, migrationRoot), "utf8");
-    for (const statement of sql.split(";").map((s) => s.trim()).filter(Boolean)) await db.$executeRawUnsafe(statement);
+    for (const statement of splitSqlStatements(sql)) await db.$executeRawUnsafe(statement);
   }
   await db.user.create({ data: { id: "owner", name: "Owner", email: "owner@test.local", role: "owner", password: await bcrypt.hash("test-password-123", 4) } });
   await db.setting.create({ data: { id: 1, value: defaults } });

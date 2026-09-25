@@ -17,7 +17,7 @@
     "bench:measure": "tsx scripts/benchmark-measure.ts",
     "bench:compare": "tsx scripts/benchmark-compare.ts",
     "test": "tsx --test tests/*.test.ts",
-    "test:e2e": "playwright test",
+    "test:e2e": "node scripts/e2e-isolated.mjs",
     "typecheck": "tsc -b && tsc -p tsconfig.server.json --noEmit",
     "check": "npm run typecheck && npm test && npm run build"
   },

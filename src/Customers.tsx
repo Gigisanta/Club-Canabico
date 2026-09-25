@@ -32,6 +32,7 @@ import {
   Field,
   Empty,
 } from "./ui";
+import "./operation.css";
 export default function Customers() {
   const { state, money, reload, user, owner } = useClub();
   const [params, setParams] = useSearchParams();
@@ -65,7 +66,7 @@ export default function Customers() {
   useEffect(() => { setHistoryCursor(null); setHistoryPrevious([]); }, [detail?.id]);
   useEffect(() => { setHistoryCursor(null); setHistoryPrevious([]); }, [owner]);
   const listData = useResource<Page<Customer, { total: number; gold: number; inactive: number }>>(
-    `/list/customers?q=${encodeURIComponent(debouncedQuery)}&segment=${selectedSegment}&days=${days}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`,
+    `/list/customers?limit=10&q=${encodeURIComponent(debouncedQuery)}&segment=${selectedSegment}&days=${days}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`,
   );
   const historyParams = new URLSearchParams({ ...(historyCursor ? { cursor: historyCursor } : {}), ...(owner ? { owner } : {}) });
   const historyData = useResource<Page<Sale>>(
@@ -78,14 +79,24 @@ export default function Customers() {
     daysBetween(state.today, c.lastPurchase || c.createdAt) >=
       Math.floor(days / 2) && !inactive(c);
   const list = listData.data?.items || [];
+  const hasCustomerFilters = !!query.trim() || selectedSegment !== "all";
+  const clearCustomerFilters = () => {
+    setQuery("");
+    setSegment("all");
+    setDays(state.settings.inactiveDays);
+    const next = new URLSearchParams(params);
+    ["q", "segment", "days"].forEach((key) => next.delete(key));
+    setParams(next, { replace: true });
+  };
   const editing = edit && edit !== "new" ? edit : null;
   const canEdit = ["owner", "admin", "cashier"].includes(user.role);
   return (
-    <>
+    <div className="operation-page customers-page">
       <PageHeader
+        className="customers-heading"
         eyebrow="RELACIONES QUE CRECEN"
-        title="Socios y fidelización"
-        description="Conocé a tus socios y construí vínculos que duren."
+        title="Directorio de socios"
+        description="Buscá una ficha, revisá permisos y seguí la actividad de cada socio."
         actions={
           canEdit && (
             <button className="button primary" onClick={() => setEdit("new")}>
@@ -95,24 +106,7 @@ export default function Customers() {
           )
         }
       />
-      <div className="mini-stats">
-        <span>
-          <UsersThree />
-          <strong>{listData.data?.summary.total ?? "…"}</strong> socios
-        </span>
-        <span>
-          <Medal />
-          <strong>
-            {listData.data?.summary.gold ?? "…"}
-          </strong>{" "}
-          nivel Oro
-        </span>
-        <span>
-          <Clock />
-          <strong>{listData.data?.summary.inactive ?? "…"}</strong> inactivos
-        </span>
-      </div>
-      <Panel title="Tu comunidad">
+      <Panel className="customer-community-panel" title="Tu comunidad">
         <div className="table-toolbar">
           <Search
             value={query}
@@ -149,7 +143,7 @@ export default function Customers() {
             </select>
           </div>
         </div>
-        <div className="table-scroll">
+        <div className="table-scroll customers-table">
           <table>
             <thead>
               <tr>
@@ -166,7 +160,7 @@ export default function Customers() {
             <tbody>
               {list.map((c) => (
                 <tr key={c.id}>
-                  <td>
+                  <td data-label="Socio">
                     <button
                       className="person-cell cell-button"
                       onClick={() => setDetail(c)}
@@ -178,7 +172,7 @@ export default function Customers() {
                       </div>
                     </button>
                   </td>
-                  <td>
+                  <td data-label="Nivel / estado">
                     <Badge
                       tone={
                         c.tier === "Oro"
@@ -200,14 +194,14 @@ export default function Customers() {
                       </small>
                     ) : null}
                   </td>
-                  <td>{["owner", "admin", "cashier"].includes(user.role) ? (c.permitStatus === "verified" && c.permitValidUntil && c.permitValidUntil >= state.today ? "Verificado" : c.permitStatus === "pending" ? "Pendiente" : "Sin verificar / vencido") : "Acceso restringido"}</td>
-                  <td className="numeric">{number(c.points)}</td>
-                  <td className="numeric amount">{money(c.totalSpent)}</td>
-                  <td className="numeric">{c.purchases}</td>
-                  <td>
+                  <td data-label="Permiso">{["owner", "admin", "cashier"].includes(user.role) ? (c.permitStatus === "verified" && c.permitValidUntil && c.permitValidUntil >= state.today ? "Verificado" : c.permitStatus === "pending" ? "Pendiente" : "Sin verificar / vencido") : "Acceso restringido"}</td>
+                  <td className="numeric" data-label="Puntos">{number(c.points)}</td>
+                  <td className="numeric amount" data-label="Total gastado">{money(c.totalSpent)}</td>
+                  <td className="numeric" data-label="Compras">{c.purchases}</td>
+                  <td data-label="Última visita">
                     {c.lastPurchase ? shortDate(c.lastPurchase) : "Sin compras"}
                   </td>
-                  <td>
+                  <td data-label="Acciones">
                     <button
                       className="button small-button"
                       onClick={() => setDetail(c)}
@@ -220,25 +214,37 @@ export default function Customers() {
             </tbody>
           </table>
           {listData.loading && <p role="status" className="table-note">Buscando socios…</p>}
-          {!listData.loading && !list.length && (
+          {!listData.loading && !listData.error && !list.length && (
             <Empty
-              title="No hay socios en este segmento"
-              description="Cambiá los filtros o registrá un nuevo socio."
+              title={hasCustomerFilters ? "No hay socios con estos filtros" : "Todavía no hay socios"}
+              description={hasCustomerFilters ? "Ajustá la búsqueda o quitá los filtros para ver toda tu comunidad." : "Los socios que registres aparecerán en esta lista."}
             />
           )}
         </div>
-        {listData.error && <p role="alert">{listData.error}</p>}
+        {!listData.loading && !listData.error && !list.length && (hasCustomerFilters
+          ? <div className="customer-empty-action"><button className="button" onClick={clearCustomerFilters}>Quitar filtros</button></div>
+          : canEdit && <div className="customer-empty-action"><button className="button primary" onClick={() => setEdit("new")}><Plus size={17} /> Nuevo socio</button></div>)}
+        {listData.error && <div className="operation-error" role="alert"><p>{listData.error}</p><button className="button small-button" onClick={() => void listData.reload()}>Reintentar</button></div>}
         {(previous.length > 0 || listData.data?.nextCursor) && <div className="table-pagination">
           <button className="button" disabled={!previous.length} onClick={() => { setCursor(previous.at(-1) || null); setPrevious((s) => s.slice(0, -1)); }}>Anterior</button>
           <span>Página {previous.length + 1} · {listData.data?.total || 0} resultados</span>
           <button className="button" disabled={!listData.data?.nextCursor} onClick={() => { setPrevious((s) => [...s, cursor]); setCursor(listData.data!.nextCursor); }}>Siguiente</button>
         </div>}
       </Panel>
+      <details className="operation-secondary customer-secondary">
+        <summary>Indicadores de la comunidad</summary>
+        <div className="mini-stats customer-summary">
+          <span><UsersThree /><strong>{listData.data?.summary.total ?? "…"}</strong> socios</span>
+          <span><Medal /><strong>{listData.data?.summary.gold ?? "…"}</strong> nivel Oro</span>
+          <span><Clock /><strong>{listData.data?.summary.inactive ?? "…"}</strong> inactivos</span>
+        </div>
+      </details>
       <Modal
         title={editing ? "Editar socio" : "Nuevo socio"}
         open={!!edit}
         onClose={() => setEdit(null)}
       >
+        <div className="operation-dialog-content customer-dialog-content">
         <Form
           onCancel={() => setEdit(null)}
           onSubmit={async (fd) => {
@@ -270,6 +276,7 @@ export default function Customers() {
             />
           </Field>
         </Form>
+        </div>
       </Modal>
       <Modal
         title="Ficha del socio"
@@ -278,7 +285,7 @@ export default function Customers() {
         wide
       >
         {detail && (
-          <>
+          <div className="operation-dialog-content customer-dialog-content">
             <div className="customer-profile">
               <Avatar name={detail.name} size={64} />
               <div>
@@ -331,7 +338,7 @@ export default function Customers() {
             </div>
             {insights.data && <CustomerInsightsPanel insights={insights.data} today={state.today} money={money} />}
             {insights.loading && <p role="status" className="table-note">Leyendo historial del socio…</p>}
-            {insights.error && <p role="alert" className="table-note">{insights.error}</p>}
+            {insights.error && <div className="operation-error" role="alert"><p>{insights.error}</p><button type="button" className="button small-button" onClick={() => void insights.reload()}>Reintentar</button></div>}
             {detail.notes && (
               <div className="note-box">
                 <strong>Notas internas</strong>
@@ -362,17 +369,18 @@ export default function Customers() {
                     ))}
                 </tbody>
               </table>
-              {historyData.loading && <p>Cargando historial…</p>}
-              {!historyData.loading && !detail.purchases && <Empty title="Todavía no tiene compras" />}
+              {historyData.loading && <p role="status" className="table-note">Cargando historial…</p>}
+              {!historyData.loading && !historyData.error && !detail.purchases && <Empty title="Todavía no tiene compras" />}
             </div>
+            {historyData.error && <div className="operation-error" role="alert"><p>{historyData.error}</p><button type="button" className="button small-button" onClick={() => void historyData.reload()}>Reintentar</button></div>}
             {(historyPrevious.length > 0 || historyData.data?.nextCursor) && <div className="table-pagination">
               <button className="button" disabled={!historyPrevious.length} onClick={() => { setHistoryCursor(historyPrevious.at(-1) || null); setHistoryPrevious((s) => s.slice(0, -1)); }}>Anterior</button>
               <span>Página {historyPrevious.length + 1} · {historyData.data?.total || 0} compras</span>
               <button className="button" disabled={!historyData.data?.nextCursor} onClick={() => { setHistoryPrevious((s) => [...s, historyCursor]); setHistoryCursor(historyData.data!.nextCursor); }}>Siguiente</button>
             </div>}
-          </>
+          </div>
         )}
       </Modal>
-    </>
+    </div>
   );
 }

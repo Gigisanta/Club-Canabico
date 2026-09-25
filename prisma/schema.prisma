@@ -30,6 +30,19 @@ model User {
   closures Closure[]
   cashEntries CashEntry[]
   cashPlans CashPlan[]
+  historicalImportBatches HistoricalImportBatch[] @relation("ImportCreatedBy")
+  committedHistoricalImportBatches HistoricalImportBatch[] @relation("ImportCommittedBy")
+  decisionTasks DecisionTask[]
+  monthlyReviews MonthlyReview[]
+  sensitiveAccessAudits SensitiveAccessAudit[]
+  historicalReconciliations HistoricalReconciliation[]
+  decisionStockMappings DecisionStockMapping[]
+  decisionSupplierRules DecisionSupplierRule[]
+  decisionReplacementQuotes DecisionReplacementQuote[]
+  decisionInboundOrders DecisionInboundOrder[]
+  decisionCashSnapshots DecisionCashSnapshot[]
+  decisionCashPlanEvents DecisionCashPlanEvent[]
+  decisionInputAttestations DecisionInputAttestation[]
 }
 model Supplier {
   id String @id @default(cuid())
@@ -53,6 +66,7 @@ model Location {
   isDefault Boolean @default(false)
   createdAt DateTime @default(now())
   products Product[]
+  decisionInboundOrders DecisionInboundOrder[]
   @@index([active, name])
 }
 model Product {
@@ -80,6 +94,9 @@ model Product {
   createdAt DateTime @default(now())
   items SaleItem[]
   movements Movement[]
+  decisionSupplierRules DecisionSupplierRule[]
+  decisionReplacementQuotes DecisionReplacementQuote[]
+  decisionInboundOrders DecisionInboundOrder[]
   @@index([ownerId])
   @@index([supplierId])
   @@index([locationId])
@@ -287,4 +304,408 @@ model SiteChannels {
   whatsappPhone String @default("")
   instagramUrl String @default("")
   updatedAt DateTime @updatedAt
+}
+
+enum HistoricalImportStatus {
+  ready
+  rejected
+  imported
+  reconciled
+}
+
+enum DecisionTaskCadence {
+  none
+  weekly
+  monthly
+}
+
+enum DecisionEvidenceState {
+  demo
+  missing
+  imported
+  reconciled
+  estimated
+  scenario
+}
+
+model HistoricalImportBatch {
+  id String @id
+  idempotencyKey String @unique
+  kind String
+  sourceSystem String
+  fileHash String
+  mappingVersion String
+  cutoffDate DateTime @db.Date
+  status HistoricalImportStatus
+  mapping Json
+  facts Json
+  factsHash String
+  rowCount Int
+  acceptedCount Int
+  rejectedCount Int
+  errors Json
+  conflicts Json
+  insertedCount Int @default(0)
+  skippedCount Int @default(0)
+  createdByUserId String?
+  createdByUser User? @relation("ImportCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  committedByUserId String?
+  committedByUser User? @relation("ImportCommittedBy", fields: [committedByUserId], references: [id], onDelete: SetNull)
+  createdAt DateTime @default(now())
+  importedAt DateTime?
+  reconciliation HistoricalReconciliation?
+  provenance HistoricalImportProvenance[]
+  @@index([sourceSystem, createdAt])
+  @@index([status, createdAt])
+}
+
+model HistoricalImportProvenance {
+  id String @id
+  batchId String
+  batch HistoricalImportBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  factKind String
+  sourceSystem String
+  sourceId String
+  factHash String
+  disposition String
+  recordedAt DateTime @default(now())
+  @@unique([batchId, factKind, sourceSystem, sourceId])
+  @@index([sourceSystem, factKind, sourceId])
+  @@index([batchId, recordedAt])
+}
+
+model HistoricalDeliverySale {
+  id String @id
+  sourceSystem String
+  sourceId String
+  factHash String
+  saleDate DateTime @db.Date
+  totalCents BigInt
+  discountCents BigInt @default(0)
+  lines HistoricalDeliverySaleLine[]
+  @@unique([sourceSystem, sourceId])
+  @@index([saleDate])
+}
+
+model HistoricalDeliverySaleLine {
+  id String @id
+  sourceSystem String
+  sourceId String
+  factHash String
+  saleId String
+  sale HistoricalDeliverySale @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  itemLabel String
+  productSourceId String?
+  quantityMilliunits BigInt
+  quantityUnit String
+  unitPriceCents BigInt?
+  lineTotalCents BigInt
+  @@unique([sourceSystem, sourceId])
+  @@index([saleId])
+  @@index([productSourceId])
+}
+
+model HistoricalPurchaseReceipt {
+  id String @id
+  sourceSystem String
+  sourceId String
+  factHash String
+  receivedDate DateTime @db.Date
+  orderDate DateTime? @db.Date
+  supplierSourceId String?
+  totalCents BigInt
+  lines HistoricalPurchaseReceiptLine[]
+  @@unique([sourceSystem, sourceId])
+  @@index([receivedDate])
+  @@index([supplierSourceId, receivedDate])
+  @@index([supplierSourceId, orderDate])
+}
+
+model HistoricalPurchaseReceiptLine {
+  id String @id
+  sourceSystem String
+  sourceId String
+  factHash String
+  receiptId String
+  receipt HistoricalPurchaseReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  itemLabel String
+  productSourceId String?
+  quantityMilliunits BigInt
+  quantityUnit String
+  unitCostCents BigInt?
+  lineTotalCents BigInt
+  @@unique([sourceSystem, sourceId])
+  @@index([receiptId])
+  @@index([productSourceId])
+}
+
+model HistoricalStockObservation {
+  id String @id
+  sourceSystem String
+  sourceId String
+  factHash String
+  observedDate DateTime @db.Date
+  productSourceId String?
+  itemLabel String
+  locationSourceId String?
+  quantityMilliunits BigInt
+  quantityUnit String
+  @@unique([sourceSystem, sourceId])
+  @@index([observedDate, productSourceId])
+  @@index([locationSourceId, observedDate])
+}
+
+model HistoricalStockout {
+  id String @id
+  sourceSystem String
+  sourceId String
+  factHash String
+  stockoutDate DateTime @db.Date
+  productSourceId String?
+  itemLabel String
+  locationSourceId String?
+  lostQuantityMilliunits BigInt?
+  quantityUnit String?
+  @@unique([sourceSystem, sourceId])
+  @@index([stockoutDate, productSourceId])
+  @@index([locationSourceId, stockoutDate])
+}
+
+model HistoricalExpense {
+  id String @id
+  sourceSystem String
+  sourceId String
+  factHash String
+  expenseDate DateTime @db.Date
+  category String
+  amountCents BigInt
+  @@unique([sourceSystem, sourceId])
+  @@index([expenseDate, category])
+}
+
+model HistoricalPromotion {
+  id String @id
+  sourceSystem String
+  sourceId String
+  factHash String
+  label String
+  startsOn DateTime @db.Date
+  endsOn DateTime? @db.Date
+  discountCents BigInt?
+  @@unique([sourceSystem, sourceId])
+  @@index([startsOn, endsOn])
+}
+
+model HistoricalCashReconciliation {
+  id String @id
+  sourceSystem String
+  sourceId String
+  factHash String
+  reconciledDate DateTime @db.Date
+  account String
+  expectedCents BigInt
+  countedCents BigInt
+  varianceCents BigInt
+  @@unique([sourceSystem, sourceId])
+  @@index([reconciledDate, account])
+}
+
+model HistoricalCashMovement {
+  id String @id
+  sourceSystem String
+  sourceId String
+  factHash String
+  movementDate DateTime @db.Date
+  account String
+  category String
+  amountCents BigInt
+  @@unique([sourceSystem, sourceId])
+  @@index([movementDate, account])
+  @@index([category, movementDate])
+}
+
+model HistoricalMember {
+  id String @id
+  sourceSystem String
+  sourceId String
+  factHash String
+  memberKey String
+  permitStatus String
+  permitExpiryDate DateTime? @db.Date
+  permitCheckedAt DateTime? @db.Date
+  @@unique([sourceSystem, sourceId])
+  @@unique([sourceSystem, memberKey])
+}
+
+model DecisionTask {
+  id String @id @default(cuid())
+  title String
+  ownerId String?
+  owner User? @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  dueDate DateTime @db.Date
+  cadence DecisionTaskCadence @default(none)
+  status String @default("todo")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([status, dueDate])
+  @@index([ownerId, dueDate])
+}
+
+model MonthlyReview {
+  id String @id @default(cuid())
+  period String
+  metric String
+  actualCents BigInt?
+  planCents BigInt?
+  deviationCents BigInt?
+  cause String @default("") @db.Text
+  decision String @default("") @db.Text
+  ownerId String?
+  owner User? @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  followUpDate DateTime? @db.Date
+  source String
+  evidence DecisionEvidenceState
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([period])
+  @@index([ownerId, period])
+}
+
+model HistoricalReconciliation {
+  id String @id @default(cuid())
+  batchId String @unique
+  batch HistoricalImportBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  asOf DateTime @db.Date
+  coverageFrom DateTime? @db.Date
+  coverageThrough DateTime? @db.Date
+  coverageComplete Boolean @default(false)
+  reference String
+  notes String @default("") @db.Text
+  confirmedByUserId String
+  confirmedByUser User @relation(fields: [confirmedByUserId], references: [id], onDelete: Restrict)
+  confirmedAt DateTime @default(now())
+  varianceCents BigInt?
+  sourceRecordCount Int?
+  sourceTotalCents BigInt?
+  calculatedTotalCents BigInt?
+  @@index([asOf])
+}
+
+model SensitiveAccessAudit {
+  id String @id @default(cuid())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  area String
+  action String
+  at DateTime @default(now())
+  metadata Json?
+  @@index([userId, at])
+  @@index([area, at])
+}
+
+model DecisionStockMapping {
+  id String @id
+  status String
+  sharedLocationIds Json @default("[]")
+  localLocationIds Json @default("[]")
+  deliveryLocationIds Json @default("[]")
+  reference String
+  confirmedByUserId String
+  confirmedByUser User @relation(fields: [confirmedByUserId], references: [id], onDelete: Restrict)
+  confirmedAt DateTime @default(now())
+}
+
+model DecisionSupplierRule {
+  id String @id
+  productId String
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  leadTimeDays Int
+  minimumOrderQuantityMilliunits Int
+  reviewPeriodDays Int
+  sourceReference String
+  confirmedByUserId String
+  confirmedByUser User @relation(fields: [confirmedByUserId], references: [id], onDelete: Restrict)
+  updatedAt DateTime @updatedAt
+  @@index([productId, updatedAt])
+}
+
+model DecisionReplacementQuote {
+  id String @id
+  productId String
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  quotedOn DateTime @db.Date
+  validUntil DateTime? @db.Date
+  unitCostCentsPerUnit BigInt
+  status String @default("active")
+  sourceReference String
+  enteredByUserId String
+  enteredByUser User @relation(fields: [enteredByUserId], references: [id], onDelete: Restrict)
+  createdAt DateTime @default(now())
+  @@index([productId, quotedOn])
+}
+
+model DecisionInboundOrder {
+  id String @id
+  productId String
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  locationId String?
+  location Location? @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  quantityMilliunits Int
+  arrivalDate DateTime @db.Date
+  status String @default("pending")
+  sourceReference String
+  enteredByUserId String
+  enteredByUser User @relation(fields: [enteredByUserId], references: [id], onDelete: Restrict)
+  createdAt DateTime @default(now())
+  @@index([productId, arrivalDate])
+}
+
+model DecisionCashSnapshot {
+  id String @id
+  asOf DateTime @db.Date
+  floorCents BigInt
+  sourceReference String
+  complete Boolean @default(false)
+  reconciledByUserId String
+  reconciledByUser User @relation(fields: [reconciledByUserId], references: [id], onDelete: Restrict)
+  reconciledAt DateTime @default(now())
+  accounts DecisionCashSnapshotAccount[]
+  @@index([asOf, reconciledAt])
+}
+
+model DecisionCashSnapshotAccount {
+  snapshotId String
+  snapshot DecisionCashSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Restrict)
+  account String
+  amountCents BigInt
+  @@id([snapshotId, account])
+}
+
+model DecisionCashPlanEvent {
+  id String @id
+  scenario String
+  date DateTime @db.Date
+  account String
+  category String
+  amountCents BigInt
+  status String @default("active")
+  sourceReference String
+  enteredByUserId String
+  enteredByUser User @relation(fields: [enteredByUserId], references: [id], onDelete: Restrict)
+  createdAt DateTime @default(now())
+  @@index([scenario, date])
+}
+
+model DecisionInputAttestation {
+  id String @id
+  domain String
+  scenario String?
+  fromDate DateTime @db.Date
+  throughDate DateTime @db.Date
+  complete Boolean @default(false)
+  sourceReference String
+  confirmedByUserId String
+  confirmedByUser User @relation(fields: [confirmedByUserId], references: [id], onDelete: Restrict)
+  confirmedAt DateTime @default(now())
+  @@index([domain, scenario, fromDate, throughDate])
 }

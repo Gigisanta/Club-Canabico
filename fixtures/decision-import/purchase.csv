@@ -1,0 +1,3 @@
+recordType,sourceId,date,orderDate,parentSourceId,total,supplierSourceId,itemLabel,productSourceId,quantity,unit,unitPrice,lineTotal
+header,demo-receipt-001,2026-09-02,2026-08-29,,120.00,supplier-demo-01,,,,,,
+line,demo-receipt-line-001,2026-09-02,,demo-receipt-001,,,Insumo demo,product-demo-01,4.000,g,30.00,120.00

@@ -41,6 +41,10 @@ import { exportReport } from "./reports.js";
 import { productCatalog } from "./product-catalog.js";
 import { customerInsights } from "./customer-insights.js";
 import { publicSite, adminSite } from "./site.js";
+import { decisionCenter } from "./decision-center.js";
+import { decisionAnalysis } from "./decision-analysis.js";
+import { decisionInputs } from "./decision-inputs.js";
+import { dataImportRoutes } from "./data-import-routes.js";
 declare global {
   namespace Express {
     interface Request {
@@ -83,7 +87,7 @@ app.use(
     credentials: true,
   }),
 );
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "8mb" }));
 app.use(cookieParser());
 app.use("/api", (req, res, next) => {
   res.setHeader("Cache-Control", "no-store");
@@ -170,7 +174,7 @@ app.post(
 app.post("/api/auth/demo", async (req, res) => {
   if (!demo) throw new HttpError(404, "No disponible");
   const id = z
-    .enum(["owner", "r1", "r2", "r3", "admin", "cashier", "viewer"])
+    .enum(["owner", "r1", "r2", "r3", "admin", "gio", "cashier", "viewer"])
     .parse(req.body.id || "owner");
   const user = await db.user.findUnique({ where: { id } });
   if (!user) throw new HttpError(404, "Ejecutá el seed de demostración");
@@ -192,19 +196,26 @@ app.get("/api/auth/me", auth, (req, res) =>
   }),
 );
 app.use("/api", auth);
+app.use("/api", decisionCenter);
+app.use("/api", decisionAnalysis);
+app.use("/api", decisionInputs);
+app.use("/api", dataImportRoutes);
 app.use("/api/site/admin", roles("owner", "admin"), adminSite);
-app.get("/api/views/:view", async (req, res) =>
-  res.json(
-    await getState(
-      req.user,
-      typeof req.query.owner === "string" ? req.query.owner : undefined,
-      z.enum(["dashboard", "inventory", "customers", "sales", "expenses", "finance", "responsibles", "reports", "settings"]).parse(req.params.view),
-      req.params.view === "expenses" && req.query.month !== undefined
-        ? z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).parse(req.query.month)
-        : undefined,
-    ),
-  ),
-);
+app.get("/api/views/:view", async (req, res) => {
+  const view = z.enum(["dashboard", "inventory", "customers", "sales", "expenses", "finance", "responsibles", "reports", "settings"]).parse(req.params.view);
+  if (view === "finance") {
+    if (req.user.role !== "owner" && req.user.role !== "admin") throw new HttpError(403, "No tenés acceso a finanzas");
+    await db.sensitiveAccessAudit.create({ data: { userId: req.user.id, area: "finance", action: "read" } });
+  }
+  res.json(await getState(
+    req.user,
+    typeof req.query.owner === "string" ? req.query.owner : undefined,
+    view,
+    view === "expenses" && req.query.month !== undefined
+      ? z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).parse(req.query.month)
+      : undefined,
+  ));
+});
 app.get("/api/list/customers", async (req, res) =>
   res.json(await customerPage(req.user, typeof req.query.owner === "string" ? req.query.owner : undefined, req.query)));
 app.get("/api/dashboard", async (req, res) =>

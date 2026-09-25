@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./isolated";
 test("purchase history helps service without extra entry", async ({ page }) => {
   await page.goto("/socios");
   await page.getByRole("button", { name: "Explorar club de demostración" }).click();
@@ -10,7 +10,7 @@ test("purchase history helps service without extra entry", async ({ page }) => {
   await expect(profileInsight).toContainText("Ritmo reciente");
   await profile.getByRole("button", { name: "Cerrar" }).click();
   await page.goto("/ventas");
-  await page.getByRole("button", { name: "Nueva venta" }).click();
+  await page.getByRole("button", { name: "Registrar venta" }).click();
   const checkout = page.getByRole("dialog", { name: "Nueva venta" });
   await checkout.getByRole("combobox", { name: "Buscar socio" }).focus();
   await checkout.getByRole("listbox", { name: "Socios encontrados" }).getByRole("option").first().waitFor();
@@ -24,19 +24,23 @@ test("purchase history helps service without extra entry", async ({ page }) => {
 test("dashboard separates actuals, projections and recommended actions", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.goto("/app");
+  await page.goto("/app/panorama");
   await page.getByRole("button", { name: "Explorar club de demostración" }).click();
   await expect(page.getByRole("heading", { name: "Estado del período" })).toBeVisible();
+  await page.getByRole("button", { name: "Proyecciones", exact: true }).click();
   const outlook = page.getByRole("region", { name: "Lo que sugiere el ritmo reciente" });
   await expect(outlook).toContainText("Ventas estimadas · próximos 7 días");
   await expect(outlook).toContainText("Compradores estimados · próximos 30 días");
   await expect(outlook).toContainText("No incluyen estacionalidad ni equivalen a caja proyectada");
   await expect(page.getByRole("region", { name: "Qué revisar esta semana" })).toBeVisible();
+  await page.getByRole("button", { name: "Socios", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Cómo compran los socios" })).toBeVisible();
+  await page.getByRole("button", { name: "Actividad", exact: true }).click();
   await page.getByRole("combobox", { name: "Período del dashboard" }).selectOption("week");
   await expect(page.locator(".metrics-grid")).toContainText("Ventas del período");
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.getByRole("button", { name: "Proyecciones", exact: true }).click();
   await expect(outlook).toBeVisible();
   expect(errors).toEqual([]);
 });
@@ -89,9 +93,10 @@ test("saved products and profiles help classify new stock", async ({ page }) => 
   await expect(dialog.getByLabel("Nombre del producto")).toBeVisible();
   const mobileCost = await costInput.boundingBox();
   const mobilePrice = await priceInput.boundingBox();
-  expect(mobileCost && mobilePrice && Math.abs(mobileCost.y - mobilePrice.y) < 3 && mobilePrice.x > mobileCost.x).toBe(true);
+  expect(mobileCost && mobilePrice && mobilePrice.y > mobileCost.y && Math.abs(mobilePrice.x - mobileCost.x) < 3).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await dialog.getByRole("button", { name: "Cerrar" }).click();
+  await page.getByRole("tab", { name: "Vista de tarjetas" }).click();
   await page.getByRole("button", { name: "Ver detalle de Lemon Haze" }).click();
   await page.getByRole("button", { name: "Editar Lemon Haze" }).click();
   const editDialog = page.getByRole("dialog");
@@ -147,6 +152,7 @@ test("owner saves a default supplier and selects it for a new lot", async ({ pag
   await page.goto("/inventario");
   await page.getByRole("button", { name: "Explorar club de demostración" }).click();
   await page.getByRole("heading", { name: "Inventario", exact: true }).waitFor();
+  await page.getByText("Movimientos, proveedores y ubicaciones").click();
   await page.getByRole("button", { name: "Proveedores" }).click();
   await page.getByRole("button", { name: "Nuevo proveedor" }).click();
   let dialog = page.getByRole("dialog");
@@ -165,8 +171,8 @@ test("owner saves a default supplier and selects it for a new lot", async ({ pag
   await dialog.getByRole("button", { name: "Agregar ubicación" }).click();
   await dialog.getByLabel("Nombre de la nueva ubicación").fill(`Depósito QA ${suffix}`);
   await dialog.locator(".location-quick-add .button").filter({ hasText: "Guardar" }).click();
-  await expect(dialog.getByLabel("Ubicación")).toHaveValue(/.+/);
-  await expect(dialog.getByLabel("Ubicación").locator("option:checked")).toHaveText(`Depósito QA ${suffix}`);
+  await expect(dialog.getByLabel("Ubicación", { exact: true })).toHaveValue(/.+/);
+  await expect(dialog.getByLabel("Ubicación", { exact: true }).locator("option:checked")).toHaveText(`Depósito QA ${suffix}`);
   await dialog.getByLabel("Stock inicial").fill("20");
   await dialog.getByLabel("Precio de costo").fill("100");
   await dialog.getByLabel("Precio de venta").fill("200");
@@ -187,7 +193,9 @@ test("owner saves a default supplier and selects it for a new lot", async ({ pag
   dialog = page.getByRole("dialog");
   await expect(dialog.getByLabel("Ubicación").locator("option:checked")).toHaveText(`Depósito Principal QA ${suffix}`);
   await dialog.getByRole("button", { name: "Cerrar" }).click();
+  await page.getByText(/Filtros avanzados/).click();
   await page.getByRole("combobox", { name: "Filtrar por proveedor" }).selectOption({ label: supplier });
+  await page.getByRole("tab", { name: "Vista de tarjetas" }).click();
   await expect(page.locator(".stock-card")).toContainText(lot);
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.locator(".supplier-card").filter({ hasText: supplier })).toBeVisible();
@@ -198,12 +206,12 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
 }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  await page.goto("/app");
+  await page.goto("/app/panorama");
   await page
     .getByRole("button", { name: "Explorar club de demostración" })
     .click();
   await expect(
-    page.getByRole("heading", { name: "Hola, Tiziano." }),
+    page.getByRole("heading", { name: "Panorama general" }),
   ).toBeVisible();
   await page
     .getByRole("combobox", { name: "Período del dashboard" })
@@ -211,7 +219,8 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await expect(page.locator(".metrics-grid")).toContainText(
     "Ventas del período",
   );
-  await page.getByRole("link", { name: /Inventario/ }).click();
+  await page.getByRole("link", { name: "Stock", exact: true }).click();
+  await page.getByRole("tab", { name: "Vista de tarjetas" }).click();
   await expect(
     page.getByRole("heading", { name: "Inventario", exact: true }),
   ).toBeVisible();
@@ -232,12 +241,12 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
     .getByRole("combobox", { name: "Estado del stock" })
     .selectOption("low");
   await expect(page.locator(".stock-card")).toHaveCount(3);
-  await page.getByRole("button", { name: "Vista de tabla" }).click();
+  await page.getByRole("tab", { name: "Vista de tabla" }).click();
   await expect(page.locator("tbody tr")).toHaveCount(3);
   await page
     .getByRole("combobox", { name: "Estado del stock" })
     .selectOption("all");
-  await page.getByRole("button", { name: "Vista de tarjetas" }).click();
+  await page.getByRole("tab", { name: "Vista de tarjetas" }).click();
   const product = `QA Lote ${suffix}`;
   const customer = `QA Socio ${suffix}`;
   await page.getByRole("button", { name: "Nuevo stock" }).click();
@@ -253,7 +262,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await dialog.getByRole("button", { name: "Guardar", exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(page.getByText(product, { exact: true })).toBeVisible();
-  await page.getByRole("link", { name: "Socios y fidelización" }).click();
+  await page.getByRole("link", { name: "Socios", exact: true }).click();
   await page.getByRole("button", { name: "Nuevo socio" }).click();
   dialog = page.getByRole("dialog");
   await dialog.getByLabel("Nombre completo").fill(customer);
@@ -263,7 +272,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await dialog.getByRole("button", { name: "Guardar", exact: true }).click();
   await expect(dialog).toBeHidden();
   await page.getByRole("link", { name: "Ventas y caja" }).click();
-  await page.getByRole("button", { name: "Nueva venta" }).click();
+  await page.getByRole("button", { name: "Registrar venta" }).click();
   dialog = page.getByRole("dialog");
   await dialog.getByRole("combobox", { name: "Buscar socio" }).fill(customer);
   await dialog.getByRole("option", { name: new RegExp(customer) }).click();
@@ -297,15 +306,16 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await page.getByRole("button", { name: "Cerrar", exact: true }).click();
   await page.getByPlaceholder("Buscar socio, producto o ticket…").fill(product);
   await expect(page.getByRole("row", { name: new RegExp(product) })).toBeVisible();
-  await page.getByRole("link", { name: /Inventario/ }).click();
+  await page.getByRole("link", { name: "Stock", exact: true }).click();
+  await page.getByRole("tab", { name: "Vista de tarjetas" }).click();
   await page
     .getByPlaceholder("Buscar producto, lote o responsable…")
     .fill(product);
   await expect(page.locator(".stock-card")).toHaveCount(1);
   await expect(page.locator(".stock-card")).toContainText("8");
   await page.reload();
-  await expect(page.getByText(product, { exact: true })).toBeVisible();
-  await page.getByRole("link", { name: "Socios y fidelización" }).click();
+  await expect(page.locator(".inventory-table table").getByText(product, { exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Socios", exact: true }).click();
   await page.getByPlaceholder("Buscar por nombre o email…").fill(customer);
   const customerRow = page.getByRole("row", { name: new RegExp(customer) });
   await expect(customerRow).toBeVisible();
@@ -313,7 +323,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await expect(page.locator(".detail-stats")).toContainText("20.000,00");
   await expect(page.locator(".detail-stats")).toContainText("2");
   await page.getByRole("button", { name: "Cerrar", exact: true }).click();
-  await page.getByRole("link", { name: "Configuración", exact: true }).click();
+  await page.goto("/app/configuracion");
   await page.getByRole("button", { name: "Importar desde Sheets" }).click();
   await page.getByLabel("Datos a importar").selectOption("customers");
   await page.locator("input[type=file]").setInputFiles({
@@ -325,13 +335,13 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   });
   await page.getByRole("button", { name: "Validar archivo" }).click();
   await expect(page.getByText("1 registros válidos")).toBeVisible();
-  for (const [label, heading] of [
-    ["Gastos", "Gastos registrados"],
-    ["Caja y planificación", "Caja y planificación"],
-    ["Responsables", "Responsables"],
-    ["Reportes", "Reportes y liquidaciones"],
+  for (const [path, label, heading] of [
+    ["/app/gastos", "Gastos", "Gastos registrados"],
+    ["/app/finanzas", "Caja y planificación", "Caja y planificación"],
+    ["/app/responsables", "Responsables", "Responsables"],
+    ["/app/reportes", "Reportes", "Reportes y liquidaciones"],
   ] as const) {
-    await page.getByRole("link", { name: label, exact: true }).click();
+    await page.goto(path);
     await expect(
       page.getByRole("heading", { name: heading, exact: true }),
     ).toBeVisible();
@@ -343,7 +353,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
       await expect(page.locator(".finance-section tbody tr").first()).toBeVisible();
     }
   }
-  await page.getByRole("link", { name: "Caja y planificación" }).click();
+  await page.goto("/app/finanzas");
   await page.getByRole("button", { name: "Agregar proyección" }).click();
   dialog = page.getByRole("dialog");
   await dialog.getByLabel("Fecha").fill("2027-01-10");
@@ -366,20 +376,23 @@ test("responsible: scope cannot be switched; foreign lots and settings actions a
   await page.getByRole("button", { name: "Probar otro rol" }).click();
   await page.getByRole("button", { name: "Lucía · sus lotes y ventas" }).click();
   await expect(
-    page.getByRole("heading", { name: "Hola, Lucía." }),
+    page.getByRole("heading", { name: "Resumen de hoy" }),
   ).toBeVisible();
+  await page.goto("/app/panorama");
   await expect(
     page.getByRole("combobox", { name: "Filtrar por responsable" }),
   ).toBeDisabled();
-  await page.getByRole("link", { name: /Inventario/ }).click();
+  await page.getByRole("link", { name: "Stock", exact: true }).click();
+  await page.getByRole("tab", { name: "Vista de tarjetas" }).click();
   await expect(page.locator(".stock-grid")).not.toContainText("Gorilla Glue");
   await expect(page.locator(".stock-grid")).toContainText("Amnesia Haze");
+  await page.getByText("Movimientos, proveedores y ubicaciones").click();
   await page.getByRole("button", { name: "Movimientos", exact: true }).click();
   await expect(page.getByText(/movimientos · Página 1/)).toBeVisible();
   await page.getByRole("button", { name: "Siguiente", exact: true }).click();
   await expect(page.getByText(/movimientos · Página 2/)).toBeVisible();
   await page.getByRole("button", { name: "Cerrar", exact: true }).click();
-  await page.getByRole("link", { name: "Configuración", exact: true }).click();
+  await page.goto("/app/configuracion");
   await expect(page.getByLabel("Nombre del club")).toBeDisabled();
   await expect(
     page.getByRole("button", { name: "Guardar", exact: true }),
@@ -389,12 +402,12 @@ test("mobile: navigation, filters and sale modal fit the viewport", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/app");
+  await page.goto("/app/panorama");
   await page
     .getByRole("button", { name: "Explorar club de demostración" })
     .click();
   await expect(
-    page.getByRole("heading", { name: "Hola, Tiziano." }),
+    page.getByRole("heading", { name: "Panorama general" }),
   ).toBeVisible();
   expect(
     await page.evaluate(
@@ -405,12 +418,12 @@ test("mobile: navigation, filters and sale modal fit the viewport", async ({
     path: "artifacts/dashboard-mobile.png",
     fullPage: true,
   });
-  await page.getByRole("button", { name: "Nueva venta" }).click();
+  await page.getByRole("button", { name: "Registrar venta" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toBeHidden();
   await page.getByRole("button", { name: "Abrir navegación" }).click();
-  await page.getByRole("link", { name: /Inventario/ }).click();
+  await page.getByRole("link", { name: "Stock", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "Inventario", exact: true }),
   ).toBeVisible();
@@ -421,5 +434,80 @@ test("mobile: navigation, filters and sale modal fit the viewport", async ({
   ).toBe(true);
   await page.getByRole("button", { name: "Abrir navegación" }).click();
   await page.getByRole("button", { name: /3 lotes necesitan atención/ }).click();
-  await expect(page.locator(".stock-card")).toHaveCount(3);
+  await expect(page.locator(".inventory-compact-row")).toHaveCount(3);
+});
+
+test("mobile primary access follows the available sections for every demo role", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Explorar club de demostración" }).click();
+
+  const tabbar = page.locator(".mobile-tabbar");
+  const roles = [
+    { name: "Dueño · vista consolidada", manager: true },
+    { name: "Gerente · operación del club", manager: true },
+    { name: "Lucía · sus lotes y ventas", manager: false },
+    { name: "Cajero · ventas y stock", manager: false, cashier: true },
+    { name: "Solo lectura", manager: false },
+  ];
+
+  for (const [index, role] of roles.entries()) {
+    if (index > 0) {
+      await page.getByRole("button", { name: "Probar otro rol" }).click();
+      await page.getByRole("dialog").getByRole("button", { name: role.name, exact: true }).click();
+    }
+
+    await expect(tabbar).toBeVisible();
+    await expect(tabbar.locator("a")).toHaveCount(4);
+    await expect(tabbar.getByRole("link", { name: "Inicio", exact: true })).toBeVisible();
+    await expect(tabbar.getByRole("link", { name: "Ventas", exact: true })).toBeVisible();
+    await expect(tabbar.getByRole("link", { name: /^Stock(?:,|$)/ })).toBeVisible();
+    await expect(tabbar.getByRole("link", { name: "Socios", exact: true })).toBeVisible();
+
+    const more = tabbar.locator('button[aria-controls="app-navigation"]');
+    await more.click();
+    const drawer = page.locator("#app-navigation");
+    if (role.manager) {
+      await expect(drawer.locator('a[href="/app/vidriera"]')).toHaveCount(1);
+    } else {
+      await expect(drawer.locator('a[href="/app/vidriera"]')).toHaveCount(0);
+      await expect(drawer.locator('a[href="/app/consultas"]')).toHaveCount(0);
+    }
+    if (role.cashier) {
+      await expect(drawer.locator('a[href="/app/gastos"]')).toHaveCount(0);
+      await expect(drawer.locator('a[href="/app/reportes"]')).toHaveCount(0);
+      await expect(drawer.locator('a[href="/app/responsables"]')).toHaveCount(0);
+    }
+    await drawer.getByRole("button", { name: "Cerrar navegación" }).click();
+    await expect(more).toHaveAttribute("aria-expanded", "false");
+  }
+});
+
+test("mobile Más drawer traps focus and closes on Escape or navigation", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Explorar club de demostración" }).click();
+
+  const tabbar = page.locator(".mobile-tabbar");
+  const more = tabbar.locator('button[aria-controls="app-navigation"]');
+  const drawer = page.locator("#app-navigation");
+  await more.click();
+  await expect(more).toHaveAttribute("aria-expanded", "true");
+  await expect(drawer).toHaveAttribute("role", "dialog");
+
+  const close = drawer.getByRole("button", { name: "Cerrar navegación" });
+  await expect(close).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(drawer.getByRole("button", { name: "Cerrar sesión" })).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(more).toHaveAttribute("aria-expanded", "false");
+  await expect(more).toBeFocused();
+
+  await more.click();
+  await expect(more).toHaveAttribute("aria-expanded", "true");
+  await drawer.getByRole("link", { name: "Ventas y caja" }).click();
+  await expect(page).toHaveURL(/\/app\/ventas$/);
+  await expect(more).toHaveAttribute("aria-expanded", "false");
+  await expect(drawer).not.toHaveAttribute("role", "dialog");
 });

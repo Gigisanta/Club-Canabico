@@ -8,9 +8,11 @@ export interface CustomerFilters {
   segment: "all" | "top" | "inactive" | "risk" | "permits";
   days: number;
   cursor: { id: string; name?: string; spent?: number } | null;
+  limit?: number;
 }
 
 export async function customerDirectoryPage(user: User, requested: string | undefined, filters: CustomerFilters) {
+  const pageSize = filters.limit ?? 50;
   const ownerId = ownerScope(user, requested);
   const settings = await getSettings();
   const today = businessDate(settings);
@@ -99,9 +101,9 @@ export async function customerDirectoryPage(user: User, requested: string | unde
         SELECT d.* FROM directory d WHERE ${selected}
       )
       SELECT f.* FROM filtered f WHERE TRUE ${cursorFilter}
-      ORDER BY ${order} LIMIT 51`,
+      ORDER BY ${order} LIMIT ${pageSize + 1}`,
   ]);
-  const items = rows.slice(0, 50).map((row) => {
+  const items = rows.slice(0, pageSize).map((row) => {
     const { lifetimeSpent, inactiveDays, ...customer } = row;
     const canContact = ["owner", "admin", "cashier"].includes(user.role);
     const canVerify = ["owner", "admin"].includes(user.role);
@@ -120,11 +122,11 @@ export async function customerDirectoryPage(user: User, requested: string | unde
       points: user.role === "responsible" ? 0 : customer.points,
     };
   });
-  const last = rows[49];
+  const last = rows[pageSize - 1];
   return {
     items,
     total: Number(summaryRows[0]?.filtered || 0),
-    next: rows.length > 50 && last
+    next: rows.length > pageSize && last
       ? filters.segment === "top" ? { id: last.id, spent: Number(last.totalSpent) }
         : { id: last.id, name: last.name }
       : null,

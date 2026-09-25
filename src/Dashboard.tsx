@@ -45,6 +45,7 @@ import {
 import { DashboardSignals, type DashboardDecision } from "./DashboardSignals";
 import type { DashboardOutlook } from "../shared/outlook";
 import "./dashboard.css";
+import "./panorama.css";
 interface DashboardMetrics {
   start: string;
   length: number;
@@ -69,6 +70,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
   const { state, money, owner, setOwner, canSell, user } = useClub();
   const navigate = useNavigate();
   const [range, setRange] = useState("month");
+  const [area, setArea] = useState<"activity" | "projections" | "members" | "resources">("activity");
   const [tab, setTab] = useState("revenue");
   const [ranking, setRanking] = useState("volume");
   const [inactiveDays, setInactiveDays] = useState(state.settings.inactiveDays);
@@ -86,7 +88,20 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
     0,
   );
   const low = state.products.filter((p) => p.stock <= p.minimum);
-  if (!data) return <div className="page-loading" role="status">{metrics.error || "Calculando panorama del club…"}</div>;
+  if (!data) return (
+    <div className="panorama-dashboard">
+      {metrics.error ? (
+        <section className="panorama-load-state is-error" role="alert" aria-live="assertive">
+          <span className="signal-eyebrow">PANORAMA NO DISPONIBLE</span>
+          <h1>No pudimos cargar los indicadores</h1>
+          <p>{metrics.error}</p>
+          <button className="button primary" onClick={() => void metrics.reload()}>Reintentar</button>
+        </section>
+      ) : (
+        <div className="page-loading" role="status" aria-live="polite">Calculando panorama del club…</div>
+      )}
+    </div>
+  );
   const { start, total, before, cost, count, expenses, active, returning, inactive, customerTotal, monthlyExpenses, permitsToReview } = data;
   const chart = data.chart.map((row) => ({ ...row, label: shortDate(row.date) }));
   const owners = state.users
@@ -164,11 +179,11 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
     action: "Ver inventario", path: `/app/inventario?q=${encodeURIComponent(expiring[0].name)}`,
   });
   return (
-    <>
+    <div className="panorama-dashboard">
       <PageHeader
         eyebrow="PANORAMA DEL CLUB"
-        title={`Hola, ${user.name.split(" ")[0]}.`}
-        description={low.length ? `${low.length} ${low.length === 1 ? "lote necesita" : "lotes necesitan"} atención. El resto de la operación, de un vistazo.` : "Acá tenés lo importante de la operación para decidir qué sigue."}
+        title="Panorama general"
+        description="Explorá actividad, proyecciones, socios y recursos por separado. Cada vista conserva su período y fuente."
         actions={
           <>
             {financial && (
@@ -187,17 +202,24 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
             {canSell && (
               <button className="button primary" onClick={onSale}>
                 <Plus size={18} />
-                Nueva venta
+                Registrar venta
               </button>
             )}
           </>
         }
       />
+      <nav className="panorama-areas" aria-label="Vistas del panorama">
+        {([
+          ["activity", "Actividad"], ["projections", "Proyecciones"],
+          ["members", "Socios"], ["resources", "Recursos"],
+        ] as const).map(([id, label]) => <button key={id} type="button" className={area === id ? "active" : ""} aria-current={area === id ? "page" : undefined} onClick={() => setArea(id)}>{label}</button>)}
+      </nav>
       <div className="dashboard-toolbar">
-        <div className="view-tabs">
-          <button className="active">Visión general</button>
+        <div className="dashboard-view-actions" role="group" aria-label="Vistas del club">
+          <span className="current-view" aria-current="page">Visión general</span>
           {financial && (
             <button
+              type="button"
               onClick={() =>
                 navigate(financial ? "/app/responsables" : "/app/inventario")
               }
@@ -241,6 +263,11 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
           </div>
         </div>
       </div>
+      <div className="panorama-conclusion">
+        <div><span className="eyebrow">LECTURA RÁPIDA</span><strong>{area === "activity" ? `${count} ventas en el período` : area === "projections" ? outlook.revenue7 === null ? "Aún falta historial para proyectar ventas" : `Proyección orientativa: ${money(outlook.revenue7)} en 7 días` : area === "members" ? `${active} socios con compras en el período` : `${low.length} lotes bajo el mínimo`}</strong><p>{area === "activity" ? "El gráfico compara ingresos registrados con el período anterior." : area === "projections" ? "Las estimaciones se basan en el ritmo reciente y no equivalen a saldos de caja." : area === "members" ? "Revisá frecuencia, primeras compras e inactividad en las fichas." : "Contrastá valor, responsables y gastos con las fuentes registradas."}</p></div>
+        <button className="button" onClick={() => navigate(area === "activity" ? "/app/ventas" : area === "projections" ? (["owner", "admin"].includes(user.role) ? "/app/finanzas" : "/app/ventas") : area === "members" ? "/app/socios" : "/app/inventario")}> {area === "activity" ? "Ver ventas" : area === "projections" ? (["owner", "admin"].includes(user.role) ? "Ver caja" : "Ver ventas") : area === "members" ? "Ver socios" : "Ver inventario"} <ArrowRight size={16} /></button>
+      </div>
+      {area === "activity" && <>
       <div className="dashboard-section-title">
         <h2>Estado del período</h2>
         <p>Resultados registrados hasta hoy. Las estimaciones aparecen debajo.</p>
@@ -280,20 +307,25 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
           }
         />
       </div>
-      <DashboardSignals outlook={outlook} money={money} decisions={decisions.slice(0, 3)} onNavigate={navigate} />
+      </>}
+      {area === "projections" && <DashboardSignals outlook={outlook} money={money} decisions={decisions.slice(0, 3)} onNavigate={navigate} />}
+      {(area === "activity" || area === "resources") && <>
       <div className="dashboard-section-title dashboard-section-title-lower">
-        <h2>Evolución y composición</h2>
-        <p>Explorá las ventas, el inventario y el comportamiento de los socios.</p>
+        <h2>{area === "activity" ? "Evolución de ventas" : "Recursos del club"}</h2>
+        <p>{area === "activity" ? "Ingresos registrados y comparación con el período anterior." : "Stock, responsables y presupuesto registrados."}</p>
       </div>
-      <div className="dashboard-charts">
+      <div className="dashboard-charts single">
+        {area === "activity" && <>
         <Panel
           title="Así se mueve tu club"
           sub="Evolución de ingresos en el período"
           className="revenue-panel"
           action={
-            <div className="segmented">
+            <div className="segmented" role="group" aria-label="Indicador del gráfico">
               <button
                 className={tab === "revenue" ? "active" : ""}
+                type="button"
+                aria-pressed={tab === "revenue"}
                 onClick={() => setTab("revenue")}
               >
                 Ingresos
@@ -301,6 +333,8 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
               {financial && (
                 <button
                   className={tab === "expenses" ? "active" : ""}
+                  type="button"
+                  aria-pressed={tab === "expenses"}
                   onClick={() => setTab("expenses")}
                 >
                   Gastos
@@ -410,6 +444,8 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
             </span>
           </div>
         </Panel>
+        </>}
+        {area === "resources" && <>
         <Panel
           title={financial ? "Stock por responsable" : "Lotes por responsable"}
           sub={
@@ -448,11 +484,11 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
                     />
                   ))}
                 </Pie>
-                <Tooltip contentStyle={{ background: "#fffaf0", borderColor: "#d9d1bb", color: "#3e402e" }} itemStyle={{ color: "#3e402e" }} formatter={(v) => money(Number(v))} />
+                <Tooltip contentStyle={{ background: "#fffaf0", borderColor: "#d9d1bb", color: "#3e402e" }} itemStyle={{ color: "#3e402e" }} formatter={(v) => financial ? money(Number(v)) : `${number(Number(v))} lotes`} />
               </PieChart>
             </ResponsiveContainer>
             <div className="donut-center">
-              <small>Stock total</small>
+              <small>{financial ? "Stock a costo" : "Lotes en stock"}</small>
               <strong>
                 {financial ? money(stock) : `${state.products.length} lotes`}
               </strong>
@@ -493,7 +529,10 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
             Ver distribución de inventario <ArrowRight size={15} />
           </button>
         </Panel>
+        </>}
       </div>
+      </>}
+      {area === "members" && <>
       <div className="dashboard-bottom">
         <Panel
           title="Los que más eligen tu club"
@@ -618,7 +657,8 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
           </div>
         </Panel>
       </div>
-      {financial && (
+      </>}
+      {area === "resources" && financial && (
         <div className="dashboard-charts lower">
           <Panel
             title="El aporte de cada responsable"
@@ -683,6 +723,6 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
           </Panel>
         </div>
       )}
-    </>
+    </div>
   );
 }
