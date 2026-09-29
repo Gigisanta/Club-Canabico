@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Link } from "react-router-dom";
+import { useClub } from "./lib";
 import "./decision-analysis.css";
 
 export type DecisionAnalysisSection = "stock" | "commercial" | "cash" | "members";
@@ -467,6 +468,7 @@ function Coverage({ value }: { value: unknown }) {
 }
 
 function InventoryView({ data }: { data: DataRecord }) {
+  const { state } = useClub();
   const inventory = asRecord(data.inventory);
   const commerce = asRecord(inventory.commerce);
   const lots = asRecords(inventory.lots);
@@ -480,9 +482,55 @@ function InventoryView({ data }: { data: DataRecord }) {
   const mapping = asRecord(commerce.fulfillmentMapping);
   const observedLeadTimes = asRecords(inventory.observedSupplierLeadTimes);
   const limitations = Array.isArray(data.limitations) ? data.limitations.filter((item): item is string => typeof item === "string") : [];
+  const localProducts = new Map(state.products.map((product) => [product.id, product]));
+  const lotNames = new Map(lots.map((lot) => [String(lot.id || ""), getText(lot, "name")]));
+  const lotSummary = lots.map((lot, index) => {
+    const productId = displayText(lot.id, `lote-${index}`);
+    const position = lotPositionByKey.get(`${productId}:${String(lot.lot || "")}`) || {};
+    const stock = milliunitInteger(lot.stockMilliunits);
+    const minimum = milliunitInteger(lot.minimumMilliunits);
+    return {
+      id: productId,
+      name: getText(lot, "name"),
+      lot: getText(lot, "lot", "Sin lote"),
+      unit: lot.unit,
+      stock: lot.stockMilliunits,
+      minimum: lot.minimumMilliunits,
+      low: stock !== null && minimum !== null && stock <= minimum,
+      expiry: position.expiryStatus === "expired" ? "Vencido" : position.expiryStatus === "due_soon" ? "Por vencer" : "",
+    };
+  });
+  const lowCount = lotSummary.filter((lot) => lot.low).length;
+  const expiringCount = lotSummary.filter((lot) => lot.expiry).length;
+  const attention = lotSummary.filter((lot) => lot.low || lot.expiry);
+  const readyCount = reorderRows.filter((row) => asRecord(row.combinedLocalDelivery).status === "ready").length;
+  const mappingKnown = mapping.status === "known";
 
   return (
-    <div className="da-view">
+    <div className="da-view da-stock-view">
+      <div className="da-stock-summary" role="group" aria-label="Estado del inventario">
+        <div className="da-stock-summary-item is-attention"><span>Bajo mínimo</span><strong>{formatCount(lowCount)}</strong><small>{lowCount === 1 ? "lote para revisar" : "lotes para revisar"}</small></div>
+        <div className="da-stock-summary-item"><span>Por vencer o vencidos</span><strong>{formatCount(expiringCount)}</strong><small>según fecha cargada</small></div>
+        <div className="da-stock-summary-item"><span>Lotes registrados</span><strong>{formatCount(lots.length)}</strong><small>inventario local</small></div>
+      </div>
+
+      <section className="da-card da-stock-focus" aria-labelledby="da-stock-focus-title">
+        <div className="da-section-heading"><div><span className="da-kicker">Primero</span><h2 id="da-stock-focus-title">Lotes que requieren atención</h2></div><StatusPill tone={attention.length ? "caution" : "good"}>{attention.length ? `${formatCount(attention.length)} para revisar` : "Sin alertas"}</StatusPill></div>
+        {attention.length ? <div className="da-stock-attention-list">{attention.map((lot) => <div className="da-stock-attention-row" key={`${lot.id}-${lot.lot}`}>
+          <div className="da-stock-attention-name"><strong>{lot.name}</strong><small>{lot.lot}</small></div>
+          <div className="da-stock-attention-state"><StatusPill tone={lot.low ? "caution" : "partial"}>{lot.low ? "Bajo mínimo" : lot.expiry}</StatusPill>{lot.low && lot.expiry && <small>{lot.expiry}</small>}</div>
+          <div className="da-stock-attention-amount"><strong>{formatMilliunits(lot.stock, lot.unit)}</strong><small>Mín. {formatMilliunits(lot.minimum, lot.unit)}</small></div>
+          <Link to={`/app/inventario?q=${encodeURIComponent(lot.lot === "Sin lote" ? lot.name : lot.lot)}`}>Ver lote <span aria-hidden="true">→</span></Link>
+        </div>)}</div> : <p className="da-muted">Los lotes con fecha y mínimo cargados no muestran alertas.</p>}
+        <Link className="da-stock-all-link" to="/app/inventario">Abrir inventario <span aria-hidden="true">→</span></Link>
+      </section>
+
+      <section className="da-stock-decision" aria-label="Próximo paso para reponer">
+        <div><span className="da-kicker">Antes de reponer</span><strong>{readyCount ? `${formatCount(readyCount)} ${readyCount === 1 ? "producto tiene" : "productos tienen"} propuesta calculada` : "Todavía no hay una compra calculada"}</strong><p>{mappingKnown ? "Revisá demanda, plazos y caja antes de confirmar." : getText(mapping, "reason", "Falta confirmar si el stock local y el delivery se comparten.")}</p></div>
+        <Link to="/app/preparar">Completar datos <span aria-hidden="true">→</span></Link>
+      </section>
+
+      <details className="da-stock-details"><summary>Ver fuentes y detalle de los {formatCount(lots.length)} lotes</summary><div className="da-stock-deep">
       <div className="da-metric-grid">
         <article className="da-metric"><span>Valor local a costo histórico</span><strong>{formatCents(inventory.valueAtHistoricalCostCents)}</strong><small>Valuación de los lotes actuales; no incluye el historial importado.</small></article>
         <article className="da-metric"><span>Lotes locales</span><strong>{formatCount(lots.length)}</strong><small>Fuente operativa del inventario actual.</small></article>
@@ -508,7 +556,7 @@ function InventoryView({ data }: { data: DataRecord }) {
                 const lotPosition = lotPositionByKey.get(`${productId}:${String(lot.lot || "")}`) || {};
                 const probability = formatBasisPoints(demand.stockoutProbabilityBasisPoints);
                 const coverDays = demand.coverDays;
-                const location = displayText(lot.locationId, "Sin ubicación");
+                const location = localProducts.get(productId)?.location || (lot.locationId ? "Ubicación sin nombre" : "Sin ubicación");
                 return <tr key={`${productId}-${index}`}>
                   <th scope="row"><strong>{getText(lot, "name")}</strong><small>{getText(lot, "lot", "Lote sin identificar")}</small></th>
                   <td>{location}<small>{displayText(lot.supplier, "Sin proveedor")}</small></td>
@@ -530,7 +578,7 @@ function InventoryView({ data }: { data: DataRecord }) {
 
       <section className="da-card">
         <div className="da-section-heading"><div><span className="da-kicker">Evidencia para reponer</span><h2>Demanda, costo y posición</h2></div></div>
-        <CommerceEvidence commerce={commerce} />
+        <CommerceEvidence commerce={commerce} productNames={lotNames} />
       </section>
       <section className="da-card" aria-labelledby="da-lead-times-title">
         <div className="da-section-heading"><div><span className="da-kicker">Compras históricas</span><h2 id="da-lead-times-title">Plazos reales de entrega</h2></div></div>
@@ -548,11 +596,12 @@ function InventoryView({ data }: { data: DataRecord }) {
         </table></div> : <p className="da-footnote">Faltan fechas de pedido y recepción en compras conciliadas. El plazo confirmado por Tiziano se configura en Preparar decisiones.</p>}
       </section>
       {limitations.map((limitation, index) => <p className="da-limitation" key={`${index}-${limitation}`}>{limitation}</p>)}
+      </div></details>
     </div>
   );
 }
 
-function CommerceEvidence({ commerce }: { commerce: DataRecord }) {
+function CommerceEvidence({ commerce, productNames }: { commerce: DataRecord; productNames: Map<string, string> }) {
   const demands = asRecords(commerce.demandByProduct);
   const costs = asRecords(commerce.costEvidence);
   const positions = asRecords(commerce.inventoryByProduct);
@@ -569,7 +618,7 @@ function CommerceEvidence({ commerce }: { commerce: DataRecord }) {
       const historical = asRecord(cost.latestHistoricalCost);
       const quote = asRecord(cost.usableReplacementQuote);
       return <tr key={`${id}-${index}`}>
-        <th scope="row">{id}</th>
+        <th scope="row">{productNames.get(id) || "Producto sin identificar"}</th>
         <td>{formatMilliunits(demand.observedSalesMilliunits)} observadas<small>{formatCount(demand.availableDemandDays)} días disponibles · {formatCount(demand.censoredStockoutDays)} días censurados por quiebre · {formatCount(demand.unknownAvailabilityDays)} con disponibilidad desconocida</small></td>
         <td>{formatMilliunits(position.quantityMilliunits)} en {formatCount(position.lotCount)} lotes<small>{formatMilliunits(position.expiredMilliunits)} vencidas · {formatMilliunits(position.expiringSoonMilliunits)} próximas</small></td>
         <td>{quote.unitCostCentsPerUnit != null ? formatCents(quote.unitCostCentsPerUnit) : historical.unitCostCentsPerUnit != null ? formatCents(historical.unitCostCentsPerUnit) : "Sin cotización utilizable"}<small>{quote.unitCostCentsPerUnit != null ? `Cotización al ${formatDate(quote.quotedOn)}` : historical.observedOn ? `Costo histórico observado al ${formatDate(historical.observedOn)}` : "Falta evidencia de costo"}</small></td>
@@ -1031,12 +1080,10 @@ function DecisionPanel({ section, data, onDownloadDelivery }: { section: Decisio
 }
 
 export default function DecisionAnalysis({ section }: DecisionAnalysisProps) {
-  const navigate = useNavigate();
-  const [activeSection, setActiveSection] = useState<DecisionAnalysisSection>(() => isDecisionSection(section) ? section : sectionFromUrl());
+  const activeSection = isDecisionSection(section) ? section : sectionFromUrl();
   const [data, setData] = useState<DataRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
-  const tabRefs = useRef<Record<DecisionAnalysisSection, HTMLButtonElement | null>>({ stock: null, commercial: null, cash: null, members: null });
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
@@ -1057,80 +1104,22 @@ export default function DecisionAnalysis({ section }: DecisionAnalysisProps) {
     return () => controller.abort();
   }, [load]);
 
-  useEffect(() => {
-    const synchronize = () => setActiveSection(isDecisionSection(section) ? section : sectionFromUrl());
-    synchronize();
-    window.addEventListener("popstate", synchronize);
-    window.addEventListener("hashchange", synchronize);
-    return () => {
-      window.removeEventListener("popstate", synchronize);
-      window.removeEventListener("hashchange", synchronize);
-    };
-  }, [section]);
-
-  const selectSection = (next: DecisionAnalysisSection) => {
-    setActiveSection(next);
-    if (isDecisionSection(section)) {
-      navigate(analysisPaths[next]);
-      window.requestAnimationFrame(() => document.getElementById(`da-tab-${next}`)?.focus());
-      return;
-    }
-    if (typeof window === "undefined") return;
-    const url = new URL(window.location.href);
-    url.searchParams.set("section", next);
-    window.history.replaceState(window.history.state, "", url);
-  };
-
-  const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, current: DecisionAnalysisSection) => {
-    const index = sectionOrder.indexOf(current);
-    const nextIndex = event.key === "ArrowRight" ? (index + 1) % sectionOrder.length
-      : event.key === "ArrowLeft" ? (index + sectionOrder.length - 1) % sectionOrder.length
-        : event.key === "Home" ? 0 : event.key === "End" ? sectionOrder.length - 1 : -1;
-    if (nextIndex < 0) return;
-    event.preventDefault();
-    const next = sectionOrder[nextIndex];
-    selectSection(next);
-    tabRefs.current[next]?.focus();
-  };
-
   const profitability = asRecord(data?.profitability);
   const delivery = asRecord(profitability.deliveryImported);
   const lastUpdated = data?.asOfDate;
 
   return <div className="decision-analysis">
     <header className="da-header">
-      <div><span className="da-kicker">Lectura de negocio · con evidencia</span><h1>{analysisTitles[activeSection]}</h1><p>{sectionDescriptions[activeSection]} Los datos faltantes y no conciliados permanecen visibles.</p></div>
-      <div className="da-header-meta"><StatusPill tone={coverageTone(asRecord(data?.sourceState).state)}>{sourceStateText(asRecord(data?.sourceState).state)}</StatusPill><span>Actualizado al {formatDate(lastUpdated)}</span><button type="button" className="da-button da-button--secondary" onClick={() => void load()} disabled={loading}>{loading ? "Actualizando…" : "Actualizar análisis"}</button></div>
+      <div><span className="da-kicker">{activeSection === "stock" ? "Stock" : activeSection === "members" ? "Socios" : "Finanzas"}</span><h1>{analysisTitles[activeSection]}</h1><p>{sectionDescriptions[activeSection]}</p></div>
+      <div className="da-header-meta">{data && asRecord(data.sourceState).state !== "demo" && <StatusPill tone={coverageTone(asRecord(data.sourceState).state)}>{sourceStateText(asRecord(data.sourceState).state)}</StatusPill>}{data && <span>Actualizado al {formatDate(lastUpdated)}</span>}<button type="button" className="da-button da-button--secondary" onClick={() => void load()} disabled={loading}>{loading ? "Actualizando…" : "Actualizar análisis"}</button></div>
     </header>
 
     {loadError && <div className="da-error da-error--load" role="alert"><p>{loadError}</p><button className="da-button da-button--secondary" type="button" onClick={() => void load()} disabled={loading}>Reintentar</button></div>}
     {loading && !data && <div className="da-loading" role="status" aria-live="polite">Cargando fuentes del análisis…</div>}
     {!loading && !data && !loadError && <EmptyState title="El análisis no devolvió datos">Actualizá la vista para volver a consultar las fuentes.</EmptyState>}
 
-    <div className="da-tabs" role="tablist" aria-label="Vistas del análisis de decisión">
-      {sectionOrder.map((item) => <button
-        key={item}
-        ref={(node) => { tabRefs.current[item] = node; }}
-        id={`da-tab-${item}`}
-        type="button"
-        role="tab"
-        aria-selected={activeSection === item}
-        aria-controls={`da-panel-${item}`}
-        tabIndex={activeSection === item ? 0 : -1}
-        onClick={() => selectSection(item)}
-        onKeyDown={(event) => onTabKeyDown(event, item)}
-      >{sectionLabels[item]}</button>)}
-    </div>
-    {sectionOrder.map((item) => <section
-      key={item}
-      id={`da-panel-${item}`}
-      className="da-tab-panel"
-      role="tabpanel"
-      aria-labelledby={`da-tab-${item}`}
-      tabIndex={0}
-      hidden={activeSection !== item}
-      aria-label={`${sectionLabels[item]}: ${sectionDescriptions[item]}`}
-    >{data ? <DecisionPanel section={item} data={data} onDownloadDelivery={(count, revenue) => downloadDeliveryCsv(count, revenue)} /> : loading ? null : <EmptyState title="Vista sin datos">Cargá el análisis para ver esta sección.</EmptyState>}</section>)}
+    {data && <DecisionPanel section={activeSection} data={data} onDownloadDelivery={(count, revenue) => downloadDeliveryCsv(count, revenue)} />}
     {data && <details className="da-evidence"><summary>Fuentes, historial importado y límites de la evidencia · {sourceStateText(asRecord(data.sourceState).state)}</summary><SourceStatePanel value={data.sourceState} /><ImportedHistoryPanel value={data.importedHistory} /></details>}
+    <details className="da-related"><summary>Otros análisis</summary><nav aria-label="Otros análisis">{sectionOrder.filter((item) => item !== activeSection).map((item) => <Link key={item} to={analysisPaths[item]}>{sectionLabels[item]}</Link>)}</nav></details>
   </div>;
 }

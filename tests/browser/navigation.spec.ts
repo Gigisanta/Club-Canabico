@@ -1,24 +1,25 @@
 import { expect, test } from "./isolated";
 
-test("six hubs lead to their pages and search understands former labels", async ({ page }) => {
+test("primary areas stay direct and secondary tools remain reachable", async ({ page }) => {
   await page.goto("/app");
   await page.getByRole("button", { name: "Explorar club de demostración" }).click();
   await expect(page.getByRole("heading", { name: "Resumen de hoy" })).toBeVisible();
   const sidebar = page.locator("#app-navigation");
-  await expect(sidebar.locator(".hub-group")).toHaveCount(6);
-  await expect(sidebar.locator('.hub-toggle[aria-expanded="true"]')).toHaveCount(1);
-  const stockToggle = sidebar.locator('.hub-toggle[aria-controls="hub-items-stock"]');
-  await stockToggle.focus();
+  await expect(sidebar.locator(".hub-group")).toHaveCount(5);
+  await expect(sidebar.getByRole("link", { name: "Finanzas", exact: true })).toBeVisible();
+  await expect(sidebar.locator(".hub-items-context")).toHaveCount(1);
+  const more = sidebar.getByRole("button", { name: "Más herramientas" });
+  await more.focus();
   await page.keyboard.press("Enter");
-  await expect(stockToggle).toHaveAttribute("aria-expanded", "true");
-  await expect(sidebar.getByRole("region", { name: "Opciones de Stock" })).toBeVisible();
+  await expect(more).toHaveAttribute("aria-expanded", "true");
+  await expect(sidebar.getByRole("link", { name: "Importar y conciliar" })).toBeVisible();
   await page.keyboard.press("Space");
-  await expect(stockToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(more).toHaveAttribute("aria-expanded", "false");
   await page.keyboard.press("Space");
-  await expect(stockToggle).toHaveAttribute("aria-expanded", "true");
-  await expect(sidebar.locator('.hub-toggle[aria-expanded="true"]')).toHaveCount(1);
+  await expect(more).toHaveAttribute("aria-expanded", "true");
   await sidebar.getByRole("link", { name: "Stock", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Inventario", exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("link", { name: "Análisis de stock" })).toBeVisible();
   await expect(page.locator(".breadcrumb")).toContainText("Stock");
   await expect(page.locator(".breadcrumb")).toContainText("Inventario");
   await page.keyboard.press("Control+k");
@@ -33,16 +34,16 @@ test("six hubs lead to their pages and search understands former labels", async 
   await expect(page.getByRole("heading", { name: "Canales del club" })).toBeVisible();
 });
 
-test("five roles see only their allowed hubs and mobile More exposes the same destinations", async ({ page }) => {
+test("five roles see only their allowed areas and mobile More exposes tools", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/app");
   await page.getByRole("button", { name: "Explorar club de demostración" }).click();
   const roles = [
-    { name: "Dueño · vista consolidada", hubs: 6, web: true, expenses: true },
-    { name: "Gerente · operación del club", hubs: 6, web: true, expenses: true },
-    { name: "Lucía · sus lotes y ventas", hubs: 5, web: false, expenses: true },
-    { name: "Cajero · ventas y stock", hubs: 5, web: false, expenses: false },
-    { name: "Solo lectura", hubs: 5, web: false, expenses: true },
+    { name: "Dueño · vista consolidada", hubs: 5, web: true, expenses: true },
+    { name: "Gerente · operación del club", hubs: 5, web: true, expenses: true },
+    { name: "Lucía · sus lotes y ventas", hubs: 4, web: false, expenses: true },
+    { name: "Cajero · ventas y stock", hubs: 4, web: false, expenses: false },
+    { name: "Solo lectura", hubs: 4, web: false, expenses: true },
   ];
   for (const [index, role] of roles.entries()) {
     if (index > 0) {
@@ -50,14 +51,19 @@ test("five roles see only their allowed hubs and mobile More exposes the same de
       await page.getByRole("dialog").getByRole("button", { name: role.name }).click();
     }
     const tabs = page.locator(".mobile-tabbar");
-    for (const label of ["Inicio", "Ventas", "Stock", "Socios"])
+    for (const label of ["Inicio", "Ventas", "Stock", role.web ? "Finanzas" : "Socios"])
       await expect(tabs.getByRole("link", { name: new RegExp(`^${label}`) })).toBeVisible();
+    await expect(tabs.getByRole("link", { name: role.web ? "Socios" : "Finanzas", exact: true })).toHaveCount(0);
     await tabs.getByRole("button", { name: "Más secciones" }).click();
     const sidebar = page.locator("#app-navigation");
     await expect(sidebar.locator(".hub-group")).toHaveCount(role.hubs);
-    await expect(sidebar.locator('.hub-items a[href="/app/consultas"]')).toHaveCount(role.web ? 1 : 0);
-    await expect(sidebar.locator('.hub-items a[href="/app/gastos"]')).toHaveCount(role.expenses ? 1 : 0);
+    await expect(sidebar.getByRole("link", { name: "Socios", exact: true })).toBeVisible();
+    await expect(sidebar.getByRole("link", { name: "Finanzas", exact: true })).toHaveCount(role.web ? 1 : 0);
+    await sidebar.getByRole("button", { name: "Más herramientas" }).click();
+    await expect(sidebar.locator('.hub-tools-list a[href="/app/consultas"]')).toHaveCount(role.web ? 1 : 0);
     await sidebar.getByRole("button", { name: "Cerrar navegación" }).click();
+    await page.goto("/app/gastos");
+    await expect(page).toHaveURL(role.expenses ? /\/app\/gastos$/ : /\/app\/?$/);
     await page.goto("/app/vidriera");
     await expect(page).toHaveURL(role.web ? /\/app\/vidriera$/ : /\/app\/?$/);
     await page.goto("/app");

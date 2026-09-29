@@ -1,7 +1,4 @@
-import {
-  ChartBar, ChatCircleDots, GearSix, House, Package, Receipt,
-  Storefront, Users,
-} from "@phosphor-icons/react";
+import { ChartBar, GearSix, House, Package, Receipt, Storefront, Users } from "@phosphor-icons/react";
 import type { Role } from "../shared/types";
 
 const managers: Role[] = ["owner", "admin"];
@@ -18,10 +15,15 @@ export const navigationHubs = [
     ],
   },
   {
-    id: "ventas", label: "Ventas y caja", icon: Receipt,
+    id: "ventas", label: "Ventas", icon: Receipt,
     items: [
       { path: "/app/ventas", label: "Ventas", aliases: ["Ventas y caja", "Registrar venta"], roles: everyone },
       { path: "/app/gastos", label: "Gastos", aliases: [], roles: exceptCashier },
+    ],
+  },
+  {
+    id: "finanzas", label: "Finanzas", icon: ChartBar,
+    items: [
       { path: "/app/finanzas", label: "Finanzas", aliases: ["Caja y planificación"], roles: managers },
       { path: "/app/decisiones/comercial", label: "Precios y promociones", aliases: ["Análisis comercial"], roles: managers },
       { path: "/app/decisiones/caja", label: "Análisis de caja", aliases: [], roles: managers },

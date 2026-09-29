@@ -154,6 +154,7 @@ export default function Finance() {
     </div>
 
     {view === "overview" && <div className="finance-section">
+      <div className="finance-topline">
       <section className="finance-result" aria-labelledby="finance-result-title">
         <div className="finance-result-top">
           <div>
@@ -173,7 +174,6 @@ export default function Finance() {
         <button className="finance-text-action" type="button" onClick={() => navigate("/app/decisiones/comercial")}>Analizar márgenes y precios <ArrowRight size={16} aria-hidden="true" /></button>
       </section>
 
-      <div className="finance-overview-grid">
         <section className="finance-priorities" aria-labelledby="finance-priorities-title">
           <h2 id="finance-priorities-title">Próximos pasos</h2>
           <p className="finance-lead">Lo necesario para confiar en las cifras.</p>
@@ -183,6 +183,7 @@ export default function Finance() {
             <li><div><strong>Historial externo</strong><p>Importar y conciliar AppSheet por separado.</p><button type="button" onClick={() => navigate("/app/importar")}>Ir a importaciones <ArrowRight size={15} aria-hidden="true" /></button></div></li>
           </ol>
         </section>
+      </div>
 
         <section className="finance-sources" aria-labelledby="finance-sources-title">
           <h2 id="finance-sources-title">Estado de los datos</h2>
@@ -193,8 +194,6 @@ export default function Finance() {
           </ul>
           <button type="button" className="finance-text-action" onClick={() => setView("activity")}><Wallet size={16} aria-hidden="true" /> Ver movimientos de caja</button>
         </section>
-      </div>
-
       <details className="finance-detail" id="finance-stock-detail" ref={stockDetail}>
         <summary><span><ChartBar size={18} aria-hidden="true" /> Valuación por lote</span><span>Mostrar tabla <ArrowRight size={16} aria-hidden="true" /></span></summary>
         <Panel title="Capital en inventario" sub="Cantidad actual por costo unitario cargado. Los lotes con costo cero requieren revisión.">

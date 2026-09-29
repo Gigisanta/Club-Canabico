@@ -271,7 +271,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
     .fill(`qa-${suffix}@example.com`);
   await dialog.getByRole("button", { name: "Guardar", exact: true }).click();
   await expect(dialog).toBeHidden();
-  await page.getByRole("link", { name: "Ventas y caja" }).click();
+  await page.getByRole("link", { name: "Ventas", exact: true }).click();
   await page.getByRole("button", { name: "Registrar venta" }).click();
   dialog = page.getByRole("dialog");
   await dialog.getByRole("combobox", { name: "Buscar socio" }).fill(customer);
@@ -445,8 +445,7 @@ test("mobile: navigation, filters and sale modal fit the viewport", async ({
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
-  await page.getByRole("button", { name: "Abrir navegación" }).click();
-  await page.getByRole("button", { name: /3 lotes necesitan atención/ }).click();
+  await page.getByRole("button", { name: /3 lotes con stock bajo · Ver alertas/ }).click();
   await expect(page.locator(".inventory-compact-row")).toHaveCount(3);
 });
 
@@ -475,11 +474,14 @@ test("mobile primary access follows the available sections for every demo role",
     await expect(tabbar.getByRole("link", { name: "Inicio", exact: true })).toBeVisible();
     await expect(tabbar.getByRole("link", { name: "Ventas", exact: true })).toBeVisible();
     await expect(tabbar.getByRole("link", { name: /^Stock(?:,|$)/ })).toBeVisible();
-    await expect(tabbar.getByRole("link", { name: "Socios", exact: true })).toBeVisible();
+    await expect(tabbar.getByRole("link", { name: "Socios", exact: true })).toHaveCount(role.manager ? 0 : 1);
+    await expect(tabbar.getByRole("link", { name: "Finanzas", exact: true })).toHaveCount(role.manager ? 1 : 0);
 
     const more = tabbar.locator('button[aria-controls="app-navigation"]');
     await more.click();
     const drawer = page.locator("#app-navigation");
+    await expect(drawer.getByRole("link", { name: "Socios", exact: true })).toBeVisible();
+    await drawer.getByRole("button", { name: "Más herramientas" }).click();
     if (role.manager) {
       await expect(drawer.locator('a[href="/app/vidriera"]')).toHaveCount(1);
     } else {
@@ -519,7 +521,7 @@ test("mobile Más drawer traps focus and closes on Escape or navigation", async 
 
   await more.click();
   await expect(more).toHaveAttribute("aria-expanded", "true");
-  await drawer.getByRole("link", { name: "Ventas y caja" }).click();
+  await drawer.getByRole("link", { name: "Ventas", exact: true }).click();
   await expect(page).toHaveURL(/\/app\/ventas$/);
   await expect(more).toHaveAttribute("aria-expanded", "false");
   await expect(drawer).not.toHaveAttribute("role", "dialog");

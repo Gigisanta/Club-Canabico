@@ -12,7 +12,17 @@ test("manager can follow the three decisions and prepare evidence without invent
   await expect(page.getByRole("note")).toContainText("Modo demostración");
   await page.locator(".dc-decision-card--replenishment").getByRole("link", { name: "Abrir acción" }).click();
   await expect(page.getByRole("heading", { name: "Análisis de stock" })).toBeVisible();
-  await expect(page.getByRole("tabpanel", { name: "Stock" })).toContainText("Lotes locales");
+  await expect(page.getByRole("heading", { name: "Lotes que requieren atención" })).toBeVisible();
+  await expect(page.locator(".da-stock-summary")).toContainText("Bajo mínimo");
+  const firstLot = page.locator(".da-stock-attention-row").first();
+  const lotCode = await firstLot.locator(".da-stock-attention-name small").textContent();
+  await firstLot.getByRole("link", { name: "Ver lote" }).click();
+  await expect(page).toHaveURL(new RegExp(`/app/inventario\\?q=${encodeURIComponent(lotCode || "")}$`));
+  await expect(page.getByRole("heading", { name: "Inventario" })).toBeVisible();
+  await page.goBack();
+  await expect(page.locator(".da-stock-details")).not.toHaveAttribute("open", "");
+  await page.locator(".da-stock-details summary").click();
+  await expect(page.getByRole("heading", { name: "Lotes locales" })).toBeVisible();
   await page.goto("/app/decisiones/comercial");
   await expect(page.getByRole("heading", { name: "Margen de una promoción" })).toBeVisible();
   await page.goto("/app/decisiones/caja");

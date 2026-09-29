@@ -10,7 +10,6 @@ import {
 import {
   Package,
   Plant,
-  GearSix,
   Bell,
   MagnifyingGlass,
   Plus,
@@ -22,7 +21,6 @@ import {
   ArrowRight,
   X,
   DotsThree,
-  CaretDown,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import {
@@ -31,6 +29,7 @@ import {
   useResource,
   ClubProvider,
   money,
+  number,
   roleLabels,
   type User,
   type ClubState,
@@ -220,12 +219,14 @@ function Workspace({
   const [notifications, setNotifications] = useState(false);
   const [profile, setProfile] = useState(false);
   const location = useLocation();
-  const [openHub, setOpenHub] = useState<string | null>("inicio");
+  const [toolsOpen, setToolsOpen] = useState(false);
   const hubs = hubsForRole(user.role);
   const current = currentDestination(location.pathname, location.search, user.role);
+  const primaryHubs = hubs.filter((hub) => ["inicio", "ventas", "stock", "socios", "finanzas"].includes(hub.id));
+  const toolHubs = hubs.filter((hub) => ["web", "administracion"].includes(hub.id));
   useEffect(() => {
     const destination = currentDestination(location.pathname, location.search, user.role);
-    if (destination) setOpenHub(destination.hub.id);
+    if (destination && ["web", "administracion"].includes(destination.hub.id)) setToolsOpen(true);
   }, [location.pathname, location.search, user.role]);
   const view = ({
     "/app": "dashboard", "/app/": "dashboard", "/app/panorama": "dashboard", "/app/decisiones": "dashboard", "/app/inventario": "inventory", "/app/socios": "customers",
@@ -329,8 +330,8 @@ function Workspace({
       </div>
     );
   const alerts = state.lowStockCount;
-  const mobilePrimary = hubs.filter((hub) => ["inicio", "ventas", "stock", "socios"].includes(hub.id));
-  const mobileLabels: Record<string, string> = { inicio: "Inicio", ventas: "Ventas", stock: "Stock", socios: "Socios" };
+  const mobilePrimary = primaryHubs.filter((hub) => ["inicio", "ventas", "stock", isManager ? "finanzas" : "socios"].includes(hub.id));
+  const mobileLabels: Record<string, string> = { inicio: "Inicio", ventas: "Ventas", finanzas: "Finanzas", stock: "Stock", socios: "Socios" };
   const moreActive = !mobilePrimary.some((hub) => hub.id === current?.hub.id);
   return (
     <ClubProvider
@@ -360,53 +361,40 @@ function Workspace({
         }}>
           <Brand />
           <button type="button" className="sidebar-close icon-button" aria-label="Cerrar navegación" onClick={closeMenu}><X size={21} /></button>
-          <button
-            className="club-switch"
-            aria-label={`Configurar ${state.settings.clubName}`}
-            onClick={() => { navigate("/app/configuracion"); finishMenuNavigation(); }}
-          >
+          <div className="club-switch club-identity" aria-label={state.settings.clubName}>
             <span className="club-avatar">
               <img src="/brand/bombo-symbol.png" alt="" />
             </span>
             <span>
               <strong>{state.settings.clubName}</strong>
-              <small>Configurar espacio</small>
             </span>
-            <ArrowRight size={14} />
-          </button>
+          </div>
           <nav className="hub-navigation" aria-label="Áreas del club">
-            {hubs.map((hub) => {
+            {primaryHubs.map((hub) => {
               const Icon = hub.icon;
-              const expanded = openHub === hub.id;
               const selected = current?.hub.id === hub.id;
               const main = hub.items[0];
               return <div className={`hub-group${selected ? " is-current" : ""}`} key={hub.id}>
-                <div className="hub-heading">
-                  <NavLink className="hub-link" to={main.path} aria-label={hub.label}>
-                    <Icon size={20} weight="duotone" aria-hidden="true" />
-                    <span>{hub.label}</span>
-                    {hub.id === "stock" && alerts > 0 && <span className="nav-count" aria-label={`${alerts} alertas`}>{alerts}</span>}
-                  </NavLink>
-                  <h2 className="hub-toggle-heading"><button id={`hub-toggle-${hub.id}`} type="button" className="hub-toggle" aria-label={`Opciones de ${hub.label}`} aria-expanded={expanded} aria-controls={`hub-items-${hub.id}`} onClick={() => setOpenHub(expanded ? null : hub.id)}><CaretDown size={16} aria-hidden="true" /></button></h2>
-                </div>
-                <div id={`hub-items-${hub.id}`} className="hub-items" role="region" aria-labelledby={`hub-toggle-${hub.id}`} hidden={!expanded}>
-                  {hub.items.map((item) => <NavLink key={item.path} to={item.path} end={item.path === "/app"} className={current?.item.path === item.path ? "is-selected" : ""} aria-current={current?.item.path === item.path ? "page" : undefined}>{item.label}</NavLink>)}
-                </div>
+                <NavLink className="hub-link" to={main.path} end={main.path === "/app"} aria-label={hub.label}>
+                  <Icon size={20} weight="duotone" aria-hidden="true" />
+                  <span>{hub.label}</span>
+                  {hub.id === "stock" && alerts > 0 && <span className="nav-count" aria-label={`${alerts} alertas`}>{alerts}</span>}
+                </NavLink>
+                {selected && hub.items.length > 1 && <div className="hub-items hub-items-context" aria-label={`En ${hub.label}`}>
+                  {hub.items.slice(1).map((item) => <NavLink key={item.path} to={item.path} className={current?.item.path === item.path ? "is-selected" : ""} aria-current={current?.item.path === item.path ? "page" : undefined}>{item.label}</NavLink>)}
+                </div>}
               </div>;
             })}
+            {toolHubs.length > 0 && <div className={`hub-tools${toolHubs.some((hub) => current?.hub.id === hub.id) ? " is-current" : ""}`}>
+              <button type="button" className="hub-tools-trigger" aria-expanded={toolsOpen} aria-controls="hub-tools-list" onClick={() => setToolsOpen((value) => !value)}>
+                <DotsThree size={20} weight="bold" aria-hidden="true" /><span>Más herramientas</span><span className="hub-tools-caret" aria-hidden="true">{toolsOpen ? "−" : "+"}</span>
+              </button>
+              {toolsOpen && <div id="hub-tools-list" className="hub-tools-list">
+                {toolHubs.map((hub) => <div key={hub.id} className="hub-tools-section"><strong>{hub.label}</strong>{hub.items.map((item) => <NavLink key={item.path} to={item.path} className={current?.item.path === item.path ? "is-selected" : ""} aria-current={current?.item.path === item.path ? "page" : undefined}>{item.label}</NavLink>)}</div>)}
+              </div>}
+            </div>}
           </nav>
           <div className="sidebar-bottom">
-            {alerts > 0 ? (
-              <button className="club-health" onClick={() => { navigate("/app/inventario?filter=low"); finishMenuNavigation(); }}>
-                <span className="club-health-icon"><Package size={20} /></span>
-                <span><strong>{alerts} {alerts === 1 ? "lote necesita" : "lotes necesitan"} atención</strong><small>Revisar stock bajo <ArrowRight size={13} /></small></span>
-              </button>
-            ) : (
-              <div className="club-health is-clear">
-                <span className="club-health-icon"><ShieldCheck size={20} /></span>
-                <span><strong>Stock al día</strong><small>Sin lotes bajo el mínimo</small></span>
-              </div>
-            )}
             <div className="sidebar-user">
               <Avatar name={user.name} color={user.color} />
               <div>
@@ -435,8 +423,7 @@ function Workspace({
               >
                 <List size={23} />
               </button>
-              <span>{current?.hub.label || "Inicio"}</span>
-              <span className="breadcrumb-slash">/</span>
+              {current?.hub.label !== current?.item.label && <><span>{current?.hub.label || "Inicio"}</span><span className="breadcrumb-slash">/</span></>}
               <strong aria-current="page">{current?.item.label || "Resumen de hoy"}</strong>
             </div>
             <div className="top-actions">
@@ -473,10 +460,7 @@ function Workspace({
               <div className="demo-ribbon">
                 <span>
                   <span className="live-dot" />
-                  Club de demostración{" "}
-                  <span className="demo-extra">
-                    · Datos de ejemplo persistentes
-                  </span>
+                  Modo prueba · datos de ejemplo
                 </span>
                 <button onClick={() => setProfile(true)}>
                   Probar otro rol <ArrowSquareOut size={13} />
@@ -638,8 +622,8 @@ function Workspace({
               <div>
                 <strong>{p.name}</strong>
                 <p>
-                  Stock bajo: {p.stock / 1000} {p.unit}. Mínimo:{" "}
-                  {p.minimum / 1000} {p.unit}.
+                  Stock bajo: {number(p.stock / 1000)} {p.unit}. Mínimo:{" "}
+                  {number(p.minimum / 1000)} {p.unit}.
                 </p>
               </div>
               <button

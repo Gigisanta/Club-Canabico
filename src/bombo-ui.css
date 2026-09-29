@@ -35,9 +35,11 @@
 .app-shell .club-switch strong { font-size: 13px; }
 .app-shell .club-switch small { font-size: 12px; }
 .app-shell .hub-link { min-height: 44px; font-size: 14px; }
-.app-shell .hub-group.is-current .hub-heading { background: #ffffff14; box-shadow: inset 3px 0 0 var(--brand-lime); border-radius: 4px 11px 11px 4px; }
+.app-shell .hub-group.is-current > .hub-link { background: #ffffff14; box-shadow: inset 3px 0 0 var(--brand-lime); border-radius: 4px 11px 11px 4px; }
 .app-shell .hub-items a { min-height: 40px; display: flex; align-items: center; font-size: 13.5px; }
 .app-shell .hub-items a.is-selected { background: var(--brand-cream); color: var(--brand-olive); }
+.app-shell .club-identity { cursor: default; }
+.app-shell .club-identity:hover { background: #ffffff11; }
 .app-shell .club-health { padding: 11px 12px; font-size: 13px; }
 .app-shell .club-health strong { font-size: 13px; }
 .app-shell .club-health small, .app-shell .sidebar-user small { font-size: 12px; }
@@ -63,6 +65,8 @@
 }
 .app-shell .demo-ribbon, .app-shell .note-box, .app-shell .site-admin-note { background: var(--bo-info-bg); border-color: #cfc9f5; border-left-color: var(--bo-info); color: #37316f; }
 .app-shell .demo-ribbon button { color: #37316f; font-size: 14px; text-decoration: underline; text-underline-offset: 3px; min-height: 32px; }
+.app-shell .demo-ribbon { margin-bottom: 18px; padding: 0 0 10px; border: 0; border-bottom: 1px solid var(--bo-rule); border-radius: 0; background: transparent; color: var(--bo-ink-soft); font-size: 12px; }
+.app-shell .demo-ribbon button { color: var(--bo-ink-soft); font-size: 12px; }
 .app-shell .scope-banner { background: var(--bo-warn-bg); border-color: #efc99f; border-left-color: var(--brand-orange); color: #5e3210; }
 .app-shell .scope-banner button { color: #5e3210; font-size: 14px; text-decoration: underline; text-underline-offset: 3px; min-height: 32px; }
 .app-shell .form-error, .modal .form-error { border-radius: 10px; font-size: 14px; }

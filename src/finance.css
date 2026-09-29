@@ -1,5 +1,6 @@
-/* Finanzas: one olive band for the month's result; everything else is ruled rows. */
+/* Finanzas: resultado y acciones visibles juntos; fuentes en la siguiente capa. */
 .app-shell .panorama-finance .finance-section { display: grid; gap: 28px; }
+.app-shell .finance-topline { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(260px, .9fr); align-items: start; gap: 24px; }
 
 /* Result band */
 .app-shell .finance-result { padding: clamp(20px, 2.6vw, 32px); border-radius: 16px; background: var(--brand-olive); color: #fffaf0; }
@@ -48,7 +49,9 @@
 .app-shell .panorama-finance :is(.finance-text-action, .finance-priorities li button, .finance-sources li button):hover { text-decoration-color: currentColor; }
 
 /* Next steps + sources */
-.app-shell .finance-overview-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 32px 48px; align-items: start; }
+@media (min-width: 1025px) {
+  .app-shell .finance-topline .finance-result-value { font-size: clamp(38px, 4vw, 54px); }
+}
 .app-shell .finance-priorities h2, .app-shell .finance-sources h2 { margin: 0 0 4px; font-size: clamp(20px, 2vw, 24px); letter-spacing: -.03em; }
 .app-shell .finance-lead { margin: 0 0 14px; color: var(--muted); font-size: 14px; }
 .app-shell .finance-priorities ol { display: grid; margin: 0; padding: 0; list-style: none; counter-reset: step; border-top: 1px solid var(--bo-rule-strong); }
@@ -108,7 +111,7 @@
 .app-shell .finance-section > .finance-text-action { margin: 0; }
 
 @media (max-width: 1024px) {
-  .app-shell .finance-overview-grid { grid-template-columns: minmax(0, 1fr); }
+  .app-shell .finance-topline { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 760px) {
   .app-shell .finance-activity-lead, .app-shell .finance-plan-head, .app-shell .finance-missing-opening { align-items: stretch; flex-direction: column; }
