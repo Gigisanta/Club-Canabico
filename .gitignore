@@ -9,3 +9,4 @@ test-results/
 playwright-report/
 artifacts/
 *.log
+.DS_Store
