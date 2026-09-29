@@ -456,15 +456,15 @@ function Workspace({
             </div>
           </header>
           <main className="main-content" ref={mainRegion} tabIndex={-1}>
-            {state.demo && (
+            {(state.demo || state.settings.sampleData) && (
               <div className="demo-ribbon">
                 <span>
                   <span className="live-dot" />
                   Modo prueba · datos de ejemplo
                 </span>
-                <button onClick={() => setProfile(true)}>
+                {state.demo && <button onClick={() => setProfile(true)}>
                   Probar otro rol <ArrowSquareOut size={13} />
-                </button>
+                </button>}
               </div>
             )}
             {resource.error && (

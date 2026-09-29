@@ -161,7 +161,7 @@ export default function Finance() {
             <p className="finance-result-period">{month} · {untilToday}</p>
             <h2 id="finance-result-title">Resultado local</h2>
           </div>
-          <span className="finance-result-badges">{state.demo && <span className="finance-result-status is-demo"><Info size={15} weight="fill" aria-hidden="true" />Datos de demostración</span>}<span className="finance-result-status"><Clock size={15} weight="fill" aria-hidden="true" />{hasLocalFigures ? "Preliminar · sin conciliar" : "Sin registros"}</span></span>
+          <span className="finance-result-badges">{(state.demo || state.settings.sampleData) && <span className="finance-result-status is-demo"><Info size={15} weight="fill" aria-hidden="true" />Datos de demostración</span>}<span className="finance-result-status"><Clock size={15} weight="fill" aria-hidden="true" />{hasLocalFigures ? "Preliminar · sin conciliar" : "Sin registros"}</span></span>
         </div>
         <strong className="finance-result-value">{hasLocalFigures ? money(result) : "Sin datos"}</strong>
         {!hasLocalFigures && <p className="finance-empty-hint">Cargá ventas y gastos del local para calcular el resultado.</p>}

@@ -50,7 +50,7 @@ export async function getState(user: User, requested: string | undefined, view: 
       where: { account: "cash", date: { gt: previousClosure?.date || "0000-00-00", lte: today } },
       _sum: { amount: true },
     }))._sum.amount || 0);
-  const todaySales = view === "sales" ? ownerId
+  const todaySales = (view === "sales" || view === "dashboard") ? ownerId
     ? await db.$queryRaw<Array<{ total: bigint; count: bigint }>>`
         SELECT COALESCE(SUM(i.revenue), 0)::bigint AS total, COUNT(DISTINCT s.id)::bigint AS count
         FROM "SaleItem" i JOIN "Sale" s ON s.id = i."saleId"

@@ -16,7 +16,7 @@ export default function Today({ onSale }: { onSale: () => void }) {
   const tasks = [
     ...(lowStock ? [{ title: `${lowStock} ${lowStock === 1 ? "lote necesita" : "lotes necesitan"} atención`, description: "Revisá cantidades y mínimos antes de reponer.", path: "/app/inventario?filter=low", action: "Ver stock bajo" }] : []),
     ...(permits ? [{ title: `${permits} ${permits === 1 ? "permiso de socio" : "permisos de socios"} para revisar`, description: "Verificá el estado y la fecha en cada ficha.", path: "/app/socios?segment=permits", action: "Ver socios" }] : []),
-    ...(isManager && state.demo ? [{ title: "Validar datos antes de decidir", description: "Las cifras de demostración son ejemplos; revisá fuentes y límites.", path: "/app/decisiones", action: "Abrir decisiones" }] : []),
+    ...(isManager && (state.demo || state.settings.sampleData) ? [{ title: "Validar datos antes de decidir", description: "Las cifras de demostración son ejemplos; revisá fuentes y límites.", path: "/app/decisiones", action: "Abrir decisiones" }] : []),
   ].slice(0, 3);
   return <div className="today-page">
     <PageHeader
@@ -39,6 +39,6 @@ export default function Today({ onSale }: { onSale: () => void }) {
         <div><Package size={20} aria-hidden="true" /><span>Stock bajo</span><strong>{lowStock}</strong><small>{lowStock ? "Lotes por revisar" : "Sin alertas actuales"}</small></div>
       </div>
     </div>
-    <p className="today-source-note">Datos registrados en la app al {new Date(`${state.today}T12:00:00`).toLocaleDateString("es-AR", { day: "numeric", month: "long" })}. {state.demo ? "Modo prueba: cifras de ejemplo." : "Consultá las fuentes y límites de cada análisis antes de tomar decisiones."}</p>
+    <p className="today-source-note">Datos registrados en la app al {new Date(`${state.today}T12:00:00`).toLocaleDateString("es-AR", { day: "numeric", month: "long" })}. {state.demo || state.settings.sampleData ? "Modo prueba: cifras de ejemplo." : "Consultá las fuentes y límites de cada análisis antes de tomar decisiones."}</p>
   </div>;
 }

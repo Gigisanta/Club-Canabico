@@ -8,6 +8,7 @@ export interface User {
 }
 export interface Settings {
   clubName: string;
+  sampleData?: boolean;
   currency: string;
   timezone: string;
   pointsEvery: number;
