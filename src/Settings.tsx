@@ -10,10 +10,12 @@ import {
   Globe,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
-import { useClub, send, roleLabels } from "./lib";
+import { useClub, send, roleLabels, useResource } from "./lib";
 import { PageHeader, Panel, Form, Field, Avatar, Badge, Modal } from "./ui";
 import PublicChannelsSettings from "./PublicChannelsSettings";
 import "./site-admin.css";
+import "./team.css";
+type TeamSeat = { id: string; name: string; role: "owner" | "admin" | "responsible" | "cashier" | "viewer"; email: string | null; expiresAt: string | null; activatedAt: string | null };
 interface ImportResult {
   count: number;
   skipped: number;
@@ -32,6 +34,10 @@ export default function Settings() {
     setParams(next);
   };
   const [addUser, setAddUser] = useState(false);
+  const [selectedSeat, setSelectedSeat] = useState<TeamSeat | null>(null);
+  const [inviteLink, setInviteLink] = useState("");
+  const teamSeats = useResource<TeamSeat[]>(isManager && !state.demo ? "/team-seats" : null);
+  const pendingSeats = teamSeats.data?.filter((seat) => !seat.activatedAt) || [];
   const [kind, setKind] = useState("products");
   const [csv, setCsv] = useState("");
   const [result, setResult] = useState<ImportResult | null>(null);
@@ -92,12 +98,12 @@ export default function Settings() {
   return (
     <div className="presence-admin presence-settings-admin">
       <PageHeader
-        eyebrow={tab === "public" ? "PRESENCIA PÚBLICA" : "A LA MEDIDA DE TU CLUB"}
-        title={tab === "public" ? "Canales del club" : "Configuración"}
+        eyebrow={tab === "public" ? "PRESENCIA PÚBLICA" : tab === "team" ? "PERSONAS Y ACCESOS" : "A LA MEDIDA DE TU CLUB"}
+        title={tab === "public" ? "Canales del club" : tab === "team" ? "Equipo" : "Configuración"}
         description={
           tab === "public"
             ? "Elegí qué canales oficiales mostrar en la vista previa y cuáles mantener ocultos."
-            : "Reglas de fidelidad, equipo y migración de tus datos."
+            : tab === "team" ? "Cada persona entra con su correo y su propia contraseña." : "Reglas del club, equipo y datos."
         }
         className="presence-page-heading"
       />
@@ -293,19 +299,23 @@ export default function Settings() {
         <Panel
           title="Equipo del club"
           className="presence-settings-panel"
-          sub="Los permisos se validan en cada operación de la API."
+          sub={`${state.users.length} con acceso · ${pendingSeats.length} pendientes`}
           action={
-            user.role === "owner" && (
+            user.role === "owner" && !state.demo && (
               <button
                 className="button primary"
                 onClick={() => setAddUser(true)}
               >
                 <Plus />
-                Agregar usuario
+                Agregar persona
               </button>
             )
           }
         >
+          <div className="team-overview" role="group" aria-label="Estado de accesos"><div><strong>{state.users.length}</strong><span>Con acceso</span></div><div><strong>{pendingSeats.length}</strong><span>Pendientes</span></div></div>
+          {teamSeats.error && <p role="alert" className="form-error">No se pudo cargar el equipo: {teamSeats.error}</p>}
+          {pendingSeats.length > 0 && <section className="team-pending" aria-label="Accesos pendientes"><h3>Por activar</h3><div className="team-pending-grid">{pendingSeats.map((seat) => <article key={seat.id} className="team-seat"><div className="team-seat-head"><Avatar name={seat.name} /><div><strong>{seat.name}</strong><small>{roleLabels[seat.role]}</small></div></div><span className="team-seat-status">{seat.email ? seat.expiresAt && new Date(seat.expiresAt) > new Date() ? "Enlace preparado" : "Enlace vencido" : "Falta correo"}</span>{seat.email && <p className="team-seat-email">{seat.email}</p>}{user.role === "owner" && <button className="button" type="button" onClick={() => { setSelectedSeat(seat); setInviteLink(""); }}>{seat.email ? "Renovar enlace" : "Preparar acceso"}</button>}</article>)}</div></section>}
+          <h3 className="team-active-title">Cuentas activas</h3>
           <div className="table-scroll">
             <table>
               <thead>
@@ -482,35 +492,22 @@ export default function Settings() {
         </Panel>
       )}
       <Modal
-        title="Agregar miembro al equipo"
-        description="Compartí las credenciales de forma privada. La contraseña requiere al menos 12 caracteres."
+        title="Agregar persona"
+        description="Prepará su acceso. Podrás cargar el correo cuando lo tengas."
         open={addUser}
         onClose={() => setAddUser(false)}
       >
         <Form
           onCancel={() => setAddUser(false)}
           onSubmit={async (fd) => {
-            await send("/users", Object.fromEntries(fd));
-            toast.success("Usuario creado");
+            await send("/team-seats", Object.fromEntries(fd));
+            toast.success("Acceso pendiente creado");
             setAddUser(false);
-            await reload();
+            await teamSeats.reload();
           }}
         >
           <Field label="Nombre completo">
             <input name="name" required minLength={2} />
-          </Field>
-          <Field label="Email">
-            <input name="email" type="email" required />
-          </Field>
-          <Field label="Contraseña">
-            <input
-              name="password"
-              type="password"
-              minLength={12}
-              maxLength={72}
-              required
-              autoComplete="new-password"
-            />
           </Field>
           <Field label="Rol">
             <select name="role">
@@ -521,6 +518,15 @@ export default function Settings() {
             </select>
           </Field>
         </Form>
+      </Modal>
+      <Modal title={`Acceso de ${selectedSeat?.name || ""}`} description="El enlace dura 48 horas y permite definir una contraseña personal." open={selectedSeat !== null} onClose={() => { setSelectedSeat(null); setInviteLink(""); }}>
+        {selectedSeat && (inviteLink ? <div className="team-link-result"><p>Enlace preparado para {selectedSeat.email || "este correo"}. Compartilo de forma privada con esa persona.</p><Field label="Enlace de activación"><input value={inviteLink} readOnly onFocus={(event) => event.currentTarget.select()} /></Field><button className="button primary" type="button" onClick={() => void navigator.clipboard.writeText(inviteLink).then(() => toast.success("Enlace copiado")).catch(() => toast.error("Seleccioná y copiá el enlace"))}>Copiar enlace</button></div> : <Form submit="Preparar enlace" onCancel={() => setSelectedSeat(null)} onSubmit={async (fd) => {
+          const email = String(fd.get("email") || "").trim();
+          const result = await send<{ path: string }>(`/team-seats/${selectedSeat.id}/invite`, { email });
+          setSelectedSeat({ ...selectedSeat, email });
+          setInviteLink(`${window.location.origin}${result.path}`);
+          await teamSeats.reload();
+        }}><Field label="Correo de la persona"><input name="email" type="email" defaultValue={selectedSeat.email || ""} autoComplete="email" required /></Field></Form>)}
       </Modal>
     </div>
   );

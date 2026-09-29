@@ -404,7 +404,7 @@ export default function Inventory() {
     <div className="operation-page inventory-page">
       <PageHeader
         className="inventory-heading"
-        eyebrow="CADA LOTE, EN SU LUGAR"
+        eyebrow="Cada lote, en su lugar"
         title="Inventario"
         description="Cada lote, su stock y su responsable. Importes en pesos argentinos (ARS)."
         actions={

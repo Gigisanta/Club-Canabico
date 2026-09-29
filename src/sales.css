@@ -29,9 +29,9 @@
 .sales-page .sales-summary > div:first-child span,
 .sales-page .sales-summary > div:first-child small { color: var(--brand-cream); opacity: .84; }
 .sales-page .sales-summary > div:first-child strong { color: var(--brand-cream); }
-.sales-page .sales-summary > div > span { color: var(--muted); font-size: 11px; font-weight: 700; }
+.sales-page .sales-summary > div > span { color: var(--muted); font-size: 13px; font-weight: 700; }
 .sales-page .sales-summary strong { color: var(--text); font-size: clamp(22px, 2.2vw, 31px); font-weight: 700; letter-spacing: -.04em; line-height: 1.1; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.sales-page .sales-summary small { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.sales-page .sales-summary small { color: var(--muted); font-size: 13px; line-height: 1.4; }
 .sales-page .sales-summary .status-label { display: inline-flex; align-items: center; gap: 8px; color: var(--text); font-size: 21px; letter-spacing: -.025em; }
 .sales-page .sales-summary .live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--brand-olive-mid); }
 .sales-page .sales-summary > div:last-child { border-right: 1px solid var(--border); }
@@ -60,10 +60,10 @@
 .sales-checkout-content .sale-buyer { background: color-mix(in srgb, var(--brand-lime) 17%, var(--surface)); }
 .sales-checkout-content .sale-finish { background: color-mix(in srgb, var(--brand-lilac) 14%, var(--surface)); }
 .sales-checkout-content .sale-section-head { display: flex; align-items: center; gap: 12px; margin: 0 0 17px; }
-.sales-checkout-content .sale-step { display: grid; place-items: center; flex: none; width: 36px; height: 36px; border: 1px solid color-mix(in srgb, var(--brand-olive) 18%, transparent); border-radius: 50%; background: var(--brand-lime); color: var(--brand-olive); font-size: 11px; font-weight: 700; }
+.sales-checkout-content .sale-step { display: grid; place-items: center; flex: none; width: 36px; height: 36px; border: 1px solid color-mix(in srgb, var(--brand-olive) 18%, transparent); border-radius: 50%; background: var(--brand-lime); color: var(--brand-olive); font-size: 13px; font-weight: 700; }
 .sales-checkout-content .sale-section-head > div { min-width: 0; }
 .sales-checkout-content .sale-section-head h3 { margin: 0 0 3px; color: var(--text); font: 600 19px/1.15 Bricolage, sans-serif; letter-spacing: -.025em; }
-.sales-checkout-content .sale-section-head p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.sales-checkout-content .sale-section-head p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
 .sales-checkout-content .sale-section .field { min-width: 0; margin-bottom: 0; }
 .sales-checkout-content .sale-section .form-grid { align-items: start; }
 
@@ -78,16 +78,16 @@
 .sales-checkout-content .customer-picker-clear { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border: 0; border-radius: 8px; background: var(--surface-raised); color: var(--text); cursor: pointer; }
 .sales-checkout-content .customer-picker-clear:hover { background: var(--brand-lime); }
 .sales-checkout-content .customer-picker-results { position: absolute; z-index: 12; top: calc(100% + 5px); right: 0; left: 0; max-height: min(280px, 45dvh); overflow: auto; padding: 5px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); box-shadow: 0 17px 32px #3e402e25; }
-.sales-checkout-content .customer-picker-results > p { margin: 4px; padding: 11px; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.sales-checkout-content .customer-picker-results > p { margin: 4px; padding: 11px; color: var(--muted); font-size: 13px; line-height: 1.4; }
 .sales-checkout-content .customer-picker-results > button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 9px; border: 0; border-radius: 8px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .sales-checkout-content .customer-picker-results > button.is-active,
 .sales-checkout-content .customer-picker-results > button:hover { background: color-mix(in srgb, var(--brand-lime) 40%, var(--surface)); }
 .sales-checkout-content .customer-picker-results > button > span:nth-child(2) { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
-.sales-checkout-content .customer-picker-results strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.sales-checkout-content .customer-picker-results small { color: var(--muted); font-size: 10px; }
-.sales-checkout-content .customer-picker-avatar { display: grid; place-items: center; flex: none; width: 34px; height: 34px; border-radius: 50%; background: var(--brand-lime); color: var(--brand-olive); font-size: 12px; font-weight: 700; }
+.sales-checkout-content .customer-picker-results strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.sales-checkout-content .customer-picker-results small { color: var(--muted); font-size: 13px; }
+.sales-checkout-content .customer-picker-avatar { display: grid; place-items: center; flex: none; width: 34px; height: 34px; border-radius: 50%; background: var(--brand-lime); color: var(--brand-olive); font-size: 13px; font-weight: 700; }
 .sales-checkout-content .customer-picker-results svg { flex: none; color: var(--brand-olive-mid); }
-.sales-checkout-content .customer-picker-confirmation { display: block; margin-top: 6px; color: var(--brand-olive-mid); font-size: 10px; line-height: 1.4; }
+.sales-checkout-content .customer-picker-confirmation { display: block; margin-top: 6px; color: var(--brand-olive-mid); font-size: 13px; line-height: 1.4; }
 
 .sales-checkout-content .sale-products-empty { margin: 0 0 12px; }
 .sales-checkout-content .sale-lines { min-width: 0; margin-bottom: 13px; }
@@ -95,7 +95,7 @@
 .sales-checkout-content .sale-line:first-child { padding-top: 0; }
 .sales-checkout-content .sale-line:last-child { border-bottom: 0; }
 .sales-checkout-content .sale-line .remove-line { width: 42px; height: 42px; margin-top: 26px; }
-.sales-checkout-content .sale-line-price { grid-column: 2; color: var(--brand-olive); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; }
+.sales-checkout-content .sale-line-price { grid-column: 2; color: var(--brand-olive); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; }
 .sales-checkout-content .sale-quantity { display: flex; align-items: center; min-width: 0; height: 44px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
 .sales-checkout-content .sale-quantity:focus-within { outline: 3px solid var(--brand-orange); outline-offset: 2px; }
 .sales-checkout-content .sale-quantity button { display: grid; place-items: center; flex: none; width: 39px; height: 42px; padding: 0; border: 0; background: transparent; color: var(--text); cursor: pointer; }
@@ -109,7 +109,7 @@
 .sales-checkout-content .sale-checkout.sale-checkout { grid-template-columns: minmax(0, 1fr) minmax(210px, 1fr); gap: 18px; margin-top: 0; }
 .sales-checkout-content .sale-checkout > div:first-child { min-width: 0; }
 .sales-checkout-content .sale-totals { padding: 15px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-.sales-checkout-content .sale-totals > div { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 9px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.sales-checkout-content .sale-totals > div { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 9px; font-size: 13px; font-variant-numeric: tabular-nums; }
 .sales-checkout-content .sale-totals .total { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--border); }
 .sales-checkout-content .sale-totals .total strong:last-child { color: var(--brand-olive); font-size: 24px; letter-spacing: -.04em; }
 .sales-checkout-content > form > .form-error { margin-top: 10px; }
@@ -119,31 +119,31 @@
 .sales-ticket-content .ticket-heading { margin: 0 0 18px; padding: 22px 19px; border-radius: 14px; background: color-mix(in srgb, var(--brand-lime) 34%, var(--surface)); }
 .sales-ticket-content .ticket-logo { display: block; width: min(150px, 48%); height: auto; margin: 0 0 14px; }
 .sales-ticket-content .ticket-mark { display: inline-grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: var(--brand-lime); color: var(--brand-olive); }
-.sales-ticket-content .ticket-kicker { display: block; margin-top: 10px; color: var(--brand-olive-mid); font-size: 9px; font-weight: 700; letter-spacing: .14em; }
+.sales-ticket-content .ticket-kicker { display: block; margin-top: 10px; color: var(--brand-olive-mid); font-size: 13px; font-weight: 700; letter-spacing: .14em; }
 .sales-ticket-content .ticket-heading h2 { margin: 7px 0 5px; color: var(--text); font: 600 25px/1.15 Bricolage, sans-serif; letter-spacing: -.025em; }
-.sales-ticket-content .ticket-heading p { margin: 0; color: var(--muted); font-size: 12px; }
+.sales-ticket-content .ticket-heading p { margin: 0; color: var(--muted); font-size: 13px; }
 .sales-ticket-content .ticket-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; padding: 0 3px 19px; }
 .sales-ticket-content .ticket-meta > div { min-width: 0; }
 .sales-ticket-content .ticket-meta span,
-.sales-ticket-content .ticket-payment span { display: block; margin-bottom: 4px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
-.sales-ticket-content .ticket-meta strong { display: block; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
-.sales-ticket-content .ticket-items-title { display: flex; justify-content: space-between; gap: 10px; padding: 10px 3px; border-top: 1px solid var(--border); color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
-.sales-ticket-content .ticket-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 11px 3px; font-size: 12px; }
+.sales-ticket-content .ticket-payment span { display: block; margin-bottom: 4px; color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.sales-ticket-content .ticket-meta strong { display: block; font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+.sales-ticket-content .ticket-items-title { display: flex; justify-content: space-between; gap: 10px; padding: 10px 3px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
+.sales-ticket-content .ticket-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 11px 3px; font-size: 13px; }
 .sales-ticket-content .ticket-line > span { min-width: 0; }
 .sales-ticket-content .ticket-line > span > strong,
 .sales-ticket-content .ticket-line > strong { color: var(--text); overflow-wrap: anywhere; }
 .sales-ticket-content .ticket-line > strong { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .sales-ticket-content .ticket-line small { display: block; margin-top: 3px; color: var(--muted); }
 .sales-ticket-content .ticket-breakdown { display: grid; gap: 8px; padding: 14px 3px 2px; border-top: 1px solid var(--border); }
-.sales-ticket-content .ticket-breakdown > div { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; }
+.sales-ticket-content .ticket-breakdown > div { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 13px; }
 .sales-ticket-content .ticket-breakdown strong { color: var(--text); font-variant-numeric: tabular-nums; }
 .sales-ticket-content .ticket-total { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 13px 0 0; padding: 16px 3px; border-top: 2px solid var(--brand-olive); font-size: 17px; }
 .sales-ticket-content .ticket-total strong { font-size: 27px; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
 .sales-ticket-content .ticket-payment { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 12px 3px; border-top: 1px solid var(--border); }
 .sales-ticket-content .ticket-payment span { margin: 0; }
-.sales-ticket-content .ticket-payment strong { font-size: 12px; }
-.sales-ticket-content .ticket-points { margin: 5px 3px 0; color: var(--brand-olive-mid); font-size: 11px; font-weight: 700; }
-.sales-ticket-content .ticket-disclaimer { margin: 17px 0 14px; padding: 12px; border-radius: 9px; background: var(--surface-raised); color: var(--muted); font-size: 10px; line-height: 1.55; }
+.sales-ticket-content .ticket-payment strong { font-size: 13px; }
+.sales-ticket-content .ticket-points { margin: 5px 3px 0; color: var(--brand-olive-mid); font-size: 13px; font-weight: 700; }
+.sales-ticket-content .ticket-disclaimer { margin: 17px 0 14px; padding: 12px; border-radius: 9px; background: var(--surface-raised); color: var(--muted); font-size: 13px; line-height: 1.55; }
 .sales-ticket-content .ticket-print { justify-content: center; min-height: 44px; }
 
 @media (max-width: 900px) {
@@ -154,7 +154,7 @@
   .sales-page .sales-history-table tbody { display: grid; gap: 10px; padding: 0 12px 14px; }
   .sales-page .sales-history-table tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
   .sales-page .sales-history-table td { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; min-width: 0; padding: 10px; border: 0; border-top: 1px solid var(--border); text-align: left; overflow-wrap: anywhere; }
-  .sales-page .sales-history-table td::before { content: attr(data-label); color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+  .sales-page .sales-history-table td::before { content: attr(data-label); color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
   .sales-page .sales-history-table td:first-child,
   .sales-page .sales-history-table td:nth-child(3),
   .sales-page .sales-history-table td:last-child { grid-column: 1 / -1; }

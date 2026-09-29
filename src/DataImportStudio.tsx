@@ -893,7 +893,7 @@ export default function DataImportStudio() {
     <main className="data-import-studio">
       <header className="data-import-heading">
         <div>
-          <p className="data-import-eyebrow">HISTORIAL Y TRAZABILIDAD</p>
+          <p className="data-import-eyebrow">Historial y trazabilidad</p>
           <h1>Importación de datos</h1>
           <p className="data-import-intro">Revisá cada archivo y cada fila antes de incorporar registros históricos.</p>
         </div>
@@ -1219,7 +1219,7 @@ export default function DataImportStudio() {
           <section className="data-import-attestation" aria-labelledby="data-import-attestation-title">
             <div className="data-import-attestation-heading">
               <div>
-                <span className="data-import-attestation-kicker">ATESTACIÓN HUMANA · LOTE IMPORTADO</span>
+                <span className="data-import-attestation-kicker">Atestación humana · lote importado</span>
                 <h3 id="data-import-attestation-title">Registrar conciliación</h3>
                 <p>Cotejá el reporte original y anotá su cantidad de registros y total. Otra persona debe revisar el lote; la app verifica ambos controles antes de aceptar la conciliación.</p>
               </div>

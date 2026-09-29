@@ -49,7 +49,7 @@
   }
   .chart-foot > span {
     gap: 4px !important;
-    font-size: 9px !important;
+    font-size: 13px !important;
   }
   .chart-summary.chart-summary {
     gap: 10px;
@@ -79,7 +79,7 @@
     width: calc(100% - 184px);
   }
   .sidebar nav > a {
-    font-size: 12px !important;
+    font-size: 13px !important;
     gap: 8px !important;
     padding-left: 9px !important;
     padding-right: 9px !important;
@@ -129,7 +129,7 @@
   }
   .metric-bottom.metric-bottom {
     white-space: normal;
-    font-size: 10px;
+    font-size: 13px;
   }
   .spark.spark {
     display: none;
@@ -138,7 +138,7 @@
     font-size: 22px !important;
   }
   .metric-top.metric-top {
-    font-size: 11px;
+    font-size: 13px;
   }
   .metric-icon.metric-icon {
     width: 22px;
@@ -225,7 +225,7 @@
   }
   .breadcrumb.breadcrumb {
     gap: 8px;
-    font-size: 11px;
+    font-size: 13px;
   }
   .breadcrumb > span:first-of-type {
     display: none;
@@ -238,7 +238,7 @@
   }
   .demo-ribbon.demo-ribbon {
     margin-bottom: 22px;
-    font-size: 10px;
+    font-size: 13px;
   }
   .demo-extra.demo-extra {
     display: none;
@@ -259,7 +259,7 @@
     flex: 1;
   }
   .eyebrow.eyebrow {
-    font-size: 9px;
+    font-size: 13px;
   }
   .metrics-grid.metrics-grid {
     grid-template-columns: 1fr 1fr;
@@ -276,10 +276,10 @@
     font-size: 25px !important;
   }
   .metric-top.metric-top {
-    font-size: 12px;
+    font-size: 13px;
   }
   .metric-bottom.metric-bottom {
-    font-size: 10px;
+    font-size: 13px;
   }
   .dashboard-charts.dashboard-charts,
   .dashboard-bottom.dashboard-bottom {
@@ -290,7 +290,7 @@
     padding: 18px 16px 0;
   }
   .panel-head h2 {
-    font-size: 12px;
+    font-size: 13px;
   }
   .chart-summary.chart-summary {
     padding: 0 16px;
@@ -299,7 +299,7 @@
     font-size: 23px !important;
   }
   .chart-legend.chart-legend {
-    font-size: 9px;
+    font-size: 13px;
   }
   .main-chart.main-chart {
     height: 210px;
@@ -311,10 +311,10 @@
     flex-wrap: wrap;
   }
   .chart-foot > span {
-    font-size: 10px !important;
+    font-size: 13px !important;
   }
   .chart-foot strong {
-    font-size: 11px !important;
+    font-size: 13px !important;
   }
   .attention-column.attention-column {
     display: flex;
@@ -326,7 +326,7 @@
   .donut-legend > div {
     display: grid !important;
     grid-template-columns: 1fr 45px 80px !important;
-    font-size: 12px;
+    font-size: 13px;
   }
   .dashboard-toolbar .filter-group {
     gap: 8px;
@@ -335,7 +335,7 @@
     flex: 1.5;
   }
   .select-wrap select {
-    font-size: 10px !important;
+    font-size: 13px !important;
     padding-right: 12px !important;
   }
   .table-toolbar.table-toolbar {
@@ -367,7 +367,7 @@
     min-width: 460px;
   }
   .app-footer.app-footer {
-    font-size: 9px;
+    font-size: 13px;
     gap: 8px;
   }
   .owner-rank-name.owner-rank-name {
@@ -382,7 +382,7 @@
     padding: 16px;
   }
   .mini-stats > span {
-    font-size: 12px;
+    font-size: 13px;
   }
   .modal.modal {
     padding: 21px 19px;
@@ -400,17 +400,17 @@
   }
   .sale-line .field input,
   .sale-line .field select {
-    font-size: 11px;
+    font-size: 13px;
     padding: 9px 7px;
   }
   .sale-line .field > label {
-    font-size: 12px;
+    font-size: 13px;
   }
   .sale-checkout.sale-checkout {
     gap: 20px;
   }
   .sale-checkout .field > label {
-    font-size: 12px;
+    font-size: 13px;
   }
   .customer-profile.customer-profile {
     gap: 12px;
@@ -420,7 +420,7 @@
     font-size: 18px !important;
   }
   .customer-profile p {
-    font-size: 12px;
+    font-size: 13px;
   }
   .detail-stats.detail-stats {
     grid-template-columns: 1fr 1fr;
@@ -484,7 +484,7 @@
     overflow: auto;
   }
   .settings-tabs button {
-    font-size: 11px !important;
+    font-size: 13px !important;
     padding: 12px 10px !important;
     white-space: nowrap;
     gap: 5px !important;
@@ -499,7 +499,7 @@
   }
   .import-steps.import-steps {
     gap: 13px;
-    font-size: 11px;
+    font-size: 13px;
     flex-wrap: wrap;
   }
   .import-steps i {

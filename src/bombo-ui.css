@@ -1,0 +1,263 @@
+/*
+ * Bombo operational UI: "libro de caja".
+ * Cream paper, olive ink, Bricolage. Hierarchy comes from type, rules and rows,
+ * not from stacked cards. One dark olive band per screen at most.
+ * Loaded last from main.tsx and scoped with .app-shell so it wins over legacy
+ * per-module sheets (which load lazily, after this file) without !important.
+ */
+:root {
+  --bo-paper: #fffaf0;
+  --bo-paper-soft: #faf4e4;
+  --bo-rule: #ddd5bf;
+  --bo-rule-strong: #b9b196;
+  --bo-ink: var(--brand-olive);
+  --bo-ink-soft: #55583f;
+  --bo-ok: #3f6a1f;
+  --bo-ok-bg: #e4f0c9;
+  --bo-warn: #8a4207;
+  --bo-warn-bg: #fbe4c8;
+  --bo-info: #4a4390;
+  --bo-info-bg: #e8e5ff;
+  --bo-radius: 12px;
+  --bo-gutter: clamp(16px, 3vw, 40px);
+  --bo-sidebar: 248px;
+}
+
+/* ---------- Shell ---------- */
+.app-shell { background: var(--canvas); }
+@media (min-width: 761px) {
+  .app-shell .workspace { width: calc(100% - var(--bo-sidebar)); margin-left: var(--bo-sidebar); }
+  .app-shell .sidebar.sidebar { width: var(--bo-sidebar); }
+}
+.app-shell .sidebar.sidebar { padding: 24px 14px 0; }
+.app-shell .sidebar > .brand { width: 150px; margin: 0 0 22px 8px; padding: 0; }
+.app-shell .club-switch { min-height: 56px; padding: 8px 10px; margin-bottom: 20px; border-radius: 12px; }
+.app-shell .club-switch strong { font-size: 13px; }
+.app-shell .club-switch small { font-size: 12px; }
+.app-shell .hub-link { min-height: 44px; font-size: 14px; }
+.app-shell .hub-group.is-current .hub-heading { background: #ffffff14; box-shadow: inset 3px 0 0 var(--brand-lime); border-radius: 4px 11px 11px 4px; }
+.app-shell .hub-items a { min-height: 40px; display: flex; align-items: center; font-size: 13.5px; }
+.app-shell .hub-items a.is-selected { background: var(--brand-cream); color: var(--brand-olive); }
+.app-shell .club-health { padding: 11px 12px; font-size: 13px; }
+.app-shell .club-health strong { font-size: 13px; }
+.app-shell .club-health small, .app-shell .sidebar-user small { font-size: 12px; }
+.app-shell .sidebar-user strong { font-size: 13px; }
+
+.app-shell .topbar { height: 64px; padding: 0 var(--bo-gutter); background: color-mix(in srgb, var(--brand-cream) 92%, transparent); border-bottom: 1px solid var(--bo-rule); }
+.app-shell .breadcrumb { gap: 8px; font-size: 14px; }
+.app-shell .breadcrumb strong { color: var(--bo-ink); font-weight: 650; }
+.app-shell .top-actions { gap: 10px; }
+.app-shell .topbar-date { font-size: 13px; padding-right: 4px; }
+.app-shell .global-search { min-height: 40px; padding: 6px 12px; border: 1px solid var(--bo-rule-strong); border-radius: 10px; background: var(--bo-paper); font-size: 14px; }
+.app-shell .global-search:hover { border-color: var(--brand-olive-mid); }
+.app-shell .global-search kbd { font-size: 12px; margin-left: 14px; border-radius: 6px; }
+.app-shell .notification-button i { background: var(--brand-orange); width: 8px; height: 8px; border-color: var(--brand-cream); }
+.app-shell .main-content { max-width: 1440px; padding: 28px var(--bo-gutter) 0; }
+.app-shell .main-content:focus { outline: none; }
+
+/* ---------- Notices: one pattern for demo / scope / errors ---------- */
+.app-shell .demo-ribbon, .app-shell .scope-banner, .app-shell .note-box, .app-shell .site-admin-note {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  margin: 0 0 20px; padding: 11px 14px; border: 1px solid var(--bo-rule); border-left-width: 4px; border-radius: 10px;
+  font-size: 14px; line-height: 1.45;
+}
+.app-shell .demo-ribbon, .app-shell .note-box, .app-shell .site-admin-note { background: var(--bo-info-bg); border-color: #cfc9f5; border-left-color: var(--bo-info); color: #37316f; }
+.app-shell .demo-ribbon button { color: #37316f; font-size: 14px; text-decoration: underline; text-underline-offset: 3px; min-height: 32px; }
+.app-shell .scope-banner { background: var(--bo-warn-bg); border-color: #efc99f; border-left-color: var(--brand-orange); color: #5e3210; }
+.app-shell .scope-banner button { color: #5e3210; font-size: 14px; text-decoration: underline; text-underline-offset: 3px; min-height: 32px; }
+.app-shell .form-error, .modal .form-error { border-radius: 10px; font-size: 14px; }
+
+/* ---------- Page heading ---------- */
+.app-shell .page-heading { align-items: flex-end; gap: 16px 32px; margin-bottom: 24px; padding-bottom: 20px; border-bottom: 1px solid var(--bo-rule); flex-wrap: wrap; }
+.app-shell .page-heading > div:first-child { flex: 1 1 420px; max-width: 760px; }
+.app-shell .page-heading h1 { margin: 0 0 8px; font-size: clamp(28px, 3vw, 40px) !important; line-height: 1.08; letter-spacing: -.04em; }
+.app-shell .page-heading p:not(.eyebrow) { max-width: 64ch; margin: 0; font-size: 15px; line-height: 1.5; color: var(--bo-ink-soft); }
+/* Eyebrows and kickers are quiet sentence-case context, not tracked capitals. */
+.app-shell .eyebrow { display: block; margin: 0 0 8px; color: #565d1c; font-size: 13px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+.app-shell .heading-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+/* ---------- Surfaces: flat, ruled, few ---------- */
+.app-shell .panel, .app-shell .mini-stats, .app-shell .sales-summary { border: 1px solid var(--bo-rule); border-radius: var(--bo-radius); background: var(--bo-paper); box-shadow: none; }
+/* .metric keeps its themed backgrounds (olive / lime / lilac variants set by legacy sheets); only flatten the shadow. */
+.app-shell .metric { border-radius: var(--bo-radius); box-shadow: none; }
+.app-shell .metric:not(:first-child, :nth-child(2), :nth-child(3)) { border-color: var(--bo-rule); }
+.app-shell .panel-head { padding: 18px 20px 0; margin-bottom: 14px; }
+.app-shell .panel-head h2 { font-size: clamp(18px, 1.6vw, 21px) !important; line-height: 1.2; letter-spacing: -.025em; }
+.app-shell .panel-head p { max-width: 68ch; margin-top: 5px; font-size: 14px; line-height: 1.5; color: var(--muted); }
+.app-shell .metric { padding: 16px 18px; }
+.app-shell .metric:first-child :is(.metric-top, .metric-bottom, .metric-top > span:not(.metric-icon), .metric-bottom > span:not(.trend)) { color: #eee8d2; }
+.app-shell .metric:first-child .trend { background: #fbe4c8; color: var(--bo-warn); }
+.app-shell .metric-top, .app-shell .metric-bottom { font-size: 13px; }
+.app-shell .metric > strong { font-size: clamp(22px, 2.1vw, 28px); letter-spacing: -.03em; }
+.app-shell .metric-icon { border-radius: 8px; }
+
+/* ---------- Tables: readable, sentence-case, tabular ---------- */
+.app-shell table { font-size: 14px; }
+.app-shell th { padding: 11px 16px; border-bottom: 1px solid var(--bo-rule-strong); background: var(--bo-paper-soft); color: var(--bo-ink-soft); font-size: 13px; font-weight: 650; letter-spacing: 0; text-transform: none; white-space: nowrap; }
+.app-shell td { padding: 12px 16px; font-size: 14px; line-height: 1.4; vertical-align: middle; }
+.app-shell th.numeric, .app-shell td.numeric { text-align: right; font-variant-numeric: tabular-nums lining-nums; }
+.app-shell tbody tr:hover td { background: #f6f0de; }
+.app-shell tfoot th { border-top: 1px solid var(--bo-rule-strong); border-bottom: 0; color: var(--bo-ink); background: var(--bo-paper); }
+.app-shell .table-scroll { -webkit-overflow-scrolling: touch; }
+.app-shell .missing-value { color: var(--bo-warn); font-weight: 650; }
+
+/* ---------- Controls ---------- */
+:is(.app-shell, .modal) .button { min-height: 44px; padding: 10px 16px; border-radius: 10px; border-color: var(--bo-rule-strong); background: var(--bo-paper); font-size: 14px; font-weight: 650; box-shadow: none; gap: 8px; }
+:is(.app-shell, .modal) .button:hover { background: #efeacb; border-color: var(--brand-olive-mid); }
+:is(.app-shell, .modal) .button.primary { background: var(--brand-olive); border-color: var(--brand-olive); color: #fffaf0; }
+:is(.app-shell, .modal) .button.primary:hover { background: #2f3122; border-color: #2f3122; }
+:is(.app-shell, .modal) .button:disabled { opacity: .55; cursor: not-allowed; }
+:is(.app-shell, .modal) .icon-button { width: 44px; height: 44px; border-radius: 10px; }
+:is(.app-shell, .modal) :is(input:not([type=checkbox], [type=radio], [type=hidden], [type=file], [type=range], [type=color], [type=submit], [type=button]), select, textarea):not(.search-field *, .command-search *) { min-height: 44px; border: 1px solid var(--bo-rule-strong); border-radius: 10px; background: #fffdf6; font-size: 15px; }
+:is(.app-shell, .modal) textarea:not(.search-field *) { min-height: 88px; }
+:is(.app-shell, .modal) :is(input[type=checkbox], input[type=radio]) { width: 20px; height: 20px; min-height: 0; accent-color: var(--brand-olive); }
+:is(.app-shell, .modal) .field { gap: 6px; }
+:is(.app-shell, .modal) .field > label { font-size: 14px; font-weight: 650; }
+:is(.app-shell, .modal) .field small { font-size: 13px; color: var(--muted); }
+.app-shell :is(button, a, input, select, textarea, summary, [tabindex]):focus-visible, .modal :is(button, a, input, select, textarea):focus-visible { outline: 3px solid var(--brand-orange); outline-offset: 2px; }
+.app-shell .sidebar :is(button, a):focus-visible { outline-color: var(--brand-lime); }
+:is(.app-shell, .modal) .form-actions { gap: 8px; }
+
+/* ---------- Badges & states: label + shape, never color alone ---------- */
+:is(.app-shell, .modal) .badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 99px; font-size: 12.5px; font-weight: 650; }
+:is(.app-shell, .modal) .badge.green { background: var(--bo-ok-bg); color: var(--bo-ok); }
+:is(.app-shell, .modal) .badge.amber, .app-shell .badge.gold { background: var(--bo-warn-bg); color: var(--bo-warn); }
+:is(.app-shell, .modal) .badge.blue { background: var(--bo-info-bg); color: var(--bo-info); }
+:is(.app-shell, .modal) .empty { display: grid; justify-items: start; gap: 4px; padding: 28px 22px; margin: 4px 16px 16px; border: 1px dashed var(--bo-rule-strong); border-radius: 10px; background: transparent; text-align: left; }
+:is(.app-shell, .modal) .empty svg { color: var(--brand-olive-mid); width: 26px; height: 26px; }
+:is(.app-shell, .modal) .empty h3 { margin: 6px 0 0; font-size: 17px; letter-spacing: -.02em; }
+:is(.app-shell, .modal) .empty p { max-width: 56ch; margin: 0; font-size: 14px; }
+:is(.app-shell, .modal) .page-loading, .app-shell .table-note { font-size: 14px; }
+
+/* ---------- One tab pattern for every in-page view switch ---------- */
+.app-shell :is(.finance-nav, .dc-view-nav, .di-view-nav, .data-import-stage-nav, .panorama-areas, .da-tabs) {
+  display: flex; flex-wrap: nowrap; gap: 4px; margin: 0 0 20px; overflow-x: auto; border-bottom: 1px solid var(--bo-rule); scrollbar-width: none;
+}
+.app-shell :is(.finance-nav, .dc-view-nav, .di-view-nav, .data-import-stage-nav, .panorama-areas, .da-tabs)::-webkit-scrollbar { display: none; }
+.app-shell :is(.finance-nav, .dc-view-nav, .di-view-nav, .data-import-stage-nav, .panorama-areas, .da-tabs) button {
+  flex: none; min-width: 0; min-height: 44px; padding: 8px 14px; margin-bottom: -1px; border: 0; border-bottom: 3px solid transparent; border-radius: 0;
+  background: transparent; color: var(--bo-ink-soft); font-size: 14.5px; font-weight: 650; white-space: nowrap;
+}
+.app-shell :is(.finance-nav, .dc-view-nav, .di-view-nav, .data-import-stage-nav, .panorama-areas, .da-tabs) button:hover:not(:disabled) { color: var(--bo-ink); background: #f0e9d2; }
+.app-shell :is(.finance-nav, .dc-view-nav, .di-view-nav, .data-import-stage-nav, .panorama-areas, .da-tabs) button:is(.active, [aria-pressed="true"], [aria-selected="true"]) { border-color: transparent transparent var(--brand-olive); border-bottom-color: var(--brand-orange); background: transparent; color: var(--bo-ink); }
+.app-shell :is(.finance-nav, .dc-view-nav, .di-view-nav, .data-import-stage-nav) button.active { border-bottom-color: var(--brand-orange); }
+
+/* Progressive disclosure blocks share one look. */
+.app-shell :is(.operation-secondary, .dc-evidence-details, .di-overview-details, .di-filter-details, .da-evidence, .finance-detail) { border: 1px solid var(--bo-rule); border-radius: var(--bo-radius); background: var(--bo-paper); }
+.app-shell :is(.operation-secondary, .dc-evidence-details, .di-overview-details, .di-filter-details, .da-evidence) > summary { min-height: 48px; font-size: 15px; }
+.app-shell details > summary { cursor: pointer; }
+
+/* ---------- Today ---------- */
+.app-shell .today-page { max-width: 1180px; }
+.app-shell .today-layout { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(280px, 1fr); gap: 32px; align-items: start; }
+.app-shell .today-tasks { padding: 0; border: 0; border-radius: 0; background: transparent; }
+.app-shell .today-tasks li { padding: 16px 0; }
+.app-shell .today-tasks li:first-child { border-top: 1px solid var(--bo-rule-strong); }
+.app-shell .today-tasks li a { min-height: 44px; }
+.app-shell .today-figures { grid-template-columns: 1fr; gap: 0; margin: 0; border: 1px solid var(--bo-rule); border-radius: var(--bo-radius); background: var(--bo-paper); }
+.app-shell .today-figures > div { display: grid; grid-template-columns: auto 1fr; column-gap: 12px; row-gap: 2px; padding: 16px 18px; border: 0; border-radius: 0; background: transparent; }
+.app-shell .today-figures > div + div { border-top: 1px solid var(--bo-rule); }
+.app-shell .today-figures svg { grid-row: span 3; margin: 2px 0 0; }
+.app-shell .today-figures strong { font-size: clamp(24px, 2.4vw, 30px); }
+.app-shell .today-jump { display: grid; gap: 0; margin: 24px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--bo-rule-strong); }
+.app-shell .today-jump a { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 8px 2px; border-bottom: 1px solid var(--bo-rule); color: var(--bo-ink); font-size: 15px; font-weight: 650; text-decoration: none; }
+.app-shell .today-jump a small { display: block; color: var(--muted); font-size: 13px; font-weight: 450; }
+.app-shell .today-jump a:hover { background: #f0e9d2; }
+.app-shell .today-jump svg { color: var(--brand-olive-mid); flex: none; }
+
+/* ---------- Footer ---------- */
+.app-shell .app-footer { margin-top: 40px; padding: 18px 0 28px; border-top: 1px solid var(--bo-rule); color: var(--muted); font-size: 13px; }
+
+/* ---------- Tablet ---------- */
+@media (max-width: 1100px) {
+  .app-shell .topbar-date, .app-shell .top-divider { display: none; }
+  .app-shell .today-layout { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .app-shell .today-figures { order: -1; }
+}
+@media (min-width: 761px) and (max-width: 1024px) {
+  :root { --bo-sidebar: 224px; }
+  .app-shell .global-search span { display: none; }
+  .app-shell .global-search kbd { display: none; }
+}
+
+/* ---------- Mobile ---------- */
+@media (max-width: 760px) {
+  .app-shell .topbar { height: 56px; }
+  .app-shell .main-content { padding-top: 18px; padding-bottom: 92px; }
+  .app-shell .global-search span, .app-shell .global-search kbd { display: none; }
+  .app-shell .global-search { width: 44px; height: 44px; padding: 0; justify-content: center; }
+  .app-shell .page-heading { margin-bottom: 18px; padding-bottom: 16px; }
+  .app-shell .page-heading > div:first-child { flex-basis: 100%; }
+  .app-shell .heading-actions { width: 100%; }
+  .app-shell .heading-actions > .button, .app-shell .heading-actions > a { flex: 1 1 auto; justify-content: center; }
+  .app-shell .empty { margin-inline: 12px; }
+  .app-shell .mobile-tabbar { border-top: 1px solid #ffffff2b; padding-bottom: env(safe-area-inset-bottom); }
+  .app-shell .mobile-tabbar :is(a, button) { min-height: 56px; font-size: 12px; font-weight: 650; }
+}
+@media (max-width: 400px) {
+  .app-shell .mobile-tabbar :is(a, button) { font-size: 11.5px; }
+}
+
+/* ---------- Motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .app-shell *, .app-shell *::before, .app-shell *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}
+
+/* ---------- Corrections for legacy module sheets ---------- */
+.app-shell .search-field { min-height: 44px; height: auto; border: 1px solid var(--bo-rule-strong); border-radius: 10px; background: #fffdf6; }
+.app-shell .search-field input, .modal .command-search input { min-height: 0; border: 0; border-radius: 0; background: transparent; font-size: 15px; outline: 0; box-shadow: none; }
+.app-shell .search-field input:focus-visible { outline: 0; }
+.app-shell .search-field:focus-within { outline: 3px solid var(--brand-orange); outline-offset: 2px; border-color: var(--brand-olive-mid); }
+.app-shell .operation-page th, .app-shell .operation-page td { font-size: 14px; }
+.app-shell .operation-page th { padding: 11px 14px; letter-spacing: 0; text-transform: none; color: var(--bo-ink-soft); }
+.app-shell .empty p { text-align: left; margin: 0; }
+
+/* ---------- Contrast fixes found in the audit ---------- */
+.app-shell .breadcrumb-slash { color: var(--muted); }
+.app-shell .topbar .avatar { color: var(--brand-olive) !important; }
+.app-shell .sidebar .avatar { color: var(--brand-cream) !important; }
+.app-shell .global-search kbd { color: var(--bo-ink-soft); }
+.app-shell .segmented button:not(.active) { color: var(--bo-ink-soft); }
+
+/* Kickers used by module sheets share the eyebrow treatment. */
+.app-shell :is(.dc-section-kicker, .da-kicker, .di-eyebrow, .presence-kicker, .presence-field-caption, .dc-kind) { color: #565d1c; font-size: 13.5px; font-weight: 650; letter-spacing: 0; text-transform: none; }
+.app-shell .dc-kind { color: var(--bo-ink-soft); }
+.app-shell .data-import-intro { color: var(--bo-ink-soft); }
+.app-shell .badge.gray, .app-shell .badge.silver, .app-shell .badge.bronze { color: #4d503a; }
+.app-shell .main-content .avatar { color: var(--brand-olive) !important; }
+.app-shell :is(.da-view-nav, .da-tabs, .dc-view-nav) button:not(.active) { color: var(--bo-ink-soft); }
+.app-shell .da-tabs { width: 100%; margin: 20px 0 16px; padding: 0; border: 0; border-bottom: 1px solid var(--bo-rule); border-radius: 0; background: transparent; }
+.app-shell .da-tabs button[aria-selected="true"] { box-shadow: none; color: var(--bo-ink); }
+.app-shell .da-tabs button { flex: none; }
+
+/* The persistent sidebar leaves ~500px of content at 768px: keep dense form grids in one column until there is room. */
+@media (max-width: 1240px) {
+  .app-shell .di-content-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Decision analysis: module breakpoints ignore the persistent sidebar, so reflow on available width instead. */
+@media (max-width: 1240px) {
+  .app-shell .da-profitability-grid, .app-shell .da-source-state { grid-template-columns: minmax(0, 1fr); }
+  .app-shell .da-source-state dl { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .app-shell :is(.da-metric-grid, .da-metric-grid--four, .da-field-grid, .da-field-grid--three, .da-assumptions, .da-cash-availability) { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  .app-shell .da-line-editor, .app-shell .da-line-editor--freebie { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+  .app-shell .da-section-heading { flex-wrap: wrap; }
+}
+.app-shell .decision-analysis dt { color: var(--bo-ink-soft); }
+.app-shell .main-content :is(.dc-section-kicker, .da-kicker, .di-eyebrow, .presence-kicker, .presence-field-caption, .dc-kind) { color: #565d1c; font-size: 13.5px; font-weight: 650; letter-spacing: 0; text-transform: none; }
+.app-shell .main-content .dc-kind { color: var(--bo-ink-soft); }
+@media (max-width: 560px) {
+  .app-shell .di-account-row { grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr) 40px; }
+}
+.app-shell .presence-empty-art { overflow: hidden; }
+
+/* Small labels in module sheets were tracked capitals; keep their text but drop the transform. */
+.app-shell :is(.dc-quality-meta span, .dc-card-meta dt, .dc-card-metrics dt, .dc-review-amounts dt, .dc-next-step span, .dc-limitation span, .dc-card-action > div > span, .dc-review-period, .dc-review-notes span, .di-existing-record > span, .da-table-wrap thead th, .di-table-scroll thead th, .data-import-table-wrap th, .data-import-eyebrow) { text-transform: none; letter-spacing: 0; }
+.app-shell .data-import-eyebrow { color: #565d1c; font-size: 13.5px; font-weight: 650; }
+
+/* Touch: every control in the work area reaches 44px on small screens. */
+@media (max-width: 760px), (pointer: coarse) {
+  .app-shell .main-content :is(button, select, .button, a.button, input:not([type=checkbox], [type=radio], [type=hidden], [type=file], [type=range])):not(.search-field input) { min-height: 44px; }
+  .app-shell .main-content .icon-button { min-width: 44px; min-height: 44px; }
+  .app-shell .demo-ribbon button, .app-shell .scope-banner button { min-height: 44px; }
+}

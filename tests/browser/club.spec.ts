@@ -337,7 +337,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await expect(page.getByText("1 registros válidos")).toBeVisible();
   for (const [path, label, heading] of [
     ["/app/gastos", "Gastos", "Gastos registrados"],
-    ["/app/finanzas", "Caja y planificación", "Caja y planificación"],
+    ["/app/finanzas", "Finanzas", "Finanzas"],
     ["/app/responsables", "Responsables", "Responsables"],
     ["/app/reportes", "Reportes", "Reportes y liquidaciones"],
   ] as const) {
@@ -346,24 +346,37 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
       page.getByRole("heading", { name: heading, exact: true }),
     ).toBeVisible();
     if (label === "Gastos") await expect(page.getByRole("heading", { name: "Registro de gastos" })).toBeVisible();
-    if (label === "Caja y planificación") {
+    if (label === "Finanzas") {
+      await expect(page.getByRole("heading", { name: "Resultado local" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Próximos pasos" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Capital en inventario" })).toBeHidden();
+      await page.locator("#finance-stock-detail summary").click();
       await expect(page.getByRole("heading", { name: "Capital en inventario" })).toBeVisible();
-      await page.getByRole("button", { name: "Movimientos reales" }).click();
-      await expect(page.getByRole("heading", { name: "Movimientos reales" })).toBeVisible();
+      await page.getByRole("button", { name: "Caja", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Historial de caja y banco" })).toBeVisible();
       await expect(page.locator(".finance-section tbody tr").first()).toBeVisible();
     }
   }
   await page.goto("/app/finanzas");
+  await page.getByRole("button", { name: "Preparar saldos" }).click();
+  await expect(page).toHaveURL(/\/app\/preparar\?view=cash/);
+  await expect(page.getByRole("navigation", { name: "Áreas para preparar decisiones" }).getByRole("button", { name: "Caja" })).toHaveAttribute("aria-current", "page");
+  await page.goto("/app/finanzas");
+  await page.getByRole("button", { name: "Planificación", exact: true }).click();
   await page.getByRole("button", { name: "Agregar proyección" }).click();
   dialog = page.getByRole("dialog");
   await dialog.getByLabel("Fecha").fill("2027-01-10");
-  await dialog.getByLabel("Categoría").selectOption("operating_expense");
-  await dialog.getByLabel("Importe en ARS (negativo si sale dinero)").fill("-123.45");
+  await expect(dialog.getByLabel("Tipo de partida")).toHaveValue("outflow");
+  await dialog.getByLabel("Tipo de partida").selectOption("income");
+  await expect(dialog.getByLabel("Categoría")).toHaveValue("other_income");
+  await dialog.getByLabel("Tipo de partida").selectOption("outflow");
+  await expect(dialog.getByLabel("Categoría")).toHaveValue("operating_expense");
+  await dialog.getByLabel("Importe en ARS").fill("123.45");
   await dialog.getByLabel("Detalle / comprobante de referencia").fill(`Personal QA ${suffix}`);
   await dialog.getByRole("button", { name: "Guardar", exact: true }).click();
   await expect(dialog).toBeHidden();
-  await page.getByRole("button", { name: "Proyección", exact: true }).click();
-  await expect(page.getByRole("row", { name: new RegExp(`Personal QA ${suffix}`) })).toContainText("123,45");
+  await page.getByText("Partidas del escenario", { exact: true }).click();
+  await expect(page.getByRole("row", { name: new RegExp(`Personal QA ${suffix}`) }).locator("td").last()).toContainText(/-\$\s*123,45/);
   expect(errors).toEqual([]);
 });
 test("responsible: scope cannot be switched; foreign lots and settings actions absent", async ({

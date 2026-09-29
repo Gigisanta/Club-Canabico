@@ -45,7 +45,7 @@ npm run db:migrate
 Elegir uno de los dos modos antes de ejecutar el seed:
 
 - **Demo:** `DEMO_MODE=true` y `NODE_ENV=development`. El seed crea 8 usuarios (incluye Tiziano, Camila y Gio), 24 socios, 12 lotes, 90 días de ventas y movimientos de ejemplo. El login muestra «Explorar club de demostración» y permite probar los roles. Todo cambio se persiste en la base de demostración.
-- **Club real:** `DEMO_MODE=false`, definir `ADMIN_EMAIL`, `ADMIN_NAME` y `ADMIN_PASSWORD` (12 caracteres mínimo). El seed crea solamente el administrador. Usar una base distinta de la demo; cambiar el flag no elimina registros ni usuarios de ejemplo.
+- **Club real:** `DEMO_MODE=false` con una base vacía distinta de la demo. El seed crea la configuración de Bombo y reserva los accesos de Tiziano (dueño), Camila y Gio (gerentes), sin crear contraseñas ni usuarios activos hasta su activación. `ADMIN_EMAIL`, `ADMIN_NAME` y `ADMIN_PASSWORD` son opcionales solo para un administrador inicial de recuperación. Cambiar el flag no elimina registros ni usuarios de ejemplo; el arranque rechaza la base demo.
 
 ```sh
 npm run db:seed
@@ -54,7 +54,7 @@ npm run dev
 
 Frontend predeterminado: `http://127.0.0.1:5173`. API: `http://127.0.0.1:3001`. Los puertos se pueden cambiar con `VITE_PORT` y `PORT`; actualizar también `ALLOWED_ORIGIN`. El proxy de Vite sigue `PORT`.
 
-El seed nunca borra datos: si ya existen usuarios, termina sin modificar la base. Los datos de ejemplo tienen fechas relativas al día de ejecución. Las credenciales demo (`owner@demo.bombo.local`, `Demo-Bombo-2026!`) son públicas y exclusivas de pruebas.
+El seed nunca borra datos. Los datos de ejemplo tienen fechas relativas al día de ejecución. Las credenciales demo (`owner@demo.bombo.local`, `Demo-Bombo-2026!`) son públicas y exclusivas de pruebas. Para el primer acceso real, cargar el correo con `TEAM_ENV_FILE=/ruta/privada/real-club.env npm run team:invite -- tiziano correo@dominio`, entregar el enlace guardado en `.local/invitaciones/tiziano.txt` por un canal privado y dejar que Tiziano elija su contraseña. El enlace vence en 48 horas y se usa una vez. Repetir para Camila y Gio; una vez activo el dueño, también puede preparar enlaces desde **Equipo**. Esta versión genera el enlace, pero todavía no envía correos automáticamente.
 
 ## Funcionalidad
 
@@ -75,7 +75,7 @@ El seed nunca borra datos: si ya existen usuarios, termina sin modificar la base
 - **Responsables:** vista consolidada y por responsable, costos/margen por producto, ventas históricas atribuidas al responsable original, ranking y rotación.
 - **Reportes:** ventas detalladas en CSV/XLSX y resumen de liquidación por responsable en PDF; filtros de fecha y ámbito aplicados en servidor.
 - **Migración operativa anterior:** productos, socios y movimientos de caja/banco mediante CSV exportado de Sheets/AppSheet, identificadores de origen, validación por fila, omitidos y conflictos, vista previa y confirmación atómica. Esta ruta sigue disponible; el historial analítico externo se carga en `/app/importar`. Los cobros del delivery importados no crean ventas ni descuentan stock local. No requiere acceso a la cuenta de Google.
-- **Equipo:** creación de usuarios con rol desde la cuenta del dueño. Los permisos no dependen de ocultar botones.
+- **Equipo:** el dueño reserva una persona y prepara un enlace para su correo. La cuenta se activa cuando la persona elige su contraseña; el enlace no se guarda en texto claro en PostgreSQL. Los permisos se validan en la API.
 
 ## Permisos
 
@@ -147,7 +147,8 @@ Todas las rutas de datos requieren JWT en cookie `HttpOnly`, `SameSite=Strict`; 
 | PATCH      | `/api/customers/:id/permit`               | Estado y vigencia del permiso; dueño/gerente |
 | POST       | `/api/expenses`, `/api/expenses/recurring` | Gastos/recurrencias                        |
 | PUT        | `/api/settings`                            | Configuración                              |
-| POST       | `/api/users`                               | Alta de usuarios, solo dueño               |
+| GET/POST   | `/api/team-seats` y `/:id/invite`          | Accesos pendientes y enlaces, solo dueño para cambios |
+| POST       | `/api/auth/invitation`, `/api/auth/activate` | Activación personal con enlace de un solo uso |
 | POST       | `/api/import`                              | Previsualización o confirmación CSV        |
 | GET        | `/api/reports/:format?from=&to=&owner=`    | `csv`, `xlsx` o `pdf`                      |
 | GET        | `/api/health`                              | Comprueba conexión a PostgreSQL            |
@@ -208,7 +209,7 @@ npm start
 
 Express sirve el frontend compilado y la API desde el mismo origen. Configurar `NODE_ENV=production`, `DEMO_MODE=false`, `COOKIE_SECURE=true`, un secreto único y `ALLOWED_ORIGIN=https://tu-dominio`. Ejecutar detrás de HTTPS. En contenedores usar `HOST=0.0.0.0`; localmente se usa loopback. No establecer `trust proxy=true` indiscriminadamente. Configurar copias de seguridad de PostgreSQL fuera del proceso de la app.
 
-El backend es stateless salvo el limitador de login en memoria. JWT expira a las 8 horas; logout elimina la cookie del navegador, sin lista de revocación central. Para varias réplicas se necesita un store compartido del limitador y, si se requiere revocación inmediata, una tabla de sesiones o versión de token. No se incluyen recuperación por email, MFA, multi-club/tenancy, facturación fiscal, sincronización continua con Sheets ni integraciones bancarias.
+El backend es stateless salvo los limitadores de login y activación en memoria. JWT expira a las 8 horas; logout elimina la cookie del navegador, sin lista de revocación central. Para varias réplicas se necesita un store compartido del limitador y, si se requiere revocación inmediata, una tabla de sesiones o versión de token. No se incluyen envío automático de invitaciones, recuperación por email, MFA, multi-club/tenancy, facturación fiscal, sincronización continua con Sheets ni integraciones bancarias.
 
 El endpoint de estado devuelve el histórico del ámbito para calcular dashboard y fichas. Para grandes volúmenes, la siguiente evolución es agregar métricas en SQL y paginar ventas/socios del servidor; el ledger de movimientos ya está paginado. El sistema está modularizado para esa evolución, pero no se ha ensayado carga masiva ni alta disponibilidad.
 

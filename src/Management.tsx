@@ -70,9 +70,9 @@ export function Expenses() {
   return (
     <div className="panorama-expenses">
       <PageHeader
-        eyebrow="CUIDÁ LOS RECURSOS DEL CLUB"
+        eyebrow="Cuidá los recursos del club"
         title="Gastos registrados"
-        description="Costos fijos, variables y compromisos recurrentes. Los pagos reales se registran en Caja y planificación."
+        description="Costos fijos, variables y compromisos recurrentes. Los pagos reales se registran en Finanzas → Caja."
         actions={
           <>
             {isManager && (
@@ -328,7 +328,7 @@ export function Responsibles() {
   return (
     <div className="panorama-responsibles">
       <PageHeader
-        eyebrow="CADA RESPONSABLE, SU APORTE"
+        eyebrow="Cada responsable, su aporte"
         title="Responsables"
         description="Asignación clara, historial intacto y una visión compartida del club."
         actions={
@@ -452,7 +452,7 @@ export function Reports() {
   return (
     <div className="panorama-reports">
       <PageHeader
-        eyebrow="DE LOS DATOS A LAS DECISIONES"
+        eyebrow="De los datos a las decisiones"
         title="Reportes y liquidaciones"
         description="Exportá la información del club para analizarla, compartirla o archivarla."
       />

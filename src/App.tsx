@@ -59,6 +59,7 @@ const Reports = lazy(() =>
 );
 const Settings = lazy(() => import("./Settings"));
 const Finance = lazy(() => import("./Finance"));
+const ActivateAccess = lazy(() => import("./ActivateAccess"));
 const ShowcaseAdmin = lazy(() => import("./ShowcaseAdmin"));
 const InquiriesAdmin = lazy(() => import("./InquiriesAdmin"));
 function Login({
@@ -73,26 +74,19 @@ function Login({
       <div className="login-story">
         <Brand />
         <div>
-          <span className="eyebrow">MENOS PLANILLAS. MÁS CLARIDAD.</span>
-          <h1>
-            Tu club, en
-            <br />
-            su mejor versión.
-          </h1>
-          <p>
-            Un lugar para tu inventario, tus socios y todas las decisiones que
-            hacen crecer tu club.
-          </p>
+          <span className="eyebrow">{demo ? "MENOS PLANILLAS. MÁS CLARIDAD." : "BOMBO · ACCESO PRIVADO"}</span>
+          <h1>{demo ? <>Tu club, en<br />su mejor versión.</> : <>Bombo<br />cannabis club.</>}</h1>
+          <p>{demo ? "Un lugar para tu inventario, tus socios y todas las decisiones que hacen crecer tu club." : "Ventas, stock, socios y finanzas en un lugar."}</p>
           <div className="login-decoration">
             <Plant size={150} weight="duotone" />
           </div>
         </div>
-        <small>Gestión clara. Visión de futuro.</small>
+        {demo && <small>Gestión clara. Visión de futuro.</small>}
       </div>
       <section className="login-form">
         <Brand />
-        <h2>Bienvenido a tu club</h2>
-        <p>Ingresá con tu cuenta para continuar.</p>
+        <h2>{demo ? "Bienvenido a tu club" : "Entrá a Bombo"}</h2>
+        <p>{demo ? "Ingresá con tu cuenta para continuar." : "Usá el correo con el que activaste tu acceso."}</p>
         <Form
           submit="Iniciar sesión"
           onSubmit={async (fd) =>
@@ -146,6 +140,7 @@ function Login({
   );
 }
 export function App() {
+  const location = useLocation();
   const [user, setUser] = useState<User | null>(null);
   const [checking, setChecking] = useState(true);
   const [demo, setDemo] = useState(false);
@@ -192,6 +187,7 @@ export function App() {
         </button>
       </div>
     );
+  if (location.pathname === "/app/activar") return <Suspense fallback={<div className="boot"><Brand />Preparando acceso…</div>}><ActivateAccess onLogin={setUser} /></Suspense>;
   if (!user) return <Login onLogin={setUser} demo={demo} />;
   return (
     <Workspace

@@ -24,7 +24,8 @@ test("manager can follow the three decisions and prepare evidence without invent
   await page.getByLabel("Mes comparado", { exact: true }).fill("2026-08");
   await page.getByLabel("Importe del mes comparado (ARS)").fill("150");
   await page.getByLabel("IPC del mes comparado").fill("125");
-  await page.getByLabel("Publicación de la serie").fill(new Date().toISOString().slice(0, 10));
+  // El servidor usa la fecha local del club; la fecha UTC de hoy puede ser mañana allí.
+  await page.getByLabel("Publicación de la serie").fill(new Date(Date.now() - 86_400_000).toISOString().slice(0, 10));
   await page.getByLabel("Versión / tabla").fill("Caso QA sintético");
   await page.getByLabel("URL de la tabla de INDEC").fill("https://www.indec.gob.ar/ftp/cuadros/economia/fixture.pdf");
   await page.getByRole("button", { name: "Comparar en pesos constantes" }).click();

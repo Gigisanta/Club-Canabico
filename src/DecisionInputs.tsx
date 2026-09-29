@@ -1,4 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from "react";
+import { useSearchParams } from "react-router-dom";
 import { ArrowClockwise, CheckCircle, Plus, WarningCircle, X } from "@phosphor-icons/react";
 import { send, useResource } from "./lib";
 import "./decision-inputs.css";
@@ -386,8 +387,18 @@ function LocationChoices({
 }
 
 export default function DecisionInputs() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const resource = useResource<DecisionInputsPayload>("/decision-inputs");
-  const [view, setView] = useState<"stock" | "replenishment" | "cash">("stock");
+  const requestedView = searchParams.get("view");
+  const view = requestedView === "cash" || requestedView === "replenishment" ? requestedView : "stock";
+  function setView(nextView: "stock" | "replenishment" | "cash") {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (nextView === "stock") next.delete("view");
+      else next.set("view", nextView);
+      return next;
+    }, { replace: true });
+  }
   const data = resource.data;
   const [filters, setFilters] = useState<Filters>({ productId: "", from: "", through: "", search: "" });
   const [cashScenario, setCashScenario] = useState<Scenario>("base");
@@ -460,7 +471,7 @@ export default function DecisionInputs() {
     <main className="decision-inputs">
       <header className="di-header">
         <div className="di-header-copy">
-          <span className="di-eyebrow">DECISIONES · FUENTES Y SUPUESTOS</span>
+          <span className="di-eyebrow">Decisiones · fuentes y supuestos</span>
           <h1>Preparar decisiones</h1>
           <p>Reuní los datos y las fuentes antes de evaluar stock, precios y caja. Cada alta exige revisión humana; ninguna registra compras ni pagos.</p>
         </div>
@@ -499,7 +510,7 @@ export default function DecisionInputs() {
       <details className="di-overview-details"><summary>Estado general de las entradas</summary>
       <section className="di-readiness" aria-labelledby="di-readiness-title">
         <div className="di-readiness-heading">
-          <div><span className="di-eyebrow">ESTADO DE ENTRADAS</span><h2 id="di-readiness-title">Qué falta para evaluar</h2></div>
+          <div><span className="di-eyebrow">Estado de entradas</span><h2 id="di-readiness-title">Qué falta para evaluar</h2></div>
           <span className={`di-status ${data?.mapping ? "di-status--pending" : "di-status--muted"}`}>
             {data?.mapping ? "Mapeo informado · requiere revisión" : "Mapeo pendiente"}
           </span>
@@ -520,7 +531,7 @@ export default function DecisionInputs() {
 
       <details className="di-filter-details"><summary>Filtrar registros por producto, fecha o fuente</summary>
       <section className="di-filters" aria-label="Filtros de registros">
-        <div className="di-filter-heading"><div><span className="di-eyebrow">VISTAS</span><strong>Filtrar registros</strong></div>{(filters.productId || filters.from || filters.through || filters.search) && <button type="button" className="di-text-button" onClick={() => setFilters({ productId: "", from: "", through: "", search: "" })}>Limpiar filtros</button>}</div>
+        <div className="di-filter-heading"><div><span className="di-eyebrow">Vistas</span><strong>Filtrar registros</strong></div>{(filters.productId || filters.from || filters.through || filters.search) && <button type="button" className="di-text-button" onClick={() => setFilters({ productId: "", from: "", through: "", search: "" })}>Limpiar filtros</button>}</div>
         <div className="di-filter-grid">
           <Field label="Producto" name="di-filter-product">
             <select id="di-filter-product" value={filters.productId} onChange={(event) => setFilters((current) => ({ ...current, productId: event.target.value }))}>
@@ -539,7 +550,7 @@ export default function DecisionInputs() {
 
       {view === "stock" &&
       <section className="di-section" aria-labelledby="di-mapping-title">
-        <SectionHeading id="di-mapping-title" eyebrow="01 · ALCANCE DEL STOCK" title="Confirmar ubicaciones compartidas">
+        <SectionHeading id="di-mapping-title" eyebrow="01 · Alcance del stock" title="Confirmar ubicaciones compartidas">
           La decisión de stock compartido la confirma Tiziano. No combinamos inventario local y delivery por una suposición.
         </SectionHeading>
         <div className="di-content-grid">
@@ -630,7 +641,7 @@ export default function DecisionInputs() {
 
       {view === "replenishment" &&
       <section className="di-section" aria-labelledby="di-market-title">
-        <SectionHeading id="di-market-title" eyebrow="02 · COSTOS Y ENTREGAS" title="Registrar evidencia de reposición">
+        <SectionHeading id="di-market-title" eyebrow="02 · Costos y entregas" title="Registrar evidencia de reposición">
           Las cotizaciones y recepciones aportan evidencia. Guardarlas no crea una orden ni recibe mercadería.
         </SectionHeading>
         <div className="di-content-grid">
@@ -701,7 +712,7 @@ export default function DecisionInputs() {
 
       {view === "cash" &&
       <section className="di-section" aria-labelledby="di-cash-title">
-        <SectionHeading id="di-cash-title" eyebrow="03 · CAJA Y OBLIGACIONES" title="Completar saldos, fuentes y escenarios">
+        <SectionHeading id="di-cash-title" eyebrow="03 · Caja y obligaciones" title="Completar saldos, fuentes y escenarios">
           No se genera un saldo confiable si falta una apertura conciliada, una fuente trazable o la cobertura completa de obligaciones.
         </SectionHeading>
         <div className="di-cash-rule" role="note"><strong>Regla de caja:</strong> para generar saldo, el servidor exige un snapshot conciliado de la misma fecha de apertura y obligaciones completas. Podés guardar una atestación de caja antes de tener ese snapshot; guardarla no genera un saldo.</div>

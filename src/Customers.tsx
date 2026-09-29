@@ -94,7 +94,7 @@ export default function Customers() {
     <div className="operation-page customers-page">
       <PageHeader
         className="customers-heading"
-        eyebrow="RELACIONES QUE CRECEN"
+        eyebrow="Relaciones que crecen"
         title="Directorio de socios"
         description="Buscá una ficha, revisá permisos y seguí la actividad de cada socio."
         actions={

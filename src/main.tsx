@@ -11,6 +11,7 @@ import "./app-brand.css";
 import "./brand-system.css";
 import "./navigation.css";
 import "./public-site.css";
+import "./bombo-ui.css";
 function LegacyAppRedirect() {
   const location = useLocation();
   return <Navigate to={`/app${location.pathname}${location.search}${location.hash}`} replace />;

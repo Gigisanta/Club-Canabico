@@ -107,6 +107,34 @@ test(
       });
     }
     try {
+      await t.test("team access stays inactive until a personal one-time link is used", async () => {
+        assert.equal((await call("/team-seats", "viewer", { name: "Intruso", role: "admin" })).status, 403);
+        const created = await call("/team-seats", "owner", { name: "Camila", role: "admin" });
+        assert.equal(created.status, 201);
+        const seat = await created.json();
+        assert.equal(seat.email, null);
+        assert.equal((await db.user.findUnique({ where: { id: seat.id } })), null);
+        const before = await fetch(base + "/auth/login", { method: "POST", headers: { Origin: "http://test.local", "Content-Type": "application/json" }, body: JSON.stringify({ email: "camila@test.local", password: "Camila-personal-123" }) });
+        assert.equal(before.status, 401);
+        const prepared = await call(`/team-seats/${seat.id}/invite`, "owner", { email: "Camila@Test.Local" });
+        assert.equal(prepared.status, 200);
+        const { path } = await prepared.json();
+        const token = new URL(`http://test.local${path}`).hash.slice("#token=".length);
+        const saved = await db.teamSeat.findUniqueOrThrow({ where: { id: seat.id } });
+        assert.equal(saved.email, "camila@test.local");
+        assert.notEqual(saved.tokenHash, token);
+        const publicCall = (endpoint: string, body: unknown) => fetch(base + endpoint, { method: "POST", headers: { Origin: "http://test.local", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const invitation = await publicCall("/auth/invitation", { token });
+        assert.equal(invitation.status, 200);
+        assert.equal((await invitation.json()).name, "Camila");
+        assert.equal((await publicCall("/auth/activate", { token: "invalid", password: "Camila-personal-123" })).status, 404);
+        const activated = await publicCall("/auth/activate", { token, password: "Camila-personal-123" });
+        assert.equal(activated.status, 200);
+        assert.equal((await activated.json()).user.role, "admin");
+        assert.equal((await publicCall("/auth/activate", { token, password: "Camila-personal-123" })).status, 404);
+        assert.equal((await publicCall("/auth/invitation", { token })).status, 404);
+        assert.equal((await publicCall("/auth/login", { email: "camila@test.local", password: "Camila-personal-123" })).status, 200);
+      });
       await t.test("product catalog remembers saved names and optional profiles within each role's scope", async () => {
         const lots = ["catalog-lot-1", "catalog-lot-2", "catalog-lot-3"];
         try {

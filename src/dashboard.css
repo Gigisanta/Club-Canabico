@@ -1,7 +1,7 @@
 .panorama-dashboard { min-width: 0; }
 .panorama-dashboard .dashboard-section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 0 14px; }
 .panorama-dashboard .dashboard-section-title h2 { margin: 0; font: 600 var(--type-section)/1.1 Bricolage, sans-serif; letter-spacing: -.045em; }
-.panorama-dashboard .dashboard-section-title p { margin: 0; color: var(--muted); font-size: 12px; }
+.panorama-dashboard .dashboard-section-title p { margin: 0; color: var(--muted); font-size: 13px; }
 .panorama-dashboard .dashboard-section-title-lower { margin-top: 31px; }
 .panorama-dashboard .dashboard-toolbar { min-width: 0; margin-bottom: 25px; }
 .panorama-dashboard .dashboard-view-actions { display: flex; align-self: stretch; gap: 23px; }
@@ -44,55 +44,55 @@
 .panorama-dashboard .decision-panel { min-width: 0; border: 1px solid var(--border); border-radius: 17px; background: var(--surface); box-shadow: var(--shadow-card); }
 .panorama-dashboard .outlook-panel { overflow: hidden; padding: 23px 24px 0; }
 .panorama-dashboard .outlook-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
-.panorama-dashboard .signal-eyebrow { display: block; margin-bottom: 8px; color: #626a32; font-size: 10px; font-weight: 800; letter-spacing: .14em; }
+.panorama-dashboard .signal-eyebrow { display: block; margin-bottom: 8px; color: #626a32; font-size: 13px; font-weight: 800; letter-spacing: .14em; }
 .panorama-dashboard .outlook-head h2,
 .panorama-dashboard .decision-head h2 { margin: 0; font: 600 clamp(20px, 2vw, 26px)/1.1 Bricolage, sans-serif; letter-spacing: -.045em; }
-.panorama-dashboard .outlook-period { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.panorama-dashboard .outlook-period { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .panorama-dashboard .outlook-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 0; margin-top: 20px; border-top: 1px solid var(--border); }
 .panorama-dashboard .outlook-lead,
 .panorama-dashboard .outlook-buyers { min-width: 0; container-type: inline-size; padding: 20px 20px 18px 0; }
 .panorama-dashboard .outlook-buyers { border-left: 1px solid var(--border); padding-left: 21px; padding-right: 0; }
 .panorama-dashboard .outlook-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 11px; background: #e9f0e4; color: var(--brand-olive); }
-.panorama-dashboard .outlook-grid p { margin: 13px 0 5px; color: var(--muted); font-size: 12px; font-weight: 600; line-height: 1.4; }
+.panorama-dashboard .outlook-grid p { margin: 13px 0 5px; color: var(--muted); font-size: 13px; font-weight: 600; line-height: 1.4; }
 .panorama-dashboard .outlook-grid strong { display: block; color: var(--text); font-size: clamp(19px, 9cqi, 34px); line-height: 1.08; letter-spacing: -.045em; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.panorama-dashboard .outlook-grid small { display: block; min-height: 36px; margin-top: 10px; color: #52695a; font-size: 11px; line-height: 1.5; }
+.panorama-dashboard .outlook-grid small { display: block; min-height: 36px; margin-top: 10px; color: #52695a; font-size: 13px; line-height: 1.5; }
 .panorama-dashboard .outlook-month { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; container-type: inline-size; padding: 13px 0; border-top: 1px solid var(--border); }
-.panorama-dashboard .outlook-month span { color: var(--muted); font-size: 12px; }
+.panorama-dashboard .outlook-month span { color: var(--muted); font-size: 13px; }
 .panorama-dashboard .outlook-month strong { color: var(--text); font-size: clamp(14px, 5.5cqi, 20px); font-weight: 700; letter-spacing: -.025em; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-.panorama-dashboard .outlook-method { margin: 0 -24px; padding: 12px 24px 14px; border-top: 1px solid #dce6cf; background: #edf2df; color: #4f5b38; font-size: 11px; line-height: 1.55; }
+.panorama-dashboard .outlook-method { margin: 0 -24px; padding: 12px 24px 14px; border-top: 1px solid #dce6cf; background: #edf2df; color: #4f5b38; font-size: 13px; line-height: 1.55; }
 .panorama-dashboard .decision-panel { padding: 23px 23px 12px; }
-.panorama-dashboard .decision-head p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.panorama-dashboard .decision-head p { margin: 7px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
 .panorama-dashboard .decision-list { list-style: none; margin: 17px 0 0; padding: 0; }
 .panorama-dashboard .decision-list li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 11px; padding: 14px 0; border-top: 1px solid var(--border); }
-.panorama-dashboard .decision-index { color: #777c5e; font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.panorama-dashboard .decision-index { color: #777c5e; font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums; }
 .panorama-dashboard .decision-list strong { display: block; color: var(--text); font-size: 13px; line-height: 1.35; }
-.panorama-dashboard .decision-list p { margin: 5px 0 8px; color: var(--muted); font-size: 11px; line-height: 1.5; }
-.panorama-dashboard .decision-list button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 4px 0; border: 0; background: none; color: var(--accent); font-size: 12px; font-weight: 700; text-align: left; }
+.panorama-dashboard .decision-list p { margin: 5px 0 8px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.panorama-dashboard .decision-list button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 4px 0; border: 0; background: none; color: var(--accent); font-size: 13px; font-weight: 700; text-align: left; }
 .panorama-dashboard .decision-list button:hover { color: var(--accent-hover); text-decoration: underline; }
 .panorama-dashboard .decision-empty { padding: 20px 0 7px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 
 .panorama-dashboard .customer-pulse-panel { min-width: 0; padding-bottom: 0; }
 .panorama-dashboard .customer-pulse-total { display: flex; align-items: baseline; flex-wrap: wrap; column-gap: 8px; padding: 0 22px 16px; }
 .panorama-dashboard .customer-pulse-total strong { color: var(--text); font-size: 42px; line-height: 1; letter-spacing: -.055em; font-variant-numeric: tabular-nums; }
-.panorama-dashboard .customer-pulse-total span { color: var(--muted); font-size: 12px; }
-.panorama-dashboard .customer-pulse-total small { margin-left: auto; color: var(--muted); font-size: 11px; }
+.panorama-dashboard .customer-pulse-total span { color: var(--muted); font-size: 13px; }
+.panorama-dashboard .customer-pulse-total small { margin-left: auto; color: var(--muted); font-size: 13px; }
 .panorama-dashboard .customer-pulse-rows { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin: 0 22px; padding: 16px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .panorama-dashboard .customer-pulse-rows > div { display: flex; flex-direction: column; min-width: 0; gap: 5px; }
 .panorama-dashboard .customer-pulse-rows > div + div { padding-left: 15px; border-left: 1px solid var(--border); }
 .panorama-dashboard .customer-pulse-rows span,
-.panorama-dashboard .customer-pulse-share span { color: var(--muted); font-size: 11px; }
+.panorama-dashboard .customer-pulse-share span { color: var(--muted); font-size: 13px; }
 .panorama-dashboard .customer-pulse-rows strong { color: var(--text); font-size: 25px; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .panorama-dashboard .customer-pulse-rows small,
-.panorama-dashboard .customer-pulse-share small { color: var(--muted); font-size: 11px; }
+.panorama-dashboard .customer-pulse-share small { color: var(--muted); font-size: 13px; }
 .panorama-dashboard .customer-pulse-share { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px 8px; margin: 0 22px; padding: 17px 0; }
 .panorama-dashboard .customer-pulse-share strong { color: var(--accent); font-size: 20px; font-variant-numeric: tabular-nums; }
 .panorama-dashboard .customer-pulse-share small { margin-left: auto; }
 .panorama-dashboard .customer-inactive { display: flex; align-items: center; flex-wrap: wrap; gap: 9px 12px; padding: 15px 22px; border-top: 1px solid var(--border); background: #edf2df; }
 .panorama-dashboard .customer-inactive > div { display: flex; align-items: center; gap: 7px; }
-.panorama-dashboard .customer-inactive span { color: var(--muted); font-size: 11px; }
-.panorama-dashboard .customer-inactive select { min-height: 34px; height: 34px; padding: 4px 7px; font-size: 12px; }
-.panorama-dashboard .customer-inactive strong { color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; }
-.panorama-dashboard .customer-inactive button { display: inline-flex; align-items: center; gap: 4px; min-height: 34px; margin-left: auto; padding: 3px 0; border: 0; background: none; color: var(--accent); font-size: 11px; font-weight: 700; }
+.panorama-dashboard .customer-inactive span { color: var(--muted); font-size: 13px; }
+.panorama-dashboard .customer-inactive select { min-height: 34px; height: 34px; padding: 4px 7px; font-size: 13px; }
+.panorama-dashboard .customer-inactive strong { color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; }
+.panorama-dashboard .customer-inactive button { display: inline-flex; align-items: center; gap: 4px; min-height: 34px; margin-left: auto; padding: 3px 0; border: 0; background: none; color: var(--accent); font-size: 13px; font-weight: 700; }
 .panorama-dashboard .customer-inactive button:hover { text-decoration: underline; }
 .panorama-dashboard :is(button, select, a):focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 3px; }
 

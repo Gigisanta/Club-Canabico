@@ -109,14 +109,14 @@ h3 {
   font-weight: 700;
 }
 p {
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.7;
 }
 strong {
   font-weight: 700;
 }
 small {
-  font-size: 11px;
+  font-size: 13px;
 }
 svg {
   vertical-align: middle;
@@ -130,7 +130,7 @@ textarea {
   border-radius: 7px;
   padding: 10px 12px;
   min-width: 0;
-  font-size: 12px;
+  font-size: 13px;
   max-width: 100%;
 }
 input::placeholder,
@@ -166,7 +166,7 @@ fieldset {
   border-radius: 7px;
   padding: 10px 15px;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 650;
   line-height: 18px;
   min-height: 38px;
@@ -207,7 +207,7 @@ fieldset {
 .small-button {
   padding: 5px 10px;
   min-height: 29px;
-  font-size: 12px;
+  font-size: 13px;
 }
 .full-width {
   width: 100%;
@@ -216,12 +216,12 @@ fieldset {
   color: var(--muted);
 }
 .small {
-  font-size: 11px;
+  font-size: 13px;
 }
 .cell-small {
   display: block;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 450;
   margin-top: 3px;
 }
@@ -298,7 +298,7 @@ fieldset {
 }
 .brand .brand-caption {
   width: 100%;
-  font-size: 9px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: 2.1px;
   padding-left: 46px;
@@ -339,19 +339,19 @@ fieldset {
 }
 .club-switch strong {
   display: block;
-  font-size: 12px;
+  font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .club-switch small {
   display: block;
-  font-size: 10px;
+  font-size: 13px;
   color: var(--muted);
   margin-top: 3px;
 }
 .nav-label {
-  font-size: 10px;
+  font-size: 13px;
   letter-spacing: 1.3px;
   font-weight: 650;
   color: var(--muted);
@@ -368,7 +368,7 @@ fieldset {
   gap: 11px;
   padding: 12px 12px;
   border-radius: 7px;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 550;
   color: var(--muted);
   min-height: 43px;
@@ -382,7 +382,7 @@ fieldset {
   font-weight: 750;
 }
 .nav-count {
-  font-size: 11px;
+  font-size: 13px;
   background: var(--surface-raised);
   color: var(--muted);
   border: 1px solid var(--border);
@@ -404,11 +404,11 @@ fieldset {
   margin: 0 4px 22px;
 }
 .club-health strong {
-  font-size: 11px;
+  font-size: 13px;
   margin-left: 6px;
 }
 .club-health p {
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.8;
   color: var(--muted);
   margin: 7px 0 0;
@@ -417,7 +417,7 @@ fieldset {
   display: flex;
   gap: 11px;
   align-items: center;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
   padding: 11px 13px;
 }
@@ -437,10 +437,10 @@ fieldset {
 }
 .sidebar-user strong {
   display: block;
-  font-size: 12px;
+  font-size: 13px;
 }
 .sidebar-user small {
-  font-size: 11px;
+  font-size: 13px;
   display: block;
   color: var(--muted);
   margin-top: 3px;
@@ -450,7 +450,7 @@ fieldset {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: -0.3px;
   font-weight: 700;
   border-radius: 50%;
@@ -475,7 +475,7 @@ fieldset {
   display: flex;
   gap: 15px;
   align-items: center;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
 }
 .breadcrumb strong {
@@ -497,14 +497,14 @@ fieldset {
   align-items: center;
   gap: 9px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
   padding: 5px;
 }
 .global-search kbd {
   font-family: inherit;
   border: 1px solid var(--border);
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 13px;
   padding: 3px 5px;
   margin-left: 20px;
 }
@@ -538,7 +538,7 @@ fieldset {
   margin: 0 auto;
 }
 .demo-ribbon {
-  font-size: 11px;
+  font-size: 13px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -559,7 +559,7 @@ fieldset {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 11px;
+  font-size: 13px;
   border: 0;
   background: none;
   color: var(--muted);
@@ -572,14 +572,14 @@ fieldset {
   margin-bottom: 29px;
 }
 .eyebrow {
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 750;
   letter-spacing: 1.8px;
   color: var(--muted);
   margin-bottom: 11px;
 }
 .page-heading p:not(.eyebrow) {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
   margin: 0;
 }
@@ -603,7 +603,7 @@ fieldset {
   align-self: stretch;
 }
 .view-tabs button {
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
   background: none;
   border: 0;
@@ -635,7 +635,7 @@ fieldset {
   pointer-events: none;
 }
 .select-wrap select {
-  font-size: 11px;
+  font-size: 13px;
   padding: 8px 25px 8px 32px;
   background: var(--surface);
   border-color: var(--border);
@@ -664,7 +664,7 @@ fieldset {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
   font-weight: 550;
 }
@@ -690,12 +690,12 @@ fieldset {
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 10px;
+  font-size: 13px;
   color: var(--muted);
   white-space: nowrap;
 }
 .trend {
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 750;
   display: inline-flex;
   align-items: center;
@@ -753,12 +753,12 @@ fieldset {
   min-height: 36px;
 }
 .panel-head h2 {
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: -0.15px;
   color: var(--text);
 }
 .panel-head p {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
   margin: 5px 0 0;
   line-height: 1.5;
@@ -783,7 +783,7 @@ fieldset {
   padding: 5px 10px;
   background: none;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 13px;
 }
 .segmented button.active {
   background: var(--surface);
@@ -805,7 +805,7 @@ fieldset {
   display: flex;
   gap: 5px;
   align-items: center;
-  font-size: 10px;
+  font-size: 13px;
   color: var(--muted);
 }
 .chart-legend i {
@@ -829,14 +829,14 @@ fieldset {
   justify-content: space-between;
 }
 .chart-foot > span {
-  font-size: 10px;
+  font-size: 13px;
   color: var(--muted);
   display: flex;
   gap: 8px;
   align-items: center;
 }
 .chart-foot strong {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
 }
 .donut-wrap {
@@ -855,7 +855,7 @@ fieldset {
   padding-top: 3px;
 }
 .donut-center small {
-  font-size: 10px;
+  font-size: 13px;
   color: var(--muted);
 }
 .donut-center strong {
@@ -866,7 +866,7 @@ fieldset {
   margin: 4px 0;
 }
 .donut-center span {
-  font-size: 9px;
+  font-size: 13px;
   color: var(--muted);
 }
 .donut-legend {
@@ -876,7 +876,7 @@ fieldset {
   display: grid;
   grid-template-columns: 1fr 35px 70px;
   align-items: center;
-  font-size: 11px;
+  font-size: 13px;
   gap: 5px;
   margin: 10px 0;
 }
@@ -893,11 +893,11 @@ fieldset {
   border-radius: 2px;
 }
 .donut-legend strong {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
 }
 .donut-legend small {
-  font-size: 11px;
+  font-size: 13px;
   text-align: right;
   color: var(--muted);
 }
@@ -912,7 +912,7 @@ fieldset {
   gap: 9px;
   align-items: center;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 13px;
 }
 .panel-bottom-link:hover {
   background: var(--surface);
@@ -931,7 +931,7 @@ fieldset {
   background: none;
   padding: 3px 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 650;
 }
 .action-link:hover {
@@ -952,7 +952,7 @@ fieldset {
   gap: 16px;
 }
 .text-tabs button {
-  font-size: 11px;
+  font-size: 13px;
   padding: 8px 0;
   background: none;
   border: 0;
@@ -970,10 +970,10 @@ table {
   border-collapse: collapse;
   text-align: left;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: 13px;
 }
 th {
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 550;
   letter-spacing: 0.1px;
   color: var(--muted);
@@ -986,7 +986,7 @@ td {
   padding: 15px 17px;
   border-bottom: 1px solid var(--border);
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 tbody tr:last-child td {
   border-bottom: 0;
@@ -1010,7 +1010,7 @@ tbody tr:hover {
   cursor: pointer;
 }
 .top-table th {
-  font-size: 10px;
+  font-size: 13px;
 }
 .person-cell,
 .product-cell {
@@ -1021,19 +1021,19 @@ tbody tr:hover {
 .person-cell strong,
 .product-cell strong {
   display: block;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text);
   font-weight: 650;
 }
 .person-cell small,
 .product-cell small {
   display: block;
-  font-size: 10px;
+  font-size: 13px;
   color: var(--muted);
   margin-top: 4px;
 }
 .person-cell > span {
-  font-size: 12px;
+  font-size: 13px;
 }
 .cell-button {
   background: none;
@@ -1045,7 +1045,7 @@ tbody tr:hover {
   text-decoration: underline;
 }
 .badge {
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 600;
   display: inline-flex;
   align-items: center;
@@ -1102,7 +1102,7 @@ tbody tr:hover {
   color: var(--muted);
 }
 .count-pill {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
   background: var(--surface-raised);
   border-radius: 4px;
@@ -1130,13 +1130,13 @@ tbody tr:hover {
 }
 .attention-list strong {
   display: block;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 650;
   color: var(--muted);
 }
 .attention-list small {
   display: block;
-  font-size: 10px;
+  font-size: 13px;
   color: var(--muted);
   margin-top: 4px;
 }
@@ -1165,7 +1165,7 @@ tbody tr:hover {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
 }
 .retention-head > span {
@@ -1175,7 +1175,7 @@ tbody tr:hover {
   font-weight: 650;
 }
 .retention-head select {
-  font-size: 10px;
+  font-size: 13px;
   background: var(--surface-raised);
   padding: 4px 7px;
   border-color: var(--border);
@@ -1193,7 +1193,7 @@ tbody tr:hover {
   font-weight: 650;
 }
 .retention-card p {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
   margin: 7px 0 13px;
   line-height: 1.8;
@@ -1207,7 +1207,7 @@ tbody tr:hover {
   align-items: center;
   width: 100%;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 650;
 }
 .lower .panel {
@@ -1227,19 +1227,19 @@ tbody tr:hover {
   border: 0;
 }
 .rank-number {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
 }
 .owner-rank-name {
   width: 140px;
 }
 .owner-rank-name strong {
-  font-size: 12px;
+  font-size: 13px;
   display: block;
   color: var(--muted);
 }
 .owner-rank-name small {
-  font-size: 10px;
+  font-size: 13px;
   color: var(--muted);
   display: block;
   margin-top: 4px;
@@ -1263,11 +1263,11 @@ tbody tr:hover {
 }
 .owner-rank-value strong {
   display: block;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
 }
 .owner-rank-value small {
-  font-size: 10px;
+  font-size: 13px;
   color: var(--muted);
   display: block;
   margin-top: 3px;
@@ -1285,7 +1285,7 @@ tbody tr:hover {
   color: var(--muted);
 }
 .budget-value span {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
 }
 .budget-track {
@@ -1305,13 +1305,13 @@ tbody tr:hover {
 .lower .panel > .action-link {
   margin-left: 22px;
   margin-right: 22px;
-  font-size: 11px;
+  font-size: 13px;
 }
 .app-footer {
   padding: 20px 0 25px;
   display: flex;
   justify-content: space-between;
-  font-size: 10px;
+  font-size: 13px;
   color: var(--muted);
   border-top: 1px solid var(--border);
   margin-top: 28px;
@@ -1333,7 +1333,7 @@ tbody tr:hover {
   flex-wrap: wrap;
 }
 .mini-stats > span {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
   display: flex;
   gap: 7px;
@@ -1365,7 +1365,7 @@ tbody tr:hover {
   background: transparent;
   outline: none;
   flex: 1;
-  font-size: 12px;
+  font-size: 13px;
   width: 100%;
 }
 .search-field:focus-within {
@@ -1421,7 +1421,7 @@ tbody tr:hover {
   margin: 10px 0 4px;
 }
 .empty p {
-  font-size: 11px;
+  font-size: 13px;
   margin: 0;
   color: var(--muted);
 }
@@ -1480,7 +1480,7 @@ tbody tr:hover {
 }
 .modal-head p {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.6;
   margin: 8px 0 0;
 }
@@ -1491,12 +1491,12 @@ tbody tr:hover {
   margin-bottom: 17px;
 }
 .field > label {
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 650;
   color: var(--muted);
 }
 .field small {
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.6;
   color: var(--muted);
 }
@@ -1504,7 +1504,7 @@ tbody tr:hover {
 .field select,
 .field textarea {
   width: 100%;
-  font-size: 12px;
+  font-size: 13px;
 }
 .form-grid {
   display: grid;
@@ -1525,7 +1525,7 @@ tbody tr:hover {
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: 7px;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.6;
   margin: 15px 0;
 }
@@ -1534,7 +1534,7 @@ tbody tr:hover {
   overflow: auto;
 }
 .history-table td {
-  font-size: 12px;
+  font-size: 13px;
 }
 .customer-profile,
 .profile-detail {
@@ -1553,7 +1553,7 @@ tbody tr:hover {
 .profile-detail p {
   margin: 5px 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 13px;
 }
 .customer-profile small,
 .profile-detail small {
@@ -1579,7 +1579,7 @@ tbody tr:hover {
 }
 .detail-stats small {
   display: block;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
   margin-bottom: 6px;
 }
@@ -1593,12 +1593,12 @@ tbody tr:hover {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 14px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
   margin: 15px 0;
 }
 .note-box p {
-  font-size: 11px;
+  font-size: 13px;
   margin: 6px 0 0;
 }
 .section-title {
@@ -1622,7 +1622,7 @@ tbody tr:hover {
 .sales-summary span {
   display: block;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 13px;
 }
 .sales-summary strong {
   display: block;
@@ -1632,7 +1632,7 @@ tbody tr:hover {
   letter-spacing: -0.7px;
 }
 .sales-summary small {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
 }
 .sales-summary .status-label {
@@ -1645,11 +1645,11 @@ tbody tr:hover {
   background: var(--accent-soft);
 }
 .ticket-id {
-  font-size: 12px;
+  font-size: 13px;
 }
 .table-note {
   padding: 15px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
 }
 .spaced-panel {
@@ -1682,7 +1682,7 @@ tbody tr:hover {
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  font-size: 12px;
+  font-size: 13px;
   margin-bottom: 14px;
   color: var(--muted);
 }
@@ -1702,7 +1702,7 @@ tbody tr:hover {
   margin: 10px 0;
 }
 .ticket-heading p {
-  font-size: 11px;
+  font-size: 13px;
   margin-bottom: 8px;
 }
 .ticket-heading small {
@@ -1713,13 +1713,13 @@ tbody tr:hover {
   justify-content: space-between;
   border-top: 1px dashed var(--border);
   padding: 14px 0;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
 }
 .ticket-line small {
   display: block;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
   margin-top: 4px;
 }
 .ticket-total {
@@ -1733,7 +1733,7 @@ tbody tr:hover {
 }
 .ticket-disclaimer {
   text-align: center;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
   margin: 24px 0;
 }
@@ -1756,7 +1756,7 @@ tbody tr:hover {
   margin-bottom: 16px;
 }
 .rank-badge {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
   background: var(--surface-raised);
   padding: 5px 8px;
@@ -1767,7 +1767,7 @@ tbody tr:hover {
   color: var(--muted);
 }
 .owner-card > p {
-  font-size: 12px;
+  font-size: 13px;
   margin: 5px 0 20px;
   color: var(--muted);
 }
@@ -1780,7 +1780,7 @@ tbody tr:hover {
 }
 .owner-card-numbers span {
   display: block;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
   margin-bottom: 8px;
 }
@@ -1796,7 +1796,7 @@ tbody tr:hover {
 .owner-card-info span {
   display: flex;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
   margin: 10px 0;
 }
@@ -1837,7 +1837,7 @@ tbody tr:hover {
 }
 .export-card p {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.8;
   margin: 12px 0 24px;
 }
@@ -1855,7 +1855,7 @@ tbody tr:hover {
   gap: 8px;
   background: none;
   padding: 13px 18px;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
 }
 .settings-tabs button.active {
@@ -1884,7 +1884,7 @@ tbody tr:hover {
   display: flex;
   gap: 30px;
   margin: 10px 0 25px;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
 }
 .import-steps i {
@@ -1913,14 +1913,14 @@ tbody tr:hover {
   padding: 30px 15px;
   margin: 20px 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 13px;
 }
 .upload-zone strong {
   color: var(--muted);
   font-size: 13px;
 }
 .upload-zone input {
-  font-size: 11px;
+  font-size: 13px;
   max-width: 280px;
   background: transparent;
   border: 0;
@@ -1951,7 +1951,7 @@ tbody tr:hover {
   align-items: center;
   padding: 14px 5px;
   text-align: left;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
 }
 .search-results button:hover {
@@ -1959,7 +1959,7 @@ tbody tr:hover {
 }
 .search-results small {
   display: block;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
   margin-top: 4px;
 }
@@ -1988,10 +1988,10 @@ tbody tr:hover {
   flex: 1;
 }
 .notification-row strong {
-  font-size: 12px;
+  font-size: 13px;
 }
 .notification-row p {
-  font-size: 12px;
+  font-size: 13px;
   margin: 4px 0 0;
   color: var(--muted);
 }
@@ -2057,7 +2057,7 @@ tbody tr:hover {
   max-width: 140px;
 }
 .login-story small {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
 }
 .login-decoration {
@@ -2082,7 +2082,7 @@ tbody tr:hover {
 }
 .login-form > p {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
   margin-bottom: 30px;
 }
 .login-form .form-actions {
@@ -2102,7 +2102,7 @@ tbody tr:hover {
   gap: 8px;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
+  font-size: 13px;
   margin-top: 30px;
 }
 .mobile-menu {
@@ -2159,14 +2159,14 @@ tbody tr:hover {
   background: var(--surface-raised);
   padding: 12px 16px;
   border-radius: 8px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text);
   margin-bottom: 22px;
 }
 .scope-banner button {
   border: 0;
   background: none;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 700;
   color: var(--text);
   text-decoration: underline;
@@ -2177,7 +2177,7 @@ tbody tr:hover {
   justify-content: space-between;
   gap: 10px;
   padding: 14px 0;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
 }
 .pagination > div {

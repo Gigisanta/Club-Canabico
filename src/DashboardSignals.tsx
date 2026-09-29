@@ -22,7 +22,7 @@ export function DashboardSignals({ outlook, money, decisions, onNavigate }: {
       <section className="outlook-panel" aria-labelledby="outlook-title">
         <div className="outlook-head">
           <div>
-            <span className="signal-eyebrow">PROYECCIÓN ORIENTATIVA</span>
+            <span className="signal-eyebrow">Proyección orientativa</span>
             <h2 id="outlook-title">Lo que sugiere el ritmo reciente</h2>
           </div>
           <span className="outlook-period">Actualizado con ventas registradas</span>
@@ -51,7 +51,7 @@ export function DashboardSignals({ outlook, money, decisions, onNavigate }: {
       </section>
       <section className="decision-panel" aria-labelledby="decisions-title">
         <div className="decision-head">
-          <span className="signal-eyebrow">PARA DECIDIR</span>
+          <span className="signal-eyebrow">Para decidir</span>
           <h2 id="decisions-title">Qué revisar esta semana</h2>
           <p>Señales concretas del club, ordenadas por urgencia.</p>
         </div>

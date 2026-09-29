@@ -22,7 +22,7 @@ export const navigationHubs = [
     items: [
       { path: "/app/ventas", label: "Ventas", aliases: ["Ventas y caja", "Registrar venta"], roles: everyone },
       { path: "/app/gastos", label: "Gastos", aliases: [], roles: exceptCashier },
-      { path: "/app/finanzas", label: "Caja y planificación", aliases: ["Finanzas"], roles: managers },
+      { path: "/app/finanzas", label: "Finanzas", aliases: ["Caja y planificación"], roles: managers },
       { path: "/app/decisiones/comercial", label: "Precios y promociones", aliases: ["Análisis comercial"], roles: managers },
       { path: "/app/decisiones/caja", label: "Análisis de caja", aliases: [], roles: managers },
     ],

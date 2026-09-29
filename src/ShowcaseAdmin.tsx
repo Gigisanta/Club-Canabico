@@ -194,7 +194,7 @@ export default function ShowcaseAdmin() {
   return (
     <div className="presence-admin presence-showcase-admin">
       <PageHeader
-        eyebrow="PRESENCIA PÚBLICA"
+        eyebrow="Presencia pública"
         title="Vidriera"
         description="Fichas editoriales independientes del inventario. Sólo las publicadas aparecen en la vista previa; no muestran precio ni disponibilidad."
         className="presence-page-heading"
@@ -216,7 +216,7 @@ export default function ShowcaseAdmin() {
 
       <div className="presence-section-heading">
         <div>
-          <span className="presence-kicker">CONTENIDO CURADO</span>
+          <span className="presence-kicker">Contenido curado</span>
           <h2>Fichas del club</h2>
           <p>Revisá el estado, la imagen y el destino antes de publicar.</p>
         </div>
@@ -253,7 +253,7 @@ export default function ShowcaseAdmin() {
             <span>01</span>
           </div>
           <div>
-            <span className="presence-kicker">EL PRIMER PASO</span>
+            <span className="presence-kicker">El primer paso</span>
             <h3>Tu vidriera comienza aquí</h3>
             <p>Prepará una ficha con imagen y descripción. Después podrás revisarla y publicarla en la vista previa.</p>
             <button className="button primary" type="button" onClick={create}>

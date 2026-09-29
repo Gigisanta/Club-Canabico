@@ -44,6 +44,19 @@ model User {
   decisionCashPlanEvents DecisionCashPlanEvent[]
   decisionInputAttestations DecisionInputAttestation[]
 }
+// A reserved seat is not an active account. Email and an expiring setup link
+// are required before it can become a User.
+model TeamSeat {
+  id String @id @default(cuid())
+  name String
+  role Role
+  email String? @unique
+  tokenHash String? @unique
+  expiresAt DateTime?
+  activatedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
 model Supplier {
   id String @id @default(cuid())
   name String

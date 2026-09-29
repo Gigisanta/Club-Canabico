@@ -14,7 +14,7 @@
   border-radius: 14px;
   background: var(--surface);
   box-shadow: var(--shadow-card);
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.35;
 }
 
@@ -80,48 +80,48 @@
 .inventory-page .stock-art-aceite { background: color-mix(in srgb, var(--brand-orange) 38%, var(--brand-olive)); }
 .inventory-page .stock-art-accesorio { background: var(--surface-raised); color: var(--brand-olive); }
 .inventory-page .stock-art-icon { position: absolute; right: 12px; bottom: -12px; transform: rotate(-18deg); opacity: .2; }
-.inventory-page .stock-type { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; }
-.inventory-page .stock-art .badge { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid color-mix(in srgb, var(--brand-cream) 48%, transparent); border-radius: 999px; background: var(--surface); color: var(--brand-olive); font-size: 10px; font-weight: 700; }
+.inventory-page .stock-type { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; }
+.inventory-page .stock-art .badge { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid color-mix(in srgb, var(--brand-cream) 48%, transparent); border-radius: 999px; background: var(--surface); color: var(--brand-olive); font-size: 13px; font-weight: 700; }
 .inventory-page .stock-art .badge.red { border-color: color-mix(in srgb, var(--brand-orange) 38%, var(--border)); background: color-mix(in srgb, var(--brand-orange) 12%, var(--surface)); color: var(--warm); }
 .inventory-page .stock-art .badge.amber { border-color: color-mix(in srgb, var(--brand-lime) 48%, var(--border)); background: color-mix(in srgb, var(--brand-lime) 20%, var(--surface)); color: var(--brand-olive); }
-.inventory-page .stock-lot { position: absolute; z-index: 1; bottom: 12px; left: 14px; color: var(--brand-cream); font-size: 10px; letter-spacing: .08em; font-variant-numeric: tabular-nums; }
+.inventory-page .stock-lot { position: absolute; z-index: 1; bottom: 12px; left: 14px; color: var(--brand-cream); font-size: 13px; letter-spacing: .08em; font-variant-numeric: tabular-nums; }
 .inventory-page .stock-art-accesorio .stock-lot { color: var(--muted); }
 
 .inventory-page .stock-card-body { padding: 14px 12px 7px; }
 .inventory-page .stock-name { min-height: 57px; margin-bottom: 13px; }
 .inventory-page .minimal-card-title { margin: 0 0 4px; color: var(--text); font-size: 17px; font-weight: 700; letter-spacing: -.025em; line-height: 1.25; overflow-wrap: anywhere; }
-.inventory-page .stock-name > span { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.inventory-page .stock-name > span { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .inventory-page .stock-quantity-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; min-width: 0; font-variant-numeric: tabular-nums; }
 .inventory-page .stock-quantity-row > div { min-width: 0; }
-.inventory-page .stock-quantity-row small { display: block; margin-bottom: 4px; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .08em; }
+.inventory-page .stock-quantity-row small { display: block; margin-bottom: 4px; color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: .08em; }
 .inventory-page .stock-quantity-row > div > strong { font-size: clamp(26px, 2vw, 32px); font-weight: 700; letter-spacing: -.04em; line-height: 1.15; overflow-wrap: anywhere; }
 .inventory-page .stock-quantity-row strong span { color: var(--muted); font-size: 13px; font-weight: 500; letter-spacing: 0; }
 .inventory-page .stock-quantity-row .stock-price { padding-bottom: 2px; text-align: right; }
 .inventory-page .stock-quantity-row .stock-price > strong { display: block; font-size: 13px; letter-spacing: 0; }
-.inventory-page .stock-price small { margin-top: 4px; font-size: 10px; letter-spacing: 0; }
+.inventory-page .stock-price small { margin-top: 4px; font-size: 13px; letter-spacing: 0; }
 .inventory-page .stock-level { position: relative; height: 7px; margin: 13px 0 8px; overflow: visible; border-radius: 999px; background: var(--surface-raised); }
 .inventory-page .stock-level i { display: block; height: 100%; border-radius: inherit; background: var(--brand-olive-mid); }
 .inventory-page .stock-level b { position: absolute; top: -3px; width: 2px; height: 13px; border-radius: 2px; background: var(--brand-orange); }
 .inventory-page .is-low .stock-level i { background: var(--brand-orange); }
 .inventory-page .is-expired .stock-level i { background: var(--brand-orange); }
-.inventory-page .stock-minimum { display: flex; justify-content: space-between; gap: 7px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+.inventory-page .stock-minimum { display: flex; justify-content: space-between; gap: 7px; color: var(--muted); font-size: 13px; line-height: 1.4; }
 .inventory-page .stock-minimum > span:last-child { text-align: right; }
 .inventory-page .is-low .stock-minimum > span:last-child { color: var(--warm); font-weight: 700; }
 .inventory-page .stock-owner { display: flex; align-items: center; gap: 9px; margin: 15px 0 9px; padding: 11px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .inventory-page .stock-owner > div { min-width: 0; }
-.inventory-page .stock-owner small { display: block; margin-bottom: 3px; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .06em; }
-.inventory-page .stock-owner strong { font-size: 11px; overflow-wrap: anywhere; }
+.inventory-page .stock-owner small { display: block; margin-bottom: 3px; color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: .06em; }
+.inventory-page .stock-owner strong { font-size: 13px; overflow-wrap: anywhere; }
 .inventory-page .stock-card-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 7px; }
-.inventory-page .stock-expand { display: inline-flex; align-items: center; gap: 6px; min-height: 42px; padding: 7px 0; border: 0; background: transparent; color: var(--brand-olive); font-size: 11px; font-weight: 700; cursor: pointer; }
+.inventory-page .stock-expand { display: inline-flex; align-items: center; gap: 6px; min-height: 42px; padding: 7px 0; border: 0; background: transparent; color: var(--brand-olive); font-size: 13px; font-weight: 700; cursor: pointer; }
 .inventory-page .stock-expand:hover { color: var(--brand-olive-mid); }
 .inventory-page .stock-expand svg { transition: transform var(--motion-fast) ease; }
 .inventory-page .stock-expand[aria-expanded="true"] svg { transform: rotate(180deg); }
-.inventory-page .stock-card-actions .button { min-height: 40px; padding: 7px 10px; border-color: var(--border); border-radius: 9px; background: var(--surface-raised); color: var(--text); font-size: 11px; }
+.inventory-page .stock-card-actions .button { min-height: 40px; padding: 7px 10px; border-color: var(--border); border-radius: 9px; background: var(--surface-raised); color: var(--text); font-size: 13px; }
 .inventory-page .stock-card-actions .button:hover { border-color: var(--brand-olive-mid); background: var(--brand-lime); }
 .inventory-page .stock-details { padding-top: 13px; }
-.inventory-page .stock-details > span { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; color: var(--text); font-size: 11px; overflow-wrap: anywhere; }
+.inventory-page .stock-details > span { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; color: var(--text); font-size: 13px; overflow-wrap: anywhere; }
 .inventory-page .stock-details > span svg { flex: none; color: var(--brand-olive-mid); }
-.inventory-page .stock-details dl { padding-top: 9px; border-top: 1px solid var(--border); font-size: 11px; }
+.inventory-page .stock-details dl { padding-top: 9px; border-top: 1px solid var(--border); font-size: 13px; }
 .inventory-page .stock-details dl > div { display: flex; justify-content: space-between; gap: 10px; margin: 9px 0; }
 .inventory-page .stock-details dt { color: var(--muted); }
 .inventory-page .stock-details dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
@@ -150,9 +150,9 @@
 .inventory-page .supplier-card-top > div { flex: 1; min-width: 0; }
 .inventory-page .supplier-card-top strong { display: block; font-size: 14px; overflow-wrap: anywhere; }
 .inventory-page .supplier-card-top small { display: block; margin-top: 4px; color: var(--muted); }
-.inventory-page .supplier-default { display: inline-flex; align-items: center; gap: 4px; flex: none; color: var(--brand-olive-mid); font-size: 10px; font-weight: 700; }
+.inventory-page .supplier-default { display: inline-flex; align-items: center; gap: 4px; flex: none; color: var(--brand-olive-mid); font-size: 13px; font-weight: 700; }
 .inventory-page .supplier-contact,
-.inventory-page .supplier-note { margin: 12px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.inventory-page .supplier-note { margin: 12px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .inventory-page .supplier-note { margin-top: 6px; }
 .inventory-page .supplier-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 15px; }
 .inventory-page .supplier-actions .button { min-height: 40px; padding: 7px 11px; }
@@ -166,28 +166,28 @@
 .inventory-dialog-content .product-picker-toggle:hover,
 .inventory-dialog-content .product-picker-toggle[aria-expanded="true"] { background: var(--surface-raised); }
 .inventory-dialog-content .product-picker-options { position: absolute; z-index: 10; top: calc(100% + 5px); right: 0; left: 0; max-height: min(300px, 45dvh); overflow-y: auto; overscroll-behavior: contain; padding: 5px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); box-shadow: 0 18px 36px #3e402e25; }
-.inventory-dialog-content .product-picker-heading { padding: 7px 9px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.inventory-dialog-content .product-picker-heading { padding: 7px 9px; color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .inventory-dialog-content .product-picker-options > button:not(.product-picker-more) { display: flex; align-items: baseline; justify-content: space-between; gap: 9px; width: 100%; min-height: 42px; padding: 9px; border: 0; border-radius: 8px; background: transparent; color: var(--text); cursor: pointer; text-align: left; }
 .inventory-dialog-content .product-picker-options > button:not(.product-picker-more):hover,
 .inventory-dialog-content .product-picker-options > button.is-active { background: var(--surface-raised); }
-.inventory-dialog-content .product-picker-options strong { min-width: 0; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.inventory-dialog-content .product-picker-options button > span { flex: none; color: var(--muted); font-size: 10px; }
-.inventory-dialog-content .product-picker-options p { margin: 0; padding: 10px; color: var(--muted); font-size: 11px; line-height: 1.5; }
-.inventory-dialog-content .product-picker-more { width: 100%; min-height: 42px; padding: 10px; border: 0; border-top: 1px solid var(--border); background: transparent; color: var(--brand-olive); cursor: pointer; font-size: 11px; font-weight: 700; }
+.inventory-dialog-content .product-picker-options strong { min-width: 0; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.inventory-dialog-content .product-picker-options button > span { flex: none; color: var(--muted); font-size: 13px; }
+.inventory-dialog-content .product-picker-options p { margin: 0; padding: 10px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.inventory-dialog-content .product-picker-more { width: 100%; min-height: 42px; padding: 10px; border: 0; border-top: 1px solid var(--border); background: transparent; color: var(--brand-olive); cursor: pointer; font-size: 13px; font-weight: 700; }
 .inventory-dialog-content .profile-suggestions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.inventory-dialog-content .profile-suggestions button { min-height: 34px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
+.inventory-dialog-content .profile-suggestions button { min-height: 34px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; }
 .inventory-dialog-content .profile-suggestions button:hover,
 .inventory-dialog-content .profile-suggestions button:focus-visible,
 .inventory-dialog-content .profile-suggestions button.selected { border-color: var(--brand-olive-mid); background: color-mix(in srgb, var(--brand-lime) 30%, var(--surface)); color: var(--text); }
-.inventory-dialog-content .supplier-default-choice { display: flex; align-items: center; gap: 9px; align-self: center; min-width: 0; font-size: 12px; line-height: 1.4; }
+.inventory-dialog-content .supplier-default-choice { display: flex; align-items: center; gap: 9px; align-self: center; min-width: 0; font-size: 13px; line-height: 1.4; }
 .inventory-dialog-content .supplier-default-choice input { width: 18px; min-height: 18px; flex: none; accent-color: var(--brand-olive); }
-.inventory-dialog-content .location-add-link { display: inline-flex; align-items: center; gap: 5px; min-height: 38px; margin-top: 6px; padding: 4px 0; border: 0; background: transparent; color: var(--brand-olive); cursor: pointer; font-size: 11px; font-weight: 700; }
+.inventory-dialog-content .location-add-link { display: inline-flex; align-items: center; gap: 5px; min-height: 38px; margin-top: 6px; padding: 4px 0; border: 0; background: transparent; color: var(--brand-olive); cursor: pointer; font-size: 13px; font-weight: 700; }
 .inventory-dialog-content .location-quick-add { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
 .inventory-dialog-content .location-quick-add input { flex: 1 1 180px; min-width: 0; }
 .inventory-dialog-content .location-quick-add .button { min-height: 40px; }
 .inventory-dialog-content .price-section { grid-column: 1 / -1; min-width: 0; margin: 2px 0 16px; padding: 13px 16px 15px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-raised); }
 .inventory-dialog-content .price-section legend { padding: 0 6px; color: var(--text); font-size: 14px; font-weight: 700; }
-.inventory-dialog-content .price-section > p { margin: 0 0 13px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.inventory-dialog-content .price-section > p { margin: 0 0 13px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .inventory-dialog-content .price-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .inventory-dialog-content .price-pair .field { min-width: 0; margin-bottom: 0; }
 .inventory-dialog-content .price-input-shell { position: relative; min-width: 0; }
@@ -196,12 +196,12 @@
 .inventory-dialog-content .price-input-shell input::-webkit-outer-spin-button,
 .inventory-dialog-content .price-input-shell input::-webkit-inner-spin-button { margin: 0; -webkit-appearance: none; }
 .inventory-dialog-content .price-input-shell input[type="number"] { appearance: textfield; }
-.inventory-dialog-content .price-pair .field small { min-height: 18px; overflow-wrap: anywhere; font-size: 11px; font-variant-numeric: tabular-nums; }
-.inventory-dialog-content .price-section > .price-warning { margin: 12px 0 0; padding: 10px 11px; border: 1px solid color-mix(in srgb, var(--brand-orange) 36%, var(--border)); border-radius: 9px; background: color-mix(in srgb, var(--brand-orange) 11%, var(--surface)); color: var(--warm); font-size: 11px; font-weight: 700; }
-.inventory-dialog-content .price-section > .price-previous { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--border); font-size: 11px; font-variant-numeric: tabular-nums; }
+.inventory-dialog-content .price-pair .field small { min-height: 18px; overflow-wrap: anywhere; font-size: 13px; font-variant-numeric: tabular-nums; }
+.inventory-dialog-content .price-section > .price-warning { margin: 12px 0 0; padding: 10px 11px; border: 1px solid color-mix(in srgb, var(--brand-orange) 36%, var(--border)); border-radius: 9px; background: color-mix(in srgb, var(--brand-orange) 11%, var(--surface)); color: var(--warm); font-size: 13px; font-weight: 700; }
+.inventory-dialog-content .price-section > .price-previous { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--border); font-size: 13px; font-variant-numeric: tabular-nums; }
 
 .inventory-history-content .history-table { max-width: 100%; }
-.inventory-history-content .pagination { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-top: 12px; color: var(--muted); font-size: 11px; }
+.inventory-history-content .pagination { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-top: 12px; color: var(--muted); font-size: 13px; }
 .inventory-history-content .pagination > div { display: flex; flex-wrap: wrap; gap: 7px; }
 .inventory-history-content .pagination .button { min-height: 40px; }
 
@@ -220,7 +220,7 @@
   .inventory-page .stock-art { height: 96px; }
   .inventory-page .stock-card-body { padding: 12px 10px 6px; }
   .inventory-page .inventory-view { flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
-  .inventory-page .inventory-view > span { font-size: 10px; }
+  .inventory-page .inventory-view > span { font-size: 13px; }
   .inventory-dialog-content .price-section { padding: 12px; }
 }
 

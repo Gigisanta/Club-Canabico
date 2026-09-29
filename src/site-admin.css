@@ -43,7 +43,7 @@
   border-radius: 50%;
   background: var(--brand-olive, #3e402e);
   color: var(--brand-cream, #f6efdd);
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
   letter-spacing: .08em;
 }
@@ -73,7 +73,7 @@
 .presence-admin .presence-field-caption {
   display: block;
   color: var(--brand-olive-mid, #6e772f);
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 600;
   letter-spacing: .15em;
   line-height: 1.4;
@@ -101,7 +101,7 @@
   border-radius: 999px;
   background: #fbf7eb;
   color: #535541;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -194,7 +194,7 @@
   border-radius: 50%;
   background: var(--brand-lime, #c4e780);
   color: var(--presence-ink);
-  font-size: 9px;
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -252,7 +252,7 @@
   width: 100%;
   min-height: 275px;
   color: #72775b;
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .presence-admin .presence-image-index {
@@ -267,7 +267,7 @@
   border-radius: 999px;
   background: #fffaf0e8;
   color: var(--presence-ink);
-  font-size: 9px;
+  font-size: 13px;
   font-weight: 600;
   letter-spacing: .1em;
 }
@@ -290,7 +290,7 @@
   padding: 6px 10px;
   border: 1px solid transparent;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 600;
   letter-spacing: .02em;
 }
@@ -357,7 +357,7 @@
 .presence-admin .presence-item-details span,
 .presence-admin .presence-item-details small {
   color: var(--presence-muted);
-  font-size: 10px;
+  font-size: 13px;
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
@@ -371,14 +371,14 @@
   border-radius: 6px;
   background: #f7f2e5;
   color: #4c4f3a;
-  font-size: 10px;
+  font-size: 13px;
   text-overflow: ellipsis;
 }
 
 .presence-admin .presence-inline-hint {
   margin: 11px 0 0;
   color: #7a4719;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.4;
 }
 
@@ -391,7 +391,7 @@
 .presence-admin .presence-item-actions .button,
 .presence-admin .presence-load-more {
   min-height: 41px;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .presence-admin .presence-preview-link {
@@ -414,7 +414,7 @@
 .presence-admin .presence-refreshing {
   margin: -5px 0 13px;
   color: var(--presence-muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .presence-admin .presence-settings-tabs.settings-tabs {
@@ -439,7 +439,7 @@
   border-radius: 10px;
   background: #fffaf0;
   color: #535541;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   line-height: 1.25;
   text-align: center;
@@ -523,7 +523,7 @@
 .presence-admin .presence-channel-summary-copy p {
   margin: 0;
   color: var(--presence-muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .presence-admin .presence-channel-states {
@@ -541,7 +541,7 @@
   padding: 7px 10px;
   border: 1px solid transparent;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 600;
   white-space: nowrap;
 }
@@ -577,14 +577,14 @@
 
 .presence-admin .presence-channel-note strong {
   display: block;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 
 .presence-admin .presence-channel-note p {
   margin: 4px 0 0;
   color: var(--presence-muted);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.5;
 }
 
@@ -603,7 +603,7 @@
   border-radius: 999px;
   background: var(--presence-paper);
   color: #515441;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   white-space: nowrap;
 }
@@ -648,7 +648,7 @@
 
 .presence-admin .presence-inquiry-state-line time {
   color: var(--presence-muted);
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .presence-admin .presence-interest {
@@ -657,7 +657,7 @@
   border-radius: 7px;
   background: #f1eddf;
   color: #555744;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
   line-height: 1.35;
   text-align: right;
@@ -689,7 +689,7 @@
   display: block;
   margin-top: 10px;
   color: var(--presence-muted);
-  font-size: 10px;
+  font-size: 13px;
   overflow-wrap: anywhere;
 }
 
@@ -724,7 +724,7 @@
   flex-direction: column;
   gap: 7px;
   color: #454835;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -739,7 +739,7 @@
 
 .presence-admin .presence-inquiry-edit .presence-field small {
   color: var(--presence-muted);
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 300;
   line-height: 1.4;
 }
@@ -754,7 +754,7 @@
 .presence-admin .presence-unsaved {
   margin-right: auto;
   color: #784614;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -830,7 +830,7 @@
   .presence-admin .presence-notice-mark {
     width: 30px;
     height: 30px;
-    font-size: 9px;
+    font-size: 13px;
   }
 
   .presence-admin .presence-section-heading {
@@ -840,7 +840,7 @@
   .presence-admin .presence-count {
     margin-top: 3px;
     padding: 7px 9px;
-    font-size: 10px;
+    font-size: 13px;
   }
 
   .presence-admin .presence-empty {
@@ -898,7 +898,7 @@
   .presence-admin .presence-settings-tabs button {
     min-width: 0;
     padding: 8px;
-    font-size: 10px;
+    font-size: 13px;
   }
 
   .presence-admin .presence-settings-panel .panel-head {
@@ -980,7 +980,7 @@
 
   .presence-admin .presence-item-actions .button {
     padding-inline: 8px;
-    font-size: 10px;
+    font-size: 13px;
   }
 
   .presence-admin .presence-filter-list.inquiry-filters {
@@ -989,7 +989,7 @@
 
   .presence-admin .presence-filter-list button {
     padding-inline: 10px;
-    font-size: 10px;
+    font-size: 13px;
   }
 }
 

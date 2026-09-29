@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { Wallet, Package, ChartBar, ArrowRight } from "@phosphor-icons/react";
+import { ArrowRight, CheckCircle, ChartBar, Clock, Info, Wallet, WarningCircle } from "@phosphor-icons/react";
 import { useClub, send, offsetDate, shortDate, number, useResource } from "./lib";
 import type { CashEntry, Page } from "../shared/types";
-import { PageHeader, Panel, Modal, Form, Field, Metric, Empty } from "./ui";
+import { PageHeader, Panel, Modal, Form, Field, Empty } from "./ui";
 import "./panorama.css";
+import "./finance.css";
 
 const categories: Record<string, string> = {
   opening_balance: "Saldo inicial",
@@ -22,146 +23,218 @@ const categories: Record<string, string> = {
 };
 const scenarios = ["base", "cautious", "growth"] as const;
 const scenarioNames = { base: "Base", cautious: "Prudente", growth: "Crecimiento" };
+const incomeCategories = ["opening_balance", "capital_contribution", "delivery_receipt", "other_income", "adjustment"];
+const outflowCategories = ["operating_expense", "stock_purchase", "local_investment", "owner_draw", "other_outflow", "adjustment"];
+type View = "overview" | "activity" | "forecast";
+type CheckState = "recorded" | "review" | "pending" | "empty";
+const checkLabels: Record<CheckState, string> = { recorded: "Registrado", review: "A revisar", pending: "Sin conciliar", empty: "Sin registros" };
+const checkIcons = { recorded: CheckCircle, review: WarningCircle, pending: Clock, empty: Info };
+function StateTag({ state }: { state: CheckState }) {
+  const Icon = checkIcons[state];
+  return <span className={`fin-tag is-${state}`}><Icon size={15} weight="fill" aria-hidden="true" />{checkLabels[state]}</span>;
+}
 
 export default function Finance() {
   const { state, money, reload } = useClub();
   const navigate = useNavigate();
   const [mode, setMode] = useState<"entry" | "plan" | null>(null);
+  const [direction, setDirection] = useState<"income" | "outflow">("outflow");
+  const [category, setCategory] = useState("operating_expense");
   const [entryKey, setEntryKey] = useState(() => crypto.randomUUID());
   const [scenario, setScenario] = useState<(typeof scenarios)[number]>("base");
-  const [view, setView] = useState<"overview" | "forecast" | "activity">("overview");
+  const [view, setView] = useState<View>("overview");
+  const stockDetail = useRef<HTMLDetailsElement>(null);
   const [cashCursor, setCashCursor] = useState<string | null>(null);
   const [cashPrevious, setCashPrevious] = useState<(string | null)[]>([]);
   const cashPage = useResource<Page<CashEntry>>(view === "activity"
     ? `/list/cash-entries${cashCursor ? `?cursor=${encodeURIComponent(cashCursor)}` : ""}` : null);
+
   const today = state.today;
-  const cash = state.financeBalance;
-  const stock = state.products.reduce((n, p) => n + Math.round(p.stock * p.cost / 1000), 0);
-  const withoutSupplier = state.products.filter((p) => !p.supplier).length;
-  const currentPlans = state.cashPlans.filter((p) => p.scenario === scenario);
+  const month = new Date(`${today.slice(0, 7)}-01T12:00:00`).toLocaleDateString("es-AR", { month: "long", year: "numeric" });
+  const cashMovement = state.financeBalance;
+  const stock = state.products.reduce((sum, product) => sum + Math.round(product.stock * product.cost / 1000), 0);
+  const withoutSupplier = state.products.filter((product) => !product.supplier).length;
+  const withoutCost = state.products.filter((product) => product.stock > 0 && product.cost === 0).length;
+  const currentPlans = state.cashPlans.filter((plan) => plan.scenario === scenario);
   const revenue = state.periodRevenue;
   const cogs = state.periodCost;
   const expenses = state.periodExpense;
-  const weeks = Array.from({ length: 13 }, (_, i) => {
-    const from = offsetDate(today, i * 7 + 1);
-    const to = offsetDate(today, (i + 1) * 7);
-    const plans = state.cashPlans.filter((p) => p.scenario === scenario && p.date >= from && p.date <= to);
-    const change = plans.reduce((n, p) => n + p.amount, 0);
-    return { from, to, change, count: plans.length };
+  const result = revenue - cogs - expenses;
+  const hasLocalFigures = revenue !== 0 || cogs !== 0 || expenses !== 0;
+  const scale = Math.max(revenue, cogs, expenses, 1);
+  const untilToday = `1–${shortDate(today)}`;
+  // Sources behind the result. Bombo can tell whether records exist locally; it cannot tell whether they are complete or reconciled.
+  const sources: { key: string; label: string; state: CheckState; value: string; detail: string }[] = [
+    { key: "sales", label: "Ventas locales", state: revenue > 0 ? "recorded" : "empty", value: revenue > 0 ? money(revenue) : "—", detail: revenue > 0 ? `Neto registrado en Bombo, ${untilToday}. Falta contrastar con comprobantes.` : "No hay ventas locales registradas en el período. Puede ser correcto si no hubo operaciones." },
+    { key: "expenses", label: "Gastos", state: expenses > 0 ? "recorded" : "empty", value: expenses > 0 ? money(expenses) : "—", detail: expenses > 0 ? `Cargados en Gastos, ${untilToday}. Podrían faltar registros.` : "No hay gastos cargados en el período. Puede ser correcto si no hubo gastos." },
+    { key: "cost", label: "Costo vendido", state: withoutCost ? "review" : "pending", value: cogs ? money(cogs) : "—", detail: withoutCost ? `${withoutCost} ${withoutCost === 1 ? "lote actual con stock y costo cero" : "lotes actuales con stock y costo cero"}. Revisá facturas y ventas anteriores.` : "Costo histórico guardado en cada venta. Requiere cotejo con facturas." },
+    { key: "cash", label: "Movimiento de caja y banco", state: "pending", value: cashMovement ? money(cashMovement) : "—", detail: "Movimiento neto registrado, no saldo disponible. Falta una apertura conciliada." },
+  ];
+
+  const weeks = Array.from({ length: 13 }, (_, index) => {
+    const from = offsetDate(today, index * 7 + 1);
+    const to = offsetDate(today, (index + 1) * 7);
+    const plans = currentPlans.filter((plan) => plan.date >= from && plan.date <= to);
+    return { from, to, change: plans.reduce((sum, plan) => sum + plan.amount, 0), count: plans.length };
   });
+  const horizonCount = weeks.reduce((sum, week) => sum + week.count, 0);
+  const horizonChange = weeks.reduce((sum, week) => sum + week.change, 0);
   const minChange = Math.min(0, ...weeks.map((week) => week.change));
   const maxChange = Math.max(0, ...weeks.map((week) => week.change));
   const maxAbsChange = Math.max(1, ...weeks.map((week) => Math.abs(week.change)));
-  const annual = Array.from({ length: 12 }, (_, i) => {
-    const period = `2027-${String(i + 1).padStart(2, "0")}`;
-    const plans = state.cashPlans.filter((p) => p.scenario === scenario && p.date.startsWith(period));
-    return { period, income: plans.filter((p) => p.amount > 0).reduce((n, p) => n + p.amount, 0), outflow: plans.filter((p) => p.amount < 0).reduce((n, p) => n - p.amount, 0) };
+  const annual = Array.from({ length: 12 }, (_, index) => {
+    const period = `2027-${String(index + 1).padStart(2, "0")}`;
+    const plans = currentPlans.filter((plan) => plan.date.startsWith(period));
+    return {
+      period,
+      count: plans.length,
+      income: plans.filter((plan) => plan.amount > 0).reduce((sum, plan) => sum + plan.amount, 0),
+      outflow: plans.filter((plan) => plan.amount < 0).reduce((sum, plan) => sum - plan.amount, 0),
+    };
   });
-  async function save(fd: FormData) {
-    const values = Object.fromEntries(fd);
-    const raw = Math.round(Number(fd.get("amount")) * 100);
-    if (!Number.isSafeInteger(raw) || raw === 0) throw new Error("Importe inválido");
+  const annualCount = annual.reduce((sum, period) => sum + period.count, 0);
+
+  async function save(form: FormData) {
+    const values = Object.fromEntries(form);
+    const enteredAmount = Math.round(Number(form.get("amount")) * 100);
+    if (!Number.isSafeInteger(enteredAmount) || enteredAmount <= 0) throw new Error("Ingresá un importe mayor a cero");
+    const amount = direction === "outflow" ? -enteredAmount : enteredAmount;
     await send(mode === "entry" ? "/cash-entries" : "/cash-plans", {
       ...values,
-      amount: raw,
+      amount,
       ...(mode === "entry" ? { sourceSystem: "local", sourceId: entryKey } : {}),
     });
     toast.success(mode === "entry" ? "Movimiento registrado" : "Proyección registrada");
     setMode(null);
     await reload();
-    if (mode === "entry") { setCashCursor(null); setCashPrevious([]); await cashPage.reload(); }
+    if (mode === "entry") {
+      setCashCursor(null);
+      setCashPrevious([]);
+      if (view === "activity") await cashPage.reload();
+      else setView("activity");
+    } else {
+      setView("forecast");
+    }
   }
+
+  function openEntry() {
+    setEntryKey(crypto.randomUUID());
+    setDirection("outflow");
+    setCategory("operating_expense");
+    setMode("entry");
+  }
+
+  function openPlan() {
+    setDirection("outflow");
+    setCategory("operating_expense");
+    setMode("plan");
+  }
+
+  function changeDirection(nextDirection: "income" | "outflow") {
+    setDirection(nextDirection);
+    setCategory(nextDirection === "income" ? "other_income" : "operating_expense");
+  }
+
+  function openStockDetail() {
+    stockDetail.current?.setAttribute("open", "");
+    stockDetail.current?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+  }
+
   return <div className="panorama-finance">
-    <PageHeader eyebrow="BASE FINANCIERA · EN CONCILIACIÓN" title="Caja y planificación" description="Seguí el dinero real, el capital en stock y los compromisos que vienen. Validá cada cifra contra AppSheet, Sheets y comprobantes." actions={<>
-      <button className="button" onClick={() => setMode("plan")}>Agregar proyección</button>
-      <button className="button primary" onClick={() => { setEntryKey(crypto.randomUUID()); setMode("entry"); }}>Registrar movimiento</button>
-    </>} />
-    <div className="finance-nav" role="group" aria-label="Vistas de caja y planificación">
-      <button type="button" className={view === "overview" ? "active" : ""} aria-pressed={view === "overview"} onClick={() => setView("overview")}>Panorama</button>
-      <button type="button" className={view === "forecast" ? "active" : ""} aria-pressed={view === "forecast"} onClick={() => setView("forecast")}>Proyección</button>
-      <button type="button" className={view === "activity" ? "active" : ""} aria-pressed={view === "activity"} onClick={() => setView("activity")}>Movimientos reales</button>
+    <PageHeader
+      eyebrow="Finanzas · operación local"
+      title="Finanzas"
+      description="Resultado del mes y próximos pasos."
+      actions={<button className="button primary" onClick={openEntry}>Registrar movimiento</button>}
+    />
+    <div className="finance-nav" role="group" aria-label="Vistas de finanzas">
+      <button type="button" className={view === "overview" ? "active" : ""} aria-pressed={view === "overview"} onClick={() => setView("overview")}>Resumen</button>
+      <button type="button" className={view === "activity" ? "active" : ""} aria-pressed={view === "activity"} onClick={() => setView("activity")}>Caja</button>
+      <button type="button" className={view === "forecast" ? "active" : ""} aria-pressed={view === "forecast"} onClick={() => setView("forecast")}>Planificación</button>
     </div>
-    {view === "overview" && <div className="metrics-grid three">
-      <Metric title="Movimientos netos registrados" value={money(cash)} icon={<Wallet />} detail="Suma de caja y banco · no equivale a saldo disponible" />
-      <Metric title="Stock a costo" value={money(stock)} icon={<Package />} detail={`${state.products.length} lotes con costo cargado`} />
-      <Metric title="Resultado local preliminar" value={money(revenue - cogs - expenses)} icon={<ChartBar />} detail="Ventas en app − costo vendido − gastos" />
-    </div>}
-    {view === "forecast" && <div className="metrics-grid three">
-      <Metric title="Movimiento previsto · 13 semanas" value={money(weeks.reduce((total, week) => total + week.change, 0))} icon={<ChartBar />} detail={`Escenario ${scenarioNames[scenario].toLowerCase()} · ingresos menos egresos`} />
-      <Metric title="Partidas del escenario" value={String(currentPlans.length)} icon={<Wallet />} detail="Compromisos y cobros planificados" />
-      <Metric title="Saldo de cierre" value="No disponible" icon={<Wallet />} detail="Falta una apertura conciliada" />
-    </div>}
-    {view === "activity" && <div className="metrics-grid three">
-      <Metric title="Movimientos netos registrados" value={money(cash)} icon={<Wallet />} detail="Caja y banco · no equivale a saldo disponible" />
-      <Metric title="Registros en esta página" value={String(cashPage.data?.items.length ?? "…")} icon={<ChartBar />} detail="El historial completo se consulta por páginas" />
-    </div>}
-    <div className="finance-reading-key" role="group" aria-label="Cómo leer los indicadores financieros">
-      <span><i className="is-recorded" />Registrado · caja y banco</span>
-      {view === "overview" && <span><i className="is-valued" />Valuación · stock a costo</span>}
-      {view !== "activity" && <span><i className="is-estimate" />{view === "forecast" ? "Planificado · escenario" : "Preliminar · resultado local"}</span>}
-    </div>
+
     {view === "overview" && <div className="finance-section">
-      <div className="finance-callout">
-        <span className="finance-callout-index">01 / CONCILIACIÓN</span>
-        <div><strong>{withoutSupplier ? `${withoutSupplier} ${withoutSupplier === 1 ? "lote sin proveedor" : "lotes sin proveedor"}` : "Proveedores cargados"}</strong><p>El valor a costo es preliminar hasta cotejar proveedor, factura y conteo físico de cada lote.</p></div>
-        <button onClick={() => navigate("/app/inventario")}>Revisar inventario <ArrowRight size={16} /></button>
-      </div>
-    <Panel title="Capital en inventario" sub="Valuación por lote y proveedor · cantidad actual por costo unitario cargado.">
-      <div className="table-scroll"><table><thead><tr><th>Lote</th><th>Proveedor</th><th>Producto</th><th className="numeric">Cantidad</th><th className="numeric">Costo unitario</th><th className="numeric">Valor a costo</th></tr></thead><tbody>{state.products.map((p) => <tr key={p.id}><td className="table-code">{p.lot}</td><td>{p.supplier || <span className="missing-value">Sin proveedor</span>}</td><td className="table-name">{p.name}</td><td className="numeric">{number(p.stock / 1000)} {p.unit}</td><td className="numeric">{money(p.cost)}</td><td className="numeric amount">{money(Math.round(p.stock * p.cost / 1000))}</td></tr>)}</tbody></table></div>
-      {!state.products.length && <Empty title="Todavía no hay lotes" description="Cargá lotes para ver el capital en stock." />}
-    </Panel>
-    </div>}
-    {view === "forecast" && <div className="finance-section">
-    <div className="forecast-bar">
-      <div><span>ESCENARIO ACTIVO</span><select aria-label="Escenario de planificación" value={scenario} onChange={(e) => setScenario(e.target.value as typeof scenario)}>{scenarios.map((s) => <option key={s} value={s}>{scenarioNames[s]}</option>)}</select></div>
-      <div><span>MOVIMIENTOS NETOS · REGISTRADOS</span><strong>{money(cash)}</strong></div>
-      <div><span>SALDO FINAL · 13 SEMANAS</span><strong>No disponible</strong></div>
-    </div>
-    <div className="finance-missing-opening" role="status" aria-live="polite">
-      <strong>Falta una apertura conciliada</strong>
-      <p>Mostramos los movimientos planificados, pero no calculamos saldos de cierre hasta recibir una apertura verificada con fecha y cuenta.</p>
-    </div>
-    {!currentPlans.length && <div className="forecast-empty"><div><strong>Este escenario todavía no tiene partidas.</strong><p>Agregá cobros, pagos y compromisos para que la proyección sirva para decidir.</p></div><button className="button" onClick={() => setMode("plan")}>Agregar primera partida <ArrowRight size={16} /></button></div>}
-    <Panel title="Movimientos planificados · 13 semanas" sub="Ingresos y egresos previstos por semana. Los saldos de cierre quedan pendientes hasta contar con una apertura conciliada.">
-      <figure className="forecast-visual">
-        <figcaption><span>Movimiento neto previsto por semana</span><strong>Ingresos y egresos</strong></figcaption>
-        <div className="forecast-bars" role="img" aria-label={`Movimientos netos previstos entre ${money(minChange)} y ${money(maxChange)} durante las próximas 13 semanas; no representa saldo de caja`}>
-          {weeks.map((week, index) => {
-            const height = week.change === 0 ? 5 : Math.max(8, (Math.abs(week.change) / maxAbsChange) * 91);
-            return <div className="forecast-bar-cell" key={week.from}>
-              <i className={week.change < 0 ? "is-negative" : ""} style={{ height: `${height}%` }} title={`${shortDate(week.from)}: movimiento neto previsto ${money(week.change)}`} />
-              <small>{String(index + 1).padStart(2, "0")}</small>
-            </div>;
-          })}
+      <section className="finance-result" aria-labelledby="finance-result-title">
+        <div className="finance-result-top">
+          <div>
+            <p className="finance-result-period">{month} · {untilToday}</p>
+            <h2 id="finance-result-title">Resultado local</h2>
+          </div>
+          <span className="finance-result-badges">{state.demo && <span className="finance-result-status is-demo"><Info size={15} weight="fill" aria-hidden="true" />Datos de demostración</span>}<span className="finance-result-status"><Clock size={15} weight="fill" aria-hidden="true" />{hasLocalFigures ? "Preliminar · sin conciliar" : "Sin registros"}</span></span>
         </div>
-        <div className="forecast-scale"><span>{money(minChange)}</span><span>{money(maxChange)}</span></div>
-      </figure>
-      <div className="table-scroll"><table><thead><tr><th>Semana</th><th className="numeric">Movimiento neto previsto</th><th>Saldo al cierre</th><th className="numeric">Partidas</th></tr></thead><tbody>{weeks.map((w, i) => <tr key={w.from}><td className="table-name"><span className="week-index">{String(i + 1).padStart(2, "0")}</span>{shortDate(w.from)} – {shortDate(w.to)}</td><td className="numeric">{money(w.change)}</td><td><span className="missing-value" title="Falta una apertura conciliada">No disponible</span></td><td className="numeric">{w.count}</td></tr>)}</tbody></table></div>
-    </Panel>
-    <Panel title="Plan mensual 2027" sub="Ingresos y egresos previstos del escenario elegido; el costo de personal debe cargarse como partida explícita.">
-      <div className="table-scroll"><table><thead><tr><th>Mes</th><th className="numeric">Ingresos</th><th className="numeric">Egresos</th><th className="numeric">Flujo neto</th></tr></thead><tbody>{annual.map((m) => <tr key={m.period}><td className="table-name">{new Date(`${m.period}-01T12:00:00`).toLocaleDateString("es-AR", { month: "long", year: "numeric" })}</td><td className="numeric">{money(m.income)}</td><td className="numeric">{money(m.outflow)}</td><td className="numeric amount">{money(m.income - m.outflow)}</td></tr>)}</tbody><tfoot><tr><th>Total 2027</th><th className="numeric">{money(annual.reduce((n, m) => n + m.income, 0))}</th><th className="numeric">{money(annual.reduce((n, m) => n + m.outflow, 0))}</th><th className="numeric">{money(annual.reduce((n, m) => n + m.income - m.outflow, 0))}</th></tr></tfoot></table></div>
-    </Panel>
-    <Panel title="Partidas planificadas" sub="Detalle del escenario elegido. Conservá los supuestos y acuerdos de cada revisión mensual.">
-      <div className="table-scroll"><table><thead><tr><th>Fecha</th><th>Cuenta</th><th>Categoría</th><th>Detalle</th><th className="numeric">Importe</th></tr></thead><tbody>{currentPlans.map((p) => <tr key={p.id}><td>{shortDate(p.date)}</td><td>{p.account === "cash" ? "Efectivo" : "Banco"}</td><td>{categories[p.category] || p.category}</td><td className="table-name">{p.description}</td><td className="numeric amount">{money(p.amount)}</td></tr>)}</tbody></table></div>
-      {!currentPlans.length && <Empty title="Sin partidas para este escenario" description="La lista se completará al agregar compromisos." />}
-    </Panel>
+        <strong className="finance-result-value">{hasLocalFigures ? money(result) : "Sin datos"}</strong>
+        {!hasLocalFigures && <p className="finance-empty-hint">Cargá ventas y gastos del local para calcular el resultado.</p>}
+        <dl className="finance-equation">
+          <div><dt>Ventas locales netas</dt><dd>{hasLocalFigures ? money(revenue) : "—"}</dd><span className="finance-mini-track" aria-hidden="true"><i style={{ width: `${Math.max(0, revenue / scale * 100)}%` }} /></span></div>
+          <div><dt>Costo vendido</dt><dd>{hasLocalFigures ? `− ${money(cogs)}` : "—"}</dd><span className="finance-mini-track" aria-hidden="true"><i style={{ width: `${Math.max(0, cogs / scale * 100)}%` }} /></span></div>
+          <div><dt>Gastos registrados</dt><dd>{hasLocalFigures ? `− ${money(expenses)}` : "—"}</dd><span className="finance-mini-track" aria-hidden="true"><i style={{ width: `${Math.max(0, expenses / scale * 100)}%` }} /></span></div>
+        </dl>
+        <details className="finance-method"><summary>Cómo se calcula</summary><p>Ventas locales netas menos costo histórico vendido y gastos registrados, del 1 al {shortDate(today)}. Delivery/AppSheet queda fuera. El resultado requiere conciliación con comprobantes.</p></details>
+        <button className="finance-text-action" type="button" onClick={() => navigate("/app/decisiones/comercial")}>Analizar márgenes y precios <ArrowRight size={16} aria-hidden="true" /></button>
+      </section>
+
+      <div className="finance-overview-grid">
+        <section className="finance-priorities" aria-labelledby="finance-priorities-title">
+          <h2 id="finance-priorities-title">Próximos pasos</h2>
+          <p className="finance-lead">Lo necesario para confiar en las cifras.</p>
+          <ol>
+            <li><div><strong>Caja y banco</strong><p>Registrar y conciliar saldos de apertura.</p><button type="button" onClick={() => navigate("/app/preparar?view=cash")}>Preparar saldos <ArrowRight size={15} aria-hidden="true" /></button></div></li>
+            <li><div><strong>Valor del stock</strong><p>{withoutCost ? `${withoutCost} ${withoutCost === 1 ? "lote sin costo" : "lotes sin costo"}` : withoutSupplier ? `${withoutSupplier} ${withoutSupplier === 1 ? "lote sin proveedor" : "lotes sin proveedor"}` : "Cotejar con conteo y facturas"}</p><button type="button" onClick={() => navigate("/app/inventario")}>Revisar lotes <ArrowRight size={15} aria-hidden="true" /></button></div></li>
+            <li><div><strong>Historial externo</strong><p>Importar y conciliar AppSheet por separado.</p><button type="button" onClick={() => navigate("/app/importar")}>Ir a importaciones <ArrowRight size={15} aria-hidden="true" /></button></div></li>
+          </ol>
+        </section>
+
+        <section className="finance-sources" aria-labelledby="finance-sources-title">
+          <h2 id="finance-sources-title">Estado de los datos</h2>
+          <p className="finance-lead">Registro visible; cobertura pendiente de verificar.</p>
+          <ul>
+            {sources.map((check) => <li key={check.key}><div><strong>{check.label}</strong><span className="finance-source-value">{check.value}</span><details className="finance-source-note"><summary>Fuente y límite</summary><p>{check.detail}</p></details></div><StateTag state={check.state} /></li>)}
+            <li><div><strong>Inventario a costo</strong><span className="finance-source-value">{state.products.length ? money(stock) : "—"}</span><button type="button" onClick={openStockDetail}>Ver {state.products.length} {state.products.length === 1 ? "lote" : "lotes"} <ArrowRight size={15} aria-hidden="true" /></button><details className="finance-source-note"><summary>Fuente y límite</summary><p>Valor de stock actual por costo cargado. Requiere facturas y conteo físico; queda fuera del resultado.</p></details></div><StateTag state={withoutCost ? "review" : "pending"} /></li>
+          </ul>
+          <button type="button" className="finance-text-action" onClick={() => setView("activity")}><Wallet size={16} aria-hidden="true" /> Ver movimientos de caja</button>
+        </section>
+      </div>
+
+      <details className="finance-detail" id="finance-stock-detail" ref={stockDetail}>
+        <summary><span><ChartBar size={18} aria-hidden="true" /> Valuación por lote</span><span>Mostrar tabla <ArrowRight size={16} aria-hidden="true" /></span></summary>
+        <Panel title="Capital en inventario" sub="Cantidad actual por costo unitario cargado. Los lotes con costo cero requieren revisión.">
+          <div className="table-scroll"><table><thead><tr><th scope="col">Lote</th><th scope="col">Proveedor</th><th scope="col">Producto</th><th scope="col" className="numeric">Cantidad</th><th scope="col" className="numeric">Costo unitario</th><th scope="col" className="numeric">Valor a costo</th></tr></thead><tbody>{state.products.map((product) => <tr key={product.id}><td className="table-code">{product.lot}</td><td>{product.supplier || <span className="missing-value">Sin proveedor</span>}</td><td className="table-name">{product.name}</td><td className="numeric">{number(product.stock / 1000)} {product.unit}</td><td className="numeric">{product.cost ? money(product.cost) : <span className="missing-value">Revisar</span>}</td><td className="numeric amount">{product.cost ? money(Math.round(product.stock * product.cost / 1000)) : <span className="missing-value">Pendiente</span>}</td></tr>)}</tbody></table></div>
+          {!state.products.length && <Empty title="Todavía no hay lotes" description="Cargá lotes para ver el capital en stock." />}
+        </Panel>
+      </details>
     </div>}
+
     {view === "activity" && <div className="finance-section">
-    <div className="finance-callout activity"><span className="finance-callout-index">03 / REGISTRO</span><div><strong>Movimientos reales</strong><p>Las ventas locales entran automáticamente. Un gasto cargado en Gastos se refleja en caja cuando registrás su pago acá.</p></div><button onClick={() => { setEntryKey(crypto.randomUUID()); setMode("entry"); }}>Nuevo movimiento <ArrowRight size={16} /></button></div>
-    <Panel title="Movimientos reales" sub="Historial por páginas. Las ventas locales se registran automáticamente. Los gastos cargados en Gastos descuentan caja al registrar su pago aquí.">
-      {cashPage.loading && <p role="status" className="muted">Cargando movimientos…</p>}
-      {cashPage.error && <div className="panorama-inline-error" role="alert"><p>{cashPage.error}</p><button className="button" onClick={() => void cashPage.reload()}>Reintentar carga</button></div>}
-      <div className="table-scroll"><table><thead><tr><th>Fecha</th><th>Cuenta</th><th>Categoría</th><th>Detalle</th><th>Origen</th><th className="numeric">Importe</th></tr></thead><tbody>{cashPage.data?.items.map((e) => <tr key={e.id}><td>{shortDate(e.date)}</td><td>{e.account === "cash" ? "Efectivo" : "Banco"}</td><td>{categories[e.category] || e.category}</td><td className="table-name">{e.description}</td><td><span className="source-id" title={e.sourceSystem && e.sourceId ? `${e.sourceSystem} · ${e.sourceId}` : "App local"}>{e.sourceSystem && e.sourceId ? `${e.sourceSystem} · ${e.sourceId}` : "App local"}</span></td><td className="numeric amount">{money(e.amount)}</td></tr>)}</tbody></table></div>
-      {cashPage.data && !cashPage.data.items.length && <Empty title="Todavía no hay movimientos" description="Registrá un saldo inicial conciliado o el primer movimiento real." />}
-      {cashPage.data && <div className="list-pagination"><span>Página {cashPrevious.length + 1} · {cashPage.data.total} movimientos</span><div><button className="button" disabled={!cashPrevious.length} onClick={() => { setCashCursor(cashPrevious.at(-1) || null); setCashPrevious((rows) => rows.slice(0, -1)); }}>Anterior</button><button className="button" disabled={!cashPage.data.nextCursor} onClick={() => { setCashPrevious((rows) => [...rows, cashCursor]); setCashCursor(cashPage.data!.nextCursor); }}>Siguiente</button></div></div>}
-    </Panel>
+      <div className="finance-activity-lead"><div><span className="finance-status-label">Movimientos reales</span><h2>Un registro de entradas y salidas</h2><p>Las ventas locales entran automáticamente. Un gasto cargado en Gastos afecta la caja cuando registrás su pago acá.</p></div><button className="button primary" type="button" onClick={openEntry}>Nuevo movimiento</button></div>
+      <div className="finance-activity-total"><Wallet size={20} /><p><strong>{money(cashMovement)}</strong><span>movimiento neto acumulado · caja y banco · no es saldo disponible</span></p></div>
+      <Panel title="Historial de caja y banco" sub="Cada movimiento conserva fecha, cuenta, categoría y origen.">
+        {cashPage.loading && <p role="status" className="muted finance-load">Cargando movimientos…</p>}
+        {cashPage.error && <div className="panorama-inline-error" role="alert"><p>{cashPage.error}</p><button className="button" onClick={() => void cashPage.reload()}>Reintentar carga</button></div>}
+        <div className="table-scroll"><table><thead><tr><th scope="col">Fecha</th><th scope="col">Cuenta</th><th scope="col">Categoría</th><th scope="col">Detalle</th><th scope="col">Origen</th><th scope="col" className="numeric">Importe</th></tr></thead><tbody>{cashPage.data?.items.map((entry) => <tr key={entry.id}><td>{shortDate(entry.date)}</td><td>{entry.account === "cash" ? "Efectivo" : "Banco"}</td><td>{categories[entry.category] || entry.category}</td><td className="table-name">{entry.description}</td><td><span className="source-id" title={entry.sourceSystem && entry.sourceId ? `${entry.sourceSystem} · ${entry.sourceId}` : "App local"}>{entry.sourceSystem && entry.sourceId ? `${entry.sourceSystem} · ${entry.sourceId}` : "App local"}</span></td><td className="numeric amount">{money(entry.amount)}</td></tr>)}</tbody></table></div>
+        {cashPage.data && !cashPage.data.items.length && <Empty title="Todavía no hay movimientos" description="Registrá el primer movimiento real con su fuente." />}
+        {cashPage.data && <div className="list-pagination"><span>Página {cashPrevious.length + 1} · {cashPage.data.total} movimientos</span><div><button className="button" disabled={!cashPrevious.length} onClick={() => { setCashCursor(cashPrevious.at(-1) || null); setCashPrevious((rows) => rows.slice(0, -1)); }}>Anterior</button><button className="button" disabled={!cashPage.data.nextCursor} onClick={() => { setCashPrevious((rows) => [...rows, cashCursor]); setCashCursor(cashPage.data!.nextCursor); }}>Siguiente</button></div></div>}
+      </Panel>
     </div>}
-    <Modal title={mode === "entry" ? "Registrar movimiento real" : "Agregar partida proyectada"} open={mode !== null} onClose={() => setMode(null)}>
+
+    {view === "forecast" && <div className="finance-section">
+      <div className="finance-plan-head"><div><span className="finance-status-label">Próximas 13 semanas</span><h2>Planificar sin confundirlo con caja real</h2><p>Elegí un escenario y cargá sus cobros, pagos y compromisos. Cada escenario tiene sus propias partidas.</p></div><button className="button primary" type="button" onClick={openPlan}>Agregar proyección</button></div>
+      <div className="finance-plan-summary"><label>Escenario<select aria-label="Escenario de planificación" value={scenario} onChange={(event) => setScenario(event.target.value as typeof scenario)}>{scenarios.map((item) => <option key={item} value={item}>{scenarioNames[item]}</option>)}</select></label><div><span>Movimiento neto previsto</span><strong>{horizonCount ? money(horizonChange) : "Sin partidas"}</strong><small>{horizonCount ? `${horizonCount} ${horizonCount === 1 ? "partida" : "partidas"} en 13 semanas · no es saldo final` : "No se interpreta como $0 confirmado"}</small></div><div><span>Saldo de cierre</span><strong>Pendiente</strong><small>Requiere apertura y obligaciones conciliadas</small></div></div>
+      <div className="finance-missing-opening" role="note"><div><strong>Para proyectar un saldo confiable falta una apertura conciliada.</strong><p>Estos movimientos son supuestos de trabajo. El análisis de caja exige saldos, fuentes y cobertura completos antes de mostrar un cierre.</p></div><button type="button" onClick={() => navigate("/app/preparar?view=cash")}>Preparar datos de caja <ArrowRight size={16} /></button></div>
+      {!horizonCount ? <div className="forecast-empty"><div><strong>No hay partidas en las próximas 13 semanas.</strong><p>Agregá cobros y pagos con fecha para ver el movimiento previsto del escenario.</p></div><button className="button" type="button" onClick={openPlan}>Agregar primera partida <ArrowRight size={16} /></button></div> : <Panel title="Movimiento previsto por semana" sub="Verde: ingreso neto; naranja: egreso neto. Son cambios planificados, no saldos de caja.">
+        <figure className="forecast-visual"><figcaption><span>Próximas 13 semanas</span><strong>{money(horizonChange)} en total</strong></figcaption><div className="forecast-bars" role="img" aria-label={`Movimientos netos previstos entre ${money(minChange)} y ${money(maxChange)} durante las próximas 13 semanas; no representa saldo de caja`}>{weeks.map((week, index) => { const height = week.change === 0 ? 5 : Math.max(8, (Math.abs(week.change) / maxAbsChange) * 91); return <div className="forecast-bar-cell" key={week.from}><i className={week.change < 0 ? "is-negative" : ""} style={{ height: `${height}%` }} title={`${shortDate(week.from)}: movimiento neto previsto ${money(week.change)}`} /><small>{String(index + 1).padStart(2, "0")}</small></div>; })}</div><div className="forecast-scale"><span>{money(minChange)}</span><span>{money(maxChange)}</span></div></figure>
+        <details className="finance-inner-detail"><summary>Ver detalle de las 13 semanas</summary><div className="table-scroll"><table><thead><tr><th scope="col">Semana</th><th scope="col" className="numeric">Movimiento neto previsto</th><th scope="col">Saldo al cierre</th><th scope="col" className="numeric">Partidas</th></tr></thead><tbody>{weeks.map((week, index) => <tr key={week.from}><td className="table-name"><span className="week-index">{String(index + 1).padStart(2, "0")}</span>{shortDate(week.from)} – {shortDate(week.to)}</td><td className="numeric">{week.count ? money(week.change) : "Sin partidas"}</td><td><span className="missing-value" title="Falta una apertura conciliada">Pendiente</span></td><td className="numeric">{week.count}</td></tr>)}</tbody></table></div></details>
+      </Panel>}
+      <details className="finance-detail"><summary><span><ChartBar size={18} /> Plan mensual 2027</span><span>{annualCount ? `${annualCount} partidas` : "Sin partidas"} <ArrowRight size={16} /></span></summary><Panel title="Plan mensual 2027" sub="Ingresos y egresos previstos del escenario elegido. El costo de personal debe cargarse como partida explícita.">{annualCount ? <div className="table-scroll"><table><thead><tr><th scope="col">Mes</th><th scope="col" className="numeric">Ingresos</th><th scope="col" className="numeric">Egresos</th><th scope="col" className="numeric">Flujo neto</th></tr></thead><tbody>{annual.filter((period) => period.count).map((period) => <tr key={period.period}><td className="table-name">{new Date(`${period.period}-01T12:00:00`).toLocaleDateString("es-AR", { month: "long", year: "numeric" })}</td><td className="numeric">{money(period.income)}</td><td className="numeric">{money(period.outflow)}</td><td className="numeric amount">{money(period.income - period.outflow)}</td></tr>)}</tbody><tfoot><tr><th scope="row">Total planificado</th><th className="numeric">{money(annual.reduce((sum, period) => sum + period.income, 0))}</th><th className="numeric">{money(annual.reduce((sum, period) => sum + period.outflow, 0))}</th><th className="numeric">{money(annual.reduce((sum, period) => sum + period.income - period.outflow, 0))}</th></tr></tfoot></table></div> : <Empty title="Sin plan mensual para este escenario" description="Cuando cargues partidas de 2027 aparecerán acá." />}</Panel></details>
+      <details className="finance-detail"><summary><span><Wallet size={18} /> Partidas del escenario</span><span>{currentPlans.length} registradas <ArrowRight size={16} /></span></summary><Panel title="Partidas planificadas" sub="Detalle y supuestos del escenario elegido.">{currentPlans.length ? <div className="table-scroll"><table><thead><tr><th scope="col">Fecha</th><th scope="col">Cuenta</th><th scope="col">Categoría</th><th scope="col">Detalle</th><th scope="col" className="numeric">Importe</th></tr></thead><tbody>{currentPlans.map((plan) => <tr key={plan.id}><td>{shortDate(plan.date)}</td><td>{plan.account === "cash" ? "Efectivo" : "Banco"}</td><td>{categories[plan.category] || plan.category}</td><td className="table-name">{plan.description}</td><td className="numeric amount">{money(plan.amount)}</td></tr>)}</tbody></table></div> : <Empty title="Sin partidas para este escenario" description="Agregá la primera partida para empezar el plan." />}</Panel></details>
+      <button className="finance-text-action" type="button" onClick={() => navigate("/app/decisiones/caja")}>Abrir análisis de caja <ArrowRight size={16} /></button>
+    </div>}
+
+    <Modal title={mode === "entry" ? "Registrar movimiento real" : "Agregar partida proyectada"} description="Indicá la cuenta, la categoría y una referencia que permita revisar el importe." open={mode !== null} onClose={() => setMode(null)}>
       <Form onCancel={() => setMode(null)} onSubmit={save}>
         <div className="form-grid"><Field label="Fecha"><input name="date" type="date" defaultValue={mode === "entry" ? today : offsetDate(today, 7)} required /></Field><Field label="Cuenta"><select name="account"><option value="cash">Efectivo</option><option value="bank">Banco</option></select></Field></div>
-        {mode === "plan" && <Field label="Escenario"><select name="scenario" defaultValue={scenario}>{scenarios.map((s) => <option key={s} value={s}>{scenarioNames[s]}</option>)}</select></Field>}
-        <Field label="Categoría"><select name="category">{Object.entries(categories).filter(([k]) => k !== "sale").map(([k, label]) => <option key={k} value={k}>{label}</option>)}</select></Field>
-        <Field label="Importe en ARS (negativo si sale dinero)"><input name="amount" type="number" step="0.01" required /></Field>
+        {mode === "plan" && <Field label="Escenario"><select name="scenario" defaultValue={scenario}>{scenarios.map((item) => <option key={item} value={item}>{scenarioNames[item]}</option>)}</select></Field>}
+        <div className="form-grid"><Field label={mode === "entry" ? "Movimiento" : "Tipo de partida"}><select value={direction} onChange={(event) => changeDirection(event.target.value as "income" | "outflow")}><option value="outflow">{mode === "entry" ? "Salida" : "Pago previsto"}</option><option value="income">{mode === "entry" ? "Entrada" : "Cobro previsto"}</option></select></Field><Field label="Categoría"><select name="category" value={category} onChange={(event) => setCategory(event.target.value)}>{(direction === "income" ? incomeCategories : outflowCategories).filter((key) => mode === "entry" || key !== "opening_balance").map((key) => <option key={key} value={key}>{categories[key]}</option>)}</select></Field></div>
+        <Field label="Importe en ARS" hint={`Escribí el importe positivo. Se registrará como ${direction === "income" ? "ingreso" : "egreso"}.`}><input name="amount" type="number" min="0.01" step="0.01" required /></Field>
         <Field label="Detalle / comprobante de referencia"><input name="description" maxLength={180} required /></Field>
       </Form>
     </Modal>

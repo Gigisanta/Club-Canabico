@@ -143,7 +143,7 @@ export default function Sales({ onSale }: { onSale: () => void }) {
     <div className="operation-page sales-page">
       <PageHeader
         className="sales-heading"
-        eyebrow="UNA CAJA CLARA, CADA DÍA"
+        eyebrow="Una caja clara, cada día"
         title="Ventas"
         description="Registrá operaciones y consultá cada comprobante."
         actions={
@@ -645,7 +645,7 @@ export function Ticket({
             <div className="ticket-heading">
               <img className="ticket-logo" src="/brand/bombo-olive.webp" alt="Bombo" />
               <span className="ticket-mark"><CheckCircle size={27} weight="fill" /></span>
-              <span className="ticket-kicker">VENTA REGISTRADA</span>
+              <span className="ticket-kicker">Venta registrada</span>
               <h2>Comprobante interno</h2>
               <p>{state.settings.clubName} · Registro de venta</p>
             </div>

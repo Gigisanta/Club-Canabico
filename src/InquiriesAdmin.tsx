@@ -148,7 +148,7 @@ export default function InquiriesAdmin() {
   return (
     <div className="presence-admin presence-inquiries-admin">
       <PageHeader
-        eyebrow="PRESENCIA PÚBLICA · CONTACTO"
+        eyebrow="Presencia pública · contacto"
         title="Consultas"
         description="Una bandeja privada para responder, registrar el seguimiento y cerrar cada conversación."
         className="presence-page-heading"
@@ -164,7 +164,7 @@ export default function InquiriesAdmin() {
 
       <div className="presence-section-heading presence-inquiries-heading">
         <div>
-          <span className="presence-kicker">BANDEJA PRIVADA</span>
+          <span className="presence-kicker">Bandeja privada</span>
           <h2>Conversaciones</h2>
           <p>Filtrá por etapa y guardá cada cambio antes de continuar.</p>
         </div>
@@ -217,7 +217,7 @@ export default function InquiriesAdmin() {
             <span>02</span>
           </div>
           <div>
-            <span className="presence-kicker">BANDEJA PRIVADA</span>
+            <span className="presence-kicker">Bandeja privada</span>
             <h3>{filter === "all" ? "Aún no hay consultas" : "Sin resultados en esta etapa"}</h3>
             <p>
               {filter === "all"
@@ -280,7 +280,7 @@ export default function InquiriesAdmin() {
                   <small>Origen · {item.source}</small>
                 </div>
                 <div className="presence-message">
-                  <span className="presence-field-caption">MENSAJE RECIBIDO</span>
+                  <span className="presence-field-caption">Mensaje recibido</span>
                   <p>{item.message}</p>
                 </div>
               </div>

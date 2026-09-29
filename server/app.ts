@@ -11,6 +11,7 @@ import rateLimit from "express-rate-limit";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { randomUUID } from "node:crypto";
+import { findValidSeat, prepareSeat, setupHash } from "./team-access.js";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { Prisma, type User, type Role } from "@prisma/client";
@@ -53,6 +54,7 @@ declare global {
   }
 }
 const demo = process.env.DEMO_MODE === "true";
+const realTeamOnly = () => { if (demo && process.env.NODE_ENV !== "test") throw new HttpError(404, "No disponible"); };
 const operationsEnabled = demo || process.env.CLUB_OPERATIONS_APPROVED === "true";
 const secret = process.env.JWT_SECRET;
 if (!secret || secret.length < 32)
@@ -150,6 +152,30 @@ app.get("/api/health", async (_req, res) => {
 });
 app.get("/api/config", (_req, res) => res.json({ demo }));
 app.use("/api/site", publicSite);
+const setupLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 12, standardHeaders: "draft-8", legacyHeaders: false, message: { error: "Demasiados intentos. Reintentá en 15 minutos." } });
+app.post("/api/auth/invitation", setupLimit, async (req, res) => {
+  realTeamOnly();
+  const { token } = z.object({ token: z.string().max(200) }).parse(req.body);
+  const seat = await findValidSeat(token);
+  if (!seat) throw new HttpError(404, "El enlace venció o ya se usó. Pedí uno nuevo.");
+  res.json({ name: seat.name, email: seat.email, role: seat.role, expiresAt: seat.expiresAt });
+});
+app.post("/api/auth/activate", setupLimit, async (req, res) => {
+  realTeamOnly();
+  const { token, password } = z.object({ token: z.string().max(200), password: z.string().min(12).max(72) }).parse(req.body);
+  const seat = await findValidSeat(token);
+  if (!seat) throw new HttpError(404, "El enlace venció o ya se usó. Pedí uno nuevo.");
+  const passwordHash = await bcrypt.hash(password, 12);
+  const user = await db.$transaction(async (tx) => {
+    const valid = await tx.teamSeat.findUnique({ where: { tokenHash: setupHash(token) } });
+    if (!valid?.email || valid.activatedAt || !valid.expiresAt || valid.expiresAt <= new Date())
+      throw new HttpError(404, "El enlace venció o ya se usó. Pedí uno nuevo.");
+    const created = await tx.user.create({ data: { id: valid.id, name: valid.name, email: valid.email, role: valid.role, password: passwordHash } });
+    await tx.teamSeat.update({ where: { id: valid.id }, data: { activatedAt: new Date(), tokenHash: null, expiresAt: null } });
+    return created;
+  });
+  session(res, user);
+});
 app.post(
   "/api/auth/login",
   rateLimit({
@@ -788,27 +814,22 @@ app.put("/api/settings", roles("owner", "admin"), async (req, res) => {
   });
   res.json(value);
 });
-app.post("/api/users", roles("owner"), async (req, res) => {
-  const v = z
-    .object({
-      name: z.string().min(2).max(100),
-      email: z.email(),
-      password: z.string().min(12).max(72),
-      role: z.enum(["admin", "responsible", "cashier", "viewer"]),
-    })
-    .parse(req.body);
-  res
-    .status(201)
-    .json(
-      await db.user.create({
-        data: {
-          ...v,
-          email: v.email.toLowerCase(),
-          password: await bcrypt.hash(v.password, 12),
-        },
-        select: publicUser,
-      }),
-    );
+app.get("/api/team-seats", roles("owner", "admin"), async (_req, res) => {
+  realTeamOnly();
+  const seats = await db.teamSeat.findMany({ select: { id: true, name: true, role: true, email: true, expiresAt: true, activatedAt: true }, orderBy: { createdAt: "asc" } });
+  res.json(seats);
+});
+app.post("/api/team-seats", roles("owner"), async (req, res) => {
+  realTeamOnly();
+  const v = z.object({ name: z.string().trim().min(2).max(100), role: z.enum(["admin", "responsible", "cashier", "viewer"]) }).parse(req.body);
+  const seat = await db.teamSeat.create({ data: v, select: { id: true, name: true, role: true, email: true, expiresAt: true, activatedAt: true } });
+  res.status(201).json(seat);
+});
+app.post("/api/team-seats/:id/invite", roles("owner"), async (req, res) => {
+  realTeamOnly();
+  const id = z.string().min(1).max(100).parse(req.params.id);
+  const { email } = z.object({ email: z.email() }).parse(req.body);
+  res.json(await prepareSeat(id, email));
 });
 app.post("/api/import", roles("owner", "admin"), async (req, res) => {
   const v = z

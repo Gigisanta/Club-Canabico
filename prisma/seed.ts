@@ -4,6 +4,21 @@ import bcrypt from "bcryptjs";
 import { defaults, businessDate } from "../shared/domain.js";
 const db = new PrismaClient();
 async function seed() {
+  const demo = process.env.DEMO_MODE === "true";
+  if (!demo) {
+    if (/demo/i.test(new URL(process.env.DATABASE_URL || "").pathname))
+      throw new Error("La conexión apunta a una base llamada demo. Usá una base real separada.");
+    if (await db.user.count({ where: { email: { endsWith: "@demo.bombo.local" } } }))
+      throw new Error("La base contiene usuarios de demostración. Usá una base real separada.");
+    for (const [id, name, role] of [
+      ["tiziano", "Tiziano", "owner"],
+      ["camila", "Camila", "admin"],
+      ["gio", "Gio", "admin"],
+    ] as const) {
+      if (await db.user.findUnique({ where: { id }, select: { id: true } })) continue;
+      await db.teamSeat.upsert({ where: { id }, create: { id, name, role }, update: {} });
+    }
+  }
   if (await db.user.count()) {
     if (process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "production" &&
         await db.user.findUnique({ where: { email: "owner@demo.bombo.local" }, select: { id: true } })) {
@@ -19,31 +34,18 @@ async function seed() {
     } else console.log("La base ya tiene usuarios; no se modificó.");
     return;
   }
-  const demo = process.env.DEMO_MODE === "true";
   await db.setting.upsert({
     where: { id: 1 },
     create: { id: 1, value: { ...defaults } },
     update: {},
   });
   if (!demo) {
-    if (
-      !process.env.ADMIN_EMAIL ||
-      !process.env.ADMIN_PASSWORD ||
-      process.env.ADMIN_PASSWORD.length < 12
-    )
-      throw new Error(
-        "Configurá ADMIN_EMAIL y ADMIN_PASSWORD (12 caracteres mínimo)",
-      );
-    await db.user.create({
-      data: {
-        id: "owner",
-        name: process.env.ADMIN_NAME || "Administrador",
-        email: process.env.ADMIN_EMAIL.toLowerCase(),
-        password: await bcrypt.hash(process.env.ADMIN_PASSWORD, 12),
-        role: "owner",
-      },
-    });
-    console.log("Administrador creado. Base sin datos de demostración.");
+    if (process.env.ADMIN_EMAIL || process.env.ADMIN_PASSWORD) {
+      if (!process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 12)
+        throw new Error("Configurá ADMIN_EMAIL y ADMIN_PASSWORD (12 caracteres mínimo), o dejá ambos vacíos para activar con invitación.");
+      await db.user.create({ data: { id: "owner", name: process.env.ADMIN_NAME || "Administrador", email: process.env.ADMIN_EMAIL.toLowerCase(), password: await bcrypt.hash(process.env.ADMIN_PASSWORD, 12), role: "owner" } });
+      console.log("Administrador inicial creado. Base sin datos de demostración.");
+    } else console.log("Club real preparado: Tiziano, Camila y Gio esperan correo y activación individual.");
     return;
   }
   if (process.env.NODE_ENV === "production")

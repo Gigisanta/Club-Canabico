@@ -429,7 +429,7 @@ export default function DecisionCenter() {
   return (
     <div className="decision-center">
       <PageHeader
-        eyebrow="GESTIÓN · DECISIONES"
+        eyebrow="Gestión · decisiones"
         title="Centro de decisiones"
         description="Prioridades de stock, actividad comercial y caja con su evidencia, alcance y próximo paso."
         actions={(

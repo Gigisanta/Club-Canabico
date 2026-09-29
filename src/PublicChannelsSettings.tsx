@@ -28,7 +28,7 @@ export default function PublicChannelsSettings() {
         <div className="presence-channel-content">
           <div className="presence-channel-summary" aria-label="Visibilidad actual de los canales">
             <div className="presence-channel-summary-copy">
-              <span className="presence-kicker">ESTADO DE LA VISTA PREVIA</span>
+              <span className="presence-kicker">Estado de la vista previa</span>
               <strong>Canales del club</strong>
               <p>Dejá un canal vacío para mantenerlo oculto.</p>
             </div>

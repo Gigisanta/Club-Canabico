@@ -1,0 +1,19 @@
+.app-shell .team-overview { display: flex; gap: 0; margin: 2px 0 26px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; width: fit-content; }
+.app-shell .team-overview > div { display: flex; align-items: baseline; gap: 10px; min-width: 160px; padding: 13px 18px; }
+.app-shell .team-overview > div + div { border-left: 1px solid var(--border); }
+.app-shell .team-overview strong { color: var(--brand-olive); font-size: 27px; line-height: 1; font-variant-numeric: tabular-nums; }
+.app-shell .team-overview span { color: var(--muted); font-size: 14px; }
+.app-shell .team-pending h3, .app-shell .team-active-title { margin: 0 0 14px; font-size: 18px; }
+.app-shell .team-active-title { margin-top: 30px; }
+.app-shell .team-pending-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.app-shell .team-seat { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; min-width: 0; padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: #fffdf7; }
+.app-shell .team-seat-head { display: flex; align-items: center; gap: 10px; }
+.app-shell .team-seat-head > div { display: flex; flex-direction: column; }
+.app-shell .team-seat-head strong { font-size: 16px; }
+.app-shell .team-seat-head small, .app-shell .team-seat-email { color: var(--muted); font-size: 13px; }
+.app-shell .team-seat-status { border-radius: 99px; padding: 4px 9px; background: #eae5cf; color: var(--brand-olive); font-size: 12px; font-weight: 700; }
+.app-shell .team-seat-email { margin: 0; overflow-wrap: anywhere; }
+.app-shell .team-seat .button { margin-top: auto; }
+.team-link-result input { width: 100%; }
+@media (max-width: 840px) { .app-shell .team-pending-grid { grid-template-columns: 1fr; } }
+@media (max-width: 480px) { .app-shell .team-overview { width: 100%; } .app-shell .team-overview > div { min-width: 0; flex: 1; padding: 12px; } }

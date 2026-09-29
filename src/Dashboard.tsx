@@ -92,7 +92,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
     <div className="panorama-dashboard">
       {metrics.error ? (
         <section className="panorama-load-state is-error" role="alert" aria-live="assertive">
-          <span className="signal-eyebrow">PANORAMA NO DISPONIBLE</span>
+          <span className="signal-eyebrow">Panorama no disponible</span>
           <h1>No pudimos cargar los indicadores</h1>
           <p>{metrics.error}</p>
           <button className="button primary" onClick={() => void metrics.reload()}>Reintentar</button>
@@ -181,7 +181,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
   return (
     <div className="panorama-dashboard">
       <PageHeader
-        eyebrow="PANORAMA DEL CLUB"
+        eyebrow="Panorama del club"
         title="Panorama general"
         description="Explorá actividad, proyecciones, socios y recursos por separado. Cada vista conserva su período y fuente."
         actions={
@@ -264,7 +264,7 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
         </div>
       </div>
       <div className="panorama-conclusion">
-        <div><span className="eyebrow">LECTURA RÁPIDA</span><strong>{area === "activity" ? `${count} ventas en el período` : area === "projections" ? outlook.revenue7 === null ? "Aún falta historial para proyectar ventas" : `Proyección orientativa: ${money(outlook.revenue7)} en 7 días` : area === "members" ? `${active} socios con compras en el período` : `${low.length} lotes bajo el mínimo`}</strong><p>{area === "activity" ? "El gráfico compara ingresos registrados con el período anterior." : area === "projections" ? "Las estimaciones se basan en el ritmo reciente y no equivalen a saldos de caja." : area === "members" ? "Revisá frecuencia, primeras compras e inactividad en las fichas." : "Contrastá valor, responsables y gastos con las fuentes registradas."}</p></div>
+        <div><span className="eyebrow">Lectura rápida</span><strong>{area === "activity" ? `${count} ventas en el período` : area === "projections" ? outlook.revenue7 === null ? "Aún falta historial para proyectar ventas" : `Proyección orientativa: ${money(outlook.revenue7)} en 7 días` : area === "members" ? `${active} socios con compras en el período` : `${low.length} lotes bajo el mínimo`}</strong><p>{area === "activity" ? "El gráfico compara ingresos registrados con el período anterior." : area === "projections" ? "Las estimaciones se basan en el ritmo reciente y no equivalen a saldos de caja." : area === "members" ? "Revisá frecuencia, primeras compras e inactividad en las fichas." : "Contrastá valor, responsables y gastos con las fuentes registradas."}</p></div>
         <button className="button" onClick={() => navigate(area === "activity" ? "/app/ventas" : area === "projections" ? (["owner", "admin"].includes(user.role) ? "/app/finanzas" : "/app/ventas") : area === "members" ? "/app/socios" : "/app/inventario")}> {area === "activity" ? "Ver ventas" : area === "projections" ? (["owner", "admin"].includes(user.role) ? "Ver caja" : "Ver ventas") : area === "members" ? "Ver socios" : "Ver inventario"} <ArrowRight size={16} /></button>
       </div>
       {area === "activity" && <>
@@ -378,13 +378,13 @@ export function Dashboard({ onSale }: { onSale: () => void }) {
                   tickLine={false}
                   axisLine={false}
                   minTickGap={40}
-                  tick={{ fontSize: 10, fill: "#686b57" }}
+                  tick={{ fontSize: 12, fill: "#55583f" }}
                   dy={8}
                 />
                 <YAxis
                   tickLine={false}
                   axisLine={false}
-                  tick={{ fontSize: 10, fill: "#686b57" }}
+                  tick={{ fontSize: 12, fill: "#55583f" }}
                   tickFormatter={(v) =>
                     `${v >= 1000 ? `${number(v / 1000)}k` : v}`
                   }

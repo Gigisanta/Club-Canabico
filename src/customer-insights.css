@@ -21,13 +21,13 @@
   align-items: center;
   gap: 7px;
   color: var(--brand-olive);
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: .08em;
 }
 
 .customer-insights-head > span svg { flex: none; color: var(--brand-olive-mid); }
-.customer-insights-head small { color: var(--muted); font-size: 10px; }
+.customer-insights-head small { color: var(--muted); font-size: 13px; }
 
 .customer-insights-grid {
   display: grid;
@@ -37,7 +37,7 @@
 
 .customer-insights-grid > div { min-width: 0; padding: 3px 11px; border-left: 1px solid var(--border); }
 .customer-insights-grid > div:first-child { padding-left: 0; border-left: 0; }
-.customer-insights-grid span { display: block; margin-bottom: 5px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+.customer-insights-grid span { display: block; margin-bottom: 5px; color: var(--muted); font-size: 13px; line-height: 1.35; }
 .customer-insights-grid strong { display: block; color: var(--text); font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 
 .customer-insights-next {
@@ -47,14 +47,14 @@
   padding: 11px 15px;
   border-top: 1px solid var(--border);
   color: var(--brand-olive);
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
   line-height: 1.5;
 }
 
 .customer-insights-next svg { flex: none; margin-top: 1px; color: var(--brand-olive-mid); }
-.customer-insights-method { margin: 0; padding: 10px 15px 12px; border-top: 1px solid var(--border); color: var(--muted); font-size: 10px; line-height: 1.55; }
-.customer-insights-empty { margin: 0; padding: 2px 15px 15px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.customer-insights-method { margin: 0; padding: 10px 15px 12px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; line-height: 1.55; }
+.customer-insights-empty { margin: 0; padding: 2px 15px 15px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .customer-insights.compact { margin: 3px 0 15px; }
 .customer-insights.compact .customer-insights-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .customer-insights.compact .customer-insights-grid > div:last-child { display: none; }

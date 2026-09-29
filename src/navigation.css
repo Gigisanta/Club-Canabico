@@ -9,7 +9,7 @@
 .hub-link > span:nth-child(2) { flex: 1; min-width: 0; }
 .hub-link svg { flex: none; color: var(--brand-lime); }
 .hub-link:hover, .hub-toggle:hover { color: white; background: #ffffff1b; }
-.hub-link .nav-count { flex: none; font-size: 11px; }
+.hub-link .nav-count { flex: none; font-size: 13px; }
 .hub-toggle { display: grid; place-items: center; flex: none; width: 35px; height: 42px; border: 0; border-radius: 9px; background: transparent; color: var(--brand-cream); cursor: pointer; }
 .hub-toggle svg { transition: transform .16s ease; }
 .hub-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }

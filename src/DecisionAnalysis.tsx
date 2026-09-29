@@ -414,7 +414,7 @@ function ImportedHistoryPanel({ value }: { value: unknown }) {
   return (
     <section className="da-imported" aria-labelledby="da-imported-title">
       <div className="da-section-heading">
-        <div><span className="da-kicker">FUENTE APARTE</span><h2 id="da-imported-title">Historial importado · sin verificar</h2></div>
+        <div><span className="da-kicker">Fuente aparte</span><h2 id="da-imported-title">Historial importado · sin verificar</h2></div>
         <StatusPill tone="caution">No se suma al stock ni a la caja local</StatusPill>
       </div>
       {value == null ? (
@@ -447,7 +447,7 @@ function SourceStatePanel({ value }: { value: unknown }) {
   const state = asRecord(value);
   return (
     <section className="da-source-state" aria-label="Estado de las fuentes históricas">
-      <div className="da-source-state__summary"><span className="da-kicker">ESTADO DE FUENTES</span><strong>{sourceStateText(state.state)}</strong></div>
+      <div className="da-source-state__summary"><span className="da-kicker">Estado de fuentes</span><strong>{sourceStateText(state.state)}</strong></div>
       <dl>
         <div><dt>Importaciones aceptadas</dt><dd>{formatCount(state.committed)}</dd></div>
         <div><dt>Conciliaciones registradas</dt><dd>{formatCount(state.reconciled)}</dd></div>
@@ -490,7 +490,7 @@ function InventoryView({ data }: { data: DataRecord }) {
       </div>
 
       <section className="da-card" aria-labelledby="da-lots-title">
-        <div className="da-section-heading"><div><span className="da-kicker">INVENTARIO ACTUAL</span><h2 id="da-lots-title">Lotes locales</h2></div><StatusPill tone={lots.length ? "good" : "caution"}>{lots.length ? `${formatCount(lots.length)} lotes` : "Sin lotes"}</StatusPill></div>
+        <div className="da-section-heading"><div><span className="da-kicker">Inventario actual</span><h2 id="da-lots-title">Lotes locales</h2></div><StatusPill tone={lots.length ? "good" : "caution"}>{lots.length ? `${formatCount(lots.length)} lotes` : "Sin lotes"}</StatusPill></div>
         {lots.length === 0 ? <EmptyState title="No hay lotes locales en la respuesta">El historial importado no se usa para completar ni estimar estas existencias.</EmptyState> : (
           <div className="da-table-wrap">
             <table>
@@ -529,11 +529,11 @@ function InventoryView({ data }: { data: DataRecord }) {
       </section>
 
       <section className="da-card">
-        <div className="da-section-heading"><div><span className="da-kicker">EVIDENCIA PARA REPONER</span><h2>Demanda, costo y posición</h2></div></div>
+        <div className="da-section-heading"><div><span className="da-kicker">Evidencia para reponer</span><h2>Demanda, costo y posición</h2></div></div>
         <CommerceEvidence commerce={commerce} />
       </section>
       <section className="da-card" aria-labelledby="da-lead-times-title">
-        <div className="da-section-heading"><div><span className="da-kicker">COMPRAS HISTÓRICAS</span><h2 id="da-lead-times-title">Plazos reales de entrega</h2></div></div>
+        <div className="da-section-heading"><div><span className="da-kicker">Compras históricas</span><h2 id="da-lead-times-title">Plazos reales de entrega</h2></div></div>
         {observedLeadTimes.length ? <div className="da-table-wrap"><table>
           <caption>Pedidos y recepciones de compras importadas con diferencia conciliada cero. Estos plazos no modifican automáticamente la regla de reposición.</caption>
           <thead><tr><th scope="col">Proveedor externo</th><th scope="col">Fuente</th><th scope="col">Muestra</th><th scope="col">Mediana</th><th scope="col">Percentil 75</th><th scope="col">Rango</th></tr></thead>
@@ -585,7 +585,7 @@ function ProfitabilityCard({ profitability, onDownloadDelivery }: { profitabilit
   const period = asRecord(localMonth.period);
   return <div className="da-profitability-grid">
     <section className="da-card da-card--subtle" aria-labelledby="da-local-pnl-title">
-      <div className="da-section-heading"><div><span className="da-kicker">VENTA LOCAL</span><h3 id="da-local-pnl-title">Resultado observado del mes</h3></div><StatusPill tone="partial">Cobertura parcial</StatusPill></div>
+      <div className="da-section-heading"><div><span className="da-kicker">Venta local</span><h3 id="da-local-pnl-title">Resultado observado del mes</h3></div><StatusPill tone="partial">Cobertura parcial</StatusPill></div>
       <p className="da-muted">Período: {formatDate(period.from)} a {formatDate(period.through)}. Las ventas locales se mantienen separadas del delivery histórico.</p>
       <dl className="da-stat-list">
         <div><dt>Ventas netas observadas</dt><dd>{formatCents(localMonth.netSalesCents)}</dd></div>
@@ -598,7 +598,7 @@ function ProfitabilityCard({ profitability, onDownloadDelivery }: { profitabilit
       <p className="da-footnote">El resultado completo solo aparece cuando ventas, costos y gastos tienen cobertura completa.</p>
     </section>
     <section className="da-card da-card--imported" aria-labelledby="da-delivery-title">
-      <div className="da-section-heading"><div><span className="da-kicker">FUENTE HISTÓRICA APARTE</span><h3 id="da-delivery-title">Delivery importado</h3></div><StatusPill tone="caution">No conciliado con ventas locales</StatusPill></div>
+      <div className="da-section-heading"><div><span className="da-kicker">Fuente histórica aparte</span><h3 id="da-delivery-title">Delivery importado</h3></div><StatusPill tone="caution">No conciliado con ventas locales</StatusPill></div>
       <p className="da-muted">Resumen agregado de registros históricos. No representa ventas individuales ni se incorpora al resultado local.</p>
       <dl className="da-stat-list"><div><dt>Ventas importadas</dt><dd>{formatCount(delivery.saleCount)}</dd></div><div><dt>Ingresos importados</dt><dd>{formatCents(delivery.revenueCents)}</dd></div></dl>
       <button className="da-button da-button--secondary" type="button" onClick={() => onDownloadDelivery(delivery.saleCount, delivery.revenueCents)}>Descargar CSV resumen de delivery</button>
@@ -659,7 +659,7 @@ function CommercialBreakdowns({ profitability }: { profitability: DataRecord }) 
     : "Ventas locales del período informado por el servidor";
   return <section className="da-card da-commercial-breakdowns" aria-labelledby="da-commercial-breakdowns-title">
     <div className="da-section-heading">
-      <div><span className="da-kicker">DESGLOSE DESCRIPTIVO</span><h2 id="da-commercial-breakdowns-title">Ingresos y costo histórico</h2></div>
+      <div><span className="da-kicker">Desglose descriptivo</span><h2 id="da-commercial-breakdowns-title">Ingresos y costo histórico</h2></div>
       <StatusPill tone="partial">No es resultado operativo completo</StatusPill>
     </div>
     <p className="da-muted">Producto, categoría, proveedor y canal local: {localScope.toLocaleLowerCase("es-AR")}. El delivery importado muestra el acumulado disponible, sin corte mensual comparable y separado hasta conciliar líneas, lotes y costos.</p>
@@ -765,7 +765,7 @@ function PromotionSimulator({ lots }: { lots: DataRecord[] }) {
   }
 
   return <section className="da-card" aria-labelledby="da-promotion-title">
-    <div className="da-section-heading"><div><span className="da-kicker">SIMULADOR COMERCIAL</span><h2 id="da-promotion-title">Margen de una promoción</h2></div><StatusPill tone="partial">Escenario, no pronóstico causal</StatusPill></div>
+    <div className="da-section-heading"><div><span className="da-kicker">Simulador comercial</span><h2 id="da-promotion-title">Margen de una promoción</h2></div><StatusPill tone="partial">Escenario, no pronóstico causal</StatusPill></div>
     <p className="da-muted">Usa precio y costo histórico por lote. Incluí envío, obsequios y campaña para estimar la contribución; no demuestra que la promoción genere ventas incrementales.</p>
     {products.length === 0 ? <EmptyState title="Hace falta un lote con producto identificado">La simulación requiere al menos un producto existente en los lotes locales.</EmptyState> : <form className="da-form" onSubmit={submit}>
       <label className="da-field da-field--wide"><span>Nombre del escenario</span><input value={draft.name} onChange={(event) => setDraftField("name", event.target.value)} maxLength={100} required /></label>
@@ -807,7 +807,7 @@ function PromotionResult({ result }: { result: DataRecord }) {
   const reference = asRecord(calculation.reference);
   const lines = asRecords(promoted.lines);
   return <section className="da-result" aria-label="Resultado de la simulación de promoción" aria-live="polite">
-    <div className="da-section-heading"><div><span className="da-kicker">RESULTADO</span><h3>{getText(promoted, "name", "Promoción calculada")}</h3></div><StatusPill tone="partial">{statusLabel(calculation.breakEvenStatus)}</StatusPill></div>
+    <div className="da-section-heading"><div><span className="da-kicker">Resultado</span><h3>{getText(promoted, "name", "Promoción calculada")}</h3></div><StatusPill tone="partial">{statusLabel(calculation.breakEvenStatus)}</StatusPill></div>
     <dl className="da-stat-list da-stat-list--compact">
       <div><dt>Contribución promocionada</dt><dd>{formatCents(promoted.contributionCents)}</dd></div>
       {calculation.contributionDifferenceCents != null && <div><dt>Diferencia ante referencia</dt><dd>{formatCents(calculation.contributionDifferenceCents)}</dd></div>}
@@ -836,7 +836,7 @@ function ForecastView({ data }: { data: DataRecord }) {
   const outOfSample = asRecord(sevenDay.outOfSample);
   const interval = asRecord(result.interval80);
   return <section className="da-card" aria-labelledby="da-seven-title">
-    <div className="da-section-heading"><div><span className="da-kicker">VENTAS LOCALES</span><h2 id="da-seven-title">Agregado de siete días</h2></div><StatusPill tone={result.available === true ? "partial" : "caution"}>{result.available === true ? "Estimación calculada" : "No disponible"}</StatusPill></div>
+    <div className="da-section-heading"><div><span className="da-kicker">Ventas locales</span><h2 id="da-seven-title">Agregado de siete días</h2></div><StatusPill tone={result.available === true ? "partial" : "caution"}>{result.available === true ? "Estimación calculada" : "No disponible"}</StatusPill></div>
     {result.available === true ? <>
       <p className="da-muted">Período estimado del {formatDate(result.from)} al {formatDate(result.through)}; entrenamiento con la serie local declarada en el cálculo.</p>
       <dl className="da-stat-list da-stat-list--compact"><div><dt>Estimación central</dt><dd>{formatCents(result.pointCents)}</dd></div><div><dt>Intervalo 80%</dt><dd>{interval.lowerCents == null ? "Sin calibrar" : `${formatCents(interval.lowerCents)} a ${formatCents(interval.upperCents)}`}</dd></div><div><dt>Orígenes de backtest</dt><dd>{formatCount(outOfSample.forecastOrigins)}</dd></div><div><dt>Error absoluto medio</dt><dd>{formatCents(outOfSample.maeCents)}</dd></div></dl>
@@ -874,7 +874,7 @@ function HiringSimulator() {
   const scenarios = asRecord(result?.scenarios);
   const periods = asRecords(scenarios.periods);
   return <section className="da-card" aria-labelledby="da-hiring-title">
-    <div className="da-section-heading"><div><span className="da-kicker">SIMULADOR DE PERSONAL</span><h2 id="da-hiring-title">Costo incremental de contratación</h2></div><StatusPill tone="caution">No decide disponibilidad de caja</StatusPill></div>
+    <div className="da-section-heading"><div><span className="da-kicker">Simulador de personal</span><h2 id="da-hiring-title">Costo incremental de contratación</h2></div><StatusPill tone="caution">No decide disponibilidad de caja</StatusPill></div>
     <p className="da-muted">Calcula el costo laboral ingresado y las unidades que cubrirían ese costo según una contribución supuesta. El saldo conciliado y las obligaciones completas siguen siendo necesarios para evaluar caja.</p>
     <form className="da-form da-form--compact" onSubmit={submit}>
       <div className="da-field-grid da-field-grid--three">
@@ -967,7 +967,7 @@ function CashView({ data }: { data: DataRecord }) {
   return <div className="da-view">
     <ForecastView data={data} />
     <section className="da-card" aria-labelledby="da-cash-weeks-title">
-      <div className="da-section-heading"><div><span className="da-kicker">PLANIFICACIÓN</span><h2 id="da-cash-weeks-title">Caja a trece semanas</h2></div><StatusPill tone={baseCashAvailable ? "good" : "caution"}>{baseCashAvailable ? "Saldo y cobertura atestados" : "Falta saldo o cobertura"}</StatusPill></div>
+      <div className="da-section-heading"><div><span className="da-kicker">Planificación</span><h2 id="da-cash-weeks-title">Caja a trece semanas</h2></div><StatusPill tone={baseCashAvailable ? "good" : "caution"}>{baseCashAvailable ? "Saldo y cobertura atestados" : "Falta saldo o cobertura"}</StatusPill></div>
       <p className="da-muted">Se muestran movimientos observados del escenario y saldos solo cuando el servidor los considera disponibles. No se agregan movimientos históricos importados.</p>
       {baseWeeks.length === 0 ? <EmptyState title="No hay semanas de caja">La respuesta no contiene filas para la proyección base.</EmptyState> : <div className="da-table-wrap"><table><caption>Totales semanales reportados por el servidor; los saldos sin conciliar se muestran como faltantes.</caption><thead><tr><th scope="col">Semana</th>{scenarios.map((scenario) => <th scope="col" key={scenario}>{scenarioNames[scenario]} · cambio observado</th>)}<th scope="col">Saldo de cierre base</th></tr></thead><tbody>{baseWeeks.map((week, index) => {
         const weekNumber = week.week;
@@ -981,7 +981,7 @@ function CashView({ data }: { data: DataRecord }) {
       })}</div>
     </section>
     <section className="da-card" aria-labelledby="da-longrange-title">
-      <div className="da-section-heading"><div><span className="da-kicker">HORIZONTE LARGO</span><h2 id="da-longrange-title">Meses hasta 2027</h2></div><StatusPill tone="partial">Supuestos explícitos</StatusPill></div>
+      <div className="da-section-heading"><div><span className="da-kicker">Horizonte largo</span><h2 id="da-longrange-title">Meses hasta 2027</h2></div><StatusPill tone="partial">Supuestos explícitos</StatusPill></div>
       {periods.length === 0 ? <EmptyState title="No hay escenarios mensuales">Sin filas explícitas para mostrar en este horizonte.</EmptyState> : <div className="da-table-wrap"><table><caption>El cambio proyectado y el saldo se distinguen por escenario; los importes no informados permanecen vacíos.</caption><thead><tr><th scope="col">Mes</th>{scenarios.map((scenario) => <th scope="col" key={scenario}>{scenarioNames[scenario]} · cambio</th>)}<th scope="col">Saldo de cierre base</th></tr></thead><tbody>{periods.map((period, index) => {
         const byScenario = asRecord(period.byScenario);
         const row = (scenario: string) => asRecord(byScenario[scenario]);
@@ -1006,10 +1006,10 @@ function MembersView({ data }: { data: DataRecord }) {
   const queues = asRecord(result.reviewLists);
   const queueValues = ["recentHighSpend", "frequentCore", "lapsedHighSpend", "newOrLowHistory"] as const;
   return <div className="da-view">
-    <section className="da-privacy-note"><span className="da-kicker">USO RESTRINGIDO</span><strong>Revisión humana solamente</strong><p>Los perfiles se muestran con etiquetas temporales. No se exponen identificadores, datos de contacto, permisos ni listas descargables. Esta vista no envía mensajes.</p></section>
+    <section className="da-privacy-note"><span className="da-kicker">Uso restringido</span><strong>Revisión humana solamente</strong><p>Los perfiles se muestran con etiquetas temporales. No se exponen identificadores, datos de contacto, permisos ni listas descargables. Esta vista no envía mensajes.</p></section>
     <div className="da-metric-grid da-metric-grid--four">{queueValues.map((key) => <article className="da-metric" key={key}><span>{reviewListLabels[key]}</span><strong>{formatCount(asRecords(queues[key]).length || (Array.isArray(queues[key]) ? queues[key].length : 0))}</strong><small>Perfiles en cola de revisión</small></article>)}</div>
     <section className="da-card" aria-labelledby="da-members-title">
-      <div className="da-section-heading"><div><span className="da-kicker">SEGMENTOS LOCALES</span><h2 id="da-members-title">Perfiles descriptivos</h2></div><StatusPill tone="partial">{formatCount(members.length)} perfiles · datos locales</StatusPill></div>
+      <div className="da-section-heading"><div><span className="da-kicker">Segmentos locales</span><h2 id="da-members-title">Perfiles descriptivos</h2></div><StatusPill tone="partial">{formatCount(members.length)} perfiles · datos locales</StatusPill></div>
       <p className="da-muted">Corte {formatDate(result.asOfDate)}. El pseudónimo es solo de pantalla y no permite exportar contactos.</p>
       {members.length === 0 ? <EmptyState title="No hay perfiles para revisar">Los miembros del resumen histórico importado, si los hubiera, permanecen separados de esta segmentación local.</EmptyState> : <div className="da-table-wrap"><table><caption>Orden interno estable para esta vista; no se muestran IDs de socio.</caption><thead><tr><th scope="col">Perfil</th><th scope="col">Última compra</th><th scope="col">Compras</th><th scope="col">Gasto acumulado</th><th scope="col">Recencia</th><th scope="col">Frecuencia</th><th scope="col">Gasto</th><th scope="col">Colas humanas</th></tr></thead><tbody>{members.map((member, index) => {
         const queueLabels = Array.isArray(member.reviewLists) ? member.reviewLists.map((item) => reviewListLabels[String(item)] || "Revisión humana").join(" · ") : "Sin cola";
@@ -1017,7 +1017,7 @@ function MembersView({ data }: { data: DataRecord }) {
       })}</tbody></table></div>}
     </section>
     <section className="da-card" aria-labelledby="da-assumptions-title">
-      <div className="da-section-heading"><div><span className="da-kicker">REGLAS DEL SEGMENTO</span><h2 id="da-assumptions-title">Supuestos visibles</h2></div></div>
+      <div className="da-section-heading"><div><span className="da-kicker">Reglas del segmento</span><h2 id="da-assumptions-title">Supuestos visibles</h2></div></div>
       <dl className="da-assumptions"><div><dt>Reciente, hasta</dt><dd>{formatCount(assumptions.recentDays)} días</dd></div><div><dt>Enfriamiento, hasta</dt><dd>{formatCount(assumptions.coolingDays)} días</dd></div><div><dt>Frecuencia media</dt><dd>{formatCount(assumptions.mediumFrequencyPurchases)} compras</dd></div><div><dt>Frecuencia alta</dt><dd>{formatCount(assumptions.highFrequencyPurchases)} compras</dd></div><div><dt>Gasto medio desde</dt><dd>{formatCents(assumptions.mediumSpendCents)}</dd></div><div><dt>Gasto alto desde</dt><dd>{formatCents(assumptions.highSpendCents)}</dd></div></dl>
     </section>
   </div>;
@@ -1099,7 +1099,7 @@ export default function DecisionAnalysis({ section }: DecisionAnalysisProps) {
 
   return <div className="decision-analysis">
     <header className="da-header">
-      <div><span className="da-kicker">LECTURA DE NEGOCIO · CON EVIDENCIA</span><h1>{analysisTitles[activeSection]}</h1><p>{sectionDescriptions[activeSection]} Los datos faltantes y no conciliados permanecen visibles.</p></div>
+      <div><span className="da-kicker">Lectura de negocio · con evidencia</span><h1>{analysisTitles[activeSection]}</h1><p>{sectionDescriptions[activeSection]} Los datos faltantes y no conciliados permanecen visibles.</p></div>
       <div className="da-header-meta"><StatusPill tone={coverageTone(asRecord(data?.sourceState).state)}>{sourceStateText(asRecord(data?.sourceState).state)}</StatusPill><span>Actualizado al {formatDate(lastUpdated)}</span><button type="button" className="da-button da-button--secondary" onClick={() => void load()} disabled={loading}>{loading ? "Actualizando…" : "Actualizar análisis"}</button></div>
     </header>
 
