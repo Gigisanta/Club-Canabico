@@ -1,0 +1,39 @@
+[Unit]
+Description=Bombo encrypted operations backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=bombo
+Group=bombo
+UMask=0077
+StateDirectory=bombo
+StateDirectoryMode=0700
+WorkingDirectory=/opt/bombo/current
+Environment=NODE_ENV=production
+Environment=BACKUP_ROOT=/var/lib/bombo/backups
+Environment=PRIVATE_OBJECT_ROOT=/var/lib/bombo/private-objects
+Environment=PRIVATE_OBJECT_PROVIDER=local
+Environment=PG_BIN=/usr/lib/postgresql/18/bin
+EnvironmentFile=/etc/bombo/backup-worker.env
+ExecStart=/usr/bin/node /opt/bombo/current/scripts/operations-backup-worker.mjs --once
+TimeoutStartSec=6h
+Restart=no
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/bombo
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bombo-backup

@@ -24,10 +24,13 @@ export async function api<T>(
   url: string,
   options: RequestInit = {},
 ): Promise<T> {
+  const headers = new Headers(options.headers);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const res = await fetch(`/api${url}`, {
-    credentials: "include",
     ...options,
-    headers: { "Content-Type": "application/json", ...options.headers },
+    credentials: options.credentials ?? "include",
+    cache: "no-store",
+    headers,
   });
   if (!res.ok) {
     const body = await res
@@ -41,47 +44,81 @@ export const send = <T,>(url: string, body: unknown, method = "POST") =>
   api<T>(url, { method, body: JSON.stringify(body) });
 export function useResource<T>(url: string | null) {
   const [data, setData] = useState<T | null>(null);
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [errorUrl, setErrorUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [settledUrl, setSettledUrl] = useState<string | null>(null);
   const seq = useRef(0);
+  const controller = useRef<AbortController | null>(null);
   const reload = useCallback(async () => {
+    const id = ++seq.current;
+    controller.current?.abort();
     if (!url) {
+      setData(null);
+      setDataUrl(null);
+      setError("");
+      setErrorUrl(null);
+      setSettledUrl(null);
       setLoading(false);
       return;
     }
-    const id = ++seq.current;
+    const request = new AbortController();
+    controller.current = request;
+    // Keep the same resource mounted during a refresh. A URL change is hidden
+    // by dataUrl below, and a failed refresh removes its previous result.
+    setError("");
+    setErrorUrl(null);
+    setSettledUrl(null);
     setLoading(true);
     try {
-      const value = await api<T>(url);
-      if (id === seq.current) {
+      const value = await api<T>(url, { signal: request.signal });
+      if (id === seq.current && !request.signal.aborted) {
         setData(value);
-        setError("");
+        setDataUrl(url);
       }
     } catch (e) {
-      if (id === seq.current) setError((e as Error).message);
+      if (id === seq.current && !request.signal.aborted) {
+        setData(null);
+        setDataUrl(null);
+        setError((e as Error).message);
+        setErrorUrl(url);
+      }
     } finally {
-      if (id === seq.current) setLoading(false);
+      if (controller.current === request) controller.current = null;
+      if (id === seq.current && !request.signal.aborted) {
+        setSettledUrl(url);
+        setLoading(false);
+      }
     }
   }, [url]);
   useEffect(() => {
-    setData(null);
     void reload();
     return () => {
       seq.current++;
+      controller.current?.abort();
+      controller.current = null;
     };
   }, [reload]);
-  return { data, error, loading, reload };
+  return {
+    data: url && dataUrl === url ? data : null,
+    error: url && errorUrl === url ? error : "",
+    loading: Boolean(url) && (loading || settledUrl !== url),
+    reload,
+  };
 }
+const currencyFormatters = new Map(["ARS", "USD"].map(currency => [currency,
+  new Intl.NumberFormat("es-AR", { style: "currency", currency, maximumFractionDigits: 2 }),
+]));
+const numberFormatter = new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 });
+const dateFormatter = new Intl.DateTimeFormat("es-AR", { day: "numeric", month: "short" });
 export const money = (cents: number, currency = "ARS") =>
-  new Intl.NumberFormat("es-AR", {
-    style: "currency",
-    currency,
-    maximumFractionDigits: 2,
-  }).format(cents / 100);
-export const number = (n: number) =>
-  new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 }).format(n);
+  (currencyFormatters.get(currency) ?? new Intl.NumberFormat("es-AR", {
+    style: "currency", currency, maximumFractionDigits: 2,
+  })).format(cents / 100);
+export const number = (n: number) => numberFormatter.format(n);
 export const shortDate = (date: string) =>
-  new Intl.DateTimeFormat("es-AR", { day: "numeric", month: "short" }).format(
+  dateFormatter.format(
     new Date(`${date.slice(0, 10)}T12:00:00`),
   );
 export const initials = (name: string) =>

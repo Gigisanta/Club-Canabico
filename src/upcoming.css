@@ -1,0 +1,50 @@
+/* Próximos pagos: superficie crema, como el equilibrio. En Finanzas el único bloque oliva sigue siendo el resultado del mes. */
+.app-shell .upcoming { display: grid; gap: 14px; padding: clamp(18px, 2.4vw, 28px); border: 1px solid var(--bo-rule); border-radius: 16px; background: var(--bo-paper); scroll-margin-top: 84px; }
+.app-shell .upcoming-top { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px 20px; }
+.app-shell .upcoming-period { margin: 0 0 4px; color: var(--bo-ink-soft); font-size: 14px; }
+.app-shell .upcoming h2 { margin: 0; font-size: clamp(20px, 2vw, 24px); letter-spacing: -.03em; }
+.app-shell .upcoming-badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.app-shell .upcoming-status { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border: 1px solid var(--bo-rule-strong); border-radius: 99px; color: var(--bo-ink-soft); font-size: 13px; font-weight: 650; }
+.app-shell .upcoming-status.is-demo { border-color: var(--brand-lilac); background: var(--bo-info-bg); color: var(--bo-info); }
+.app-shell .upcoming-headline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin: 4px 0 0; }
+.app-shell .upcoming-headline strong { font-size: clamp(30px, 4vw, 46px); font-weight: 600; line-height: 1.05; letter-spacing: -.045em; font-variant-numeric: tabular-nums; }
+.app-shell .upcoming-headline span { color: var(--bo-ink-soft); font-size: 15px; }
+.app-shell .upcoming-facts { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: -4px 0 0; color: var(--bo-ink-soft); font-size: 14px; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.app-shell .upcoming-facts strong { color: var(--bo-ink); }
+.app-shell .upcoming-empty { display: grid; gap: 4px; padding: 14px 0 0; border-top: 1px solid var(--bo-rule); }
+.app-shell .upcoming-empty p { max-width: 70ch; margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.app-shell .upcoming-overdue { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 4px 12px; padding: 10px 14px; border: 1px solid var(--bo-warn); border-radius: 12px; background: var(--bo-warn-bg); color: var(--bo-warn); }
+.app-shell .upcoming-overdue p { margin: 0; color: var(--bo-ink); font-size: 14px; line-height: 1.45; }
+.app-shell .upcoming-overdue p strong { display: block; color: var(--bo-warn); }
+.app-shell .upcoming-group h3 { margin: 4px 0 6px; color: var(--bo-ink-soft); font-size: 13px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.app-shell .upcoming-list { display: grid; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--bo-rule-strong); }
+.app-shell .upcoming-list li { display: grid; grid-template-columns: 70px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--bo-rule); }
+.app-shell .upcoming-date { display: grid; font-variant-numeric: tabular-nums; }
+.app-shell .upcoming-date strong { font-size: 15px; }
+.app-shell .upcoming-date small, .app-shell .upcoming-list li > div small { color: var(--muted); font-size: 13px; }
+.app-shell .upcoming-list li > div strong { display: block; font-size: 15px; overflow-wrap: anywhere; }
+.app-shell .upcoming-list li > div small { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0 4px; }
+.app-shell .upcoming-list li.is-overdue .upcoming-date, .app-shell .upcoming-list li.is-overdue > div small { color: var(--bo-warn); }
+.app-shell .upcoming-amount { font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.app-shell .upcoming-more { width: fit-content; min-height: 44px; padding: 0; border: 0; background: none; color: var(--brand-olive); font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; }
+.app-shell .upcoming-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; }
+.app-shell :is(.upcoming-actions, .upcoming-overdue, .upcoming-card) a { display: inline-flex; align-items: center; gap: 6px; width: fit-content; min-height: 44px; color: var(--brand-olive); font-size: 14px; font-weight: 700; white-space: nowrap; }
+.app-shell .upcoming-method { color: var(--bo-ink-soft); font-size: 13.5px; line-height: 1.5; }
+.app-shell .upcoming-method summary { width: fit-content; min-height: 44px; padding: 12px 0; color: var(--brand-olive); font-weight: 700; }
+.app-shell .upcoming-method p { max-width: 80ch; margin: 4px 0 0; }
+
+/* Inicio: el total de la semana y sus primeros pagos. */
+.app-shell .upcoming-card { display: grid; gap: 8px; margin-top: 16px; padding: 16px 18px; border: 1px solid var(--bo-rule); border-radius: var(--bo-radius); background: var(--bo-paper); }
+.app-shell .upcoming-card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
+.app-shell .upcoming-card h2 { margin: 0; font-size: 17px; letter-spacing: -.02em; }
+.app-shell .upcoming-card .upcoming-status { padding: 3px 9px; font-size: 12.5px; }
+.app-shell .upcoming-card > p { margin: 0; color: var(--bo-ink-soft); font-size: 14px; line-height: 1.45; }
+.app-shell .upcoming-card > p strong { color: var(--bo-ink); font-size: 16px; }
+.app-shell .upcoming-card .upcoming-card-overdue { display: flex; align-items: center; gap: 6px; color: var(--bo-warn); font-weight: 650; }
+
+@media (max-width: 760px) {
+  .app-shell .upcoming-overdue { grid-template-columns: 20px minmax(0, 1fr); }
+  .app-shell .upcoming-overdue a { grid-column: 2; }
+  .app-shell .upcoming-list li { grid-template-columns: 58px minmax(0, 1fr); }
+  .app-shell .upcoming-amount { grid-column: 2; }
+}

@@ -1,0 +1,232 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Bombo encrypted, versioned backup bucket in a separate AWS account.
+
+Parameters:
+  BucketName:
+    Type: String
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+  DataPrefix:
+    Type: String
+    Default: bombo
+    AllowedPattern: '^[a-z0-9][a-z0-9/_-]{0,180}$'
+  BackupTaskRoleArn:
+    Type: String
+    AllowedPattern: '^arn:[a-z0-9-]+:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$'
+  RestoreTaskRoleArn:
+    Type: String
+    AllowedPattern: '^arn:[a-z0-9-]+:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$'
+
+Resources:
+  BackupEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Bombo offsite backup object encryption key
+      EnableKeyRotation: true
+      KeySpec: SYMMETRIC_DEFAULT
+      KeyUsage: ENCRYPT_DECRYPT
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: IndependentAccountKeyAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: BackupTaskCryptographicUse
+            Effect: Allow
+            Principal:
+              AWS: !Ref BackupTaskRoleArn
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: '*'
+          - Sid: RestoreTaskDecryptUse
+            Effect: Allow
+            Principal:
+              AWS: !Ref RestoreTaskRoleArn
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: '*'
+      Tags:
+        - Key: Application
+          Value: Bombo
+        - Key: Purpose
+          Value: encrypted-offsite-backup
+
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: false
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt BackupEncryptionKey.Arn
+      LifecycleConfiguration:
+        Rules:
+          - Id: frequent-commit-retention
+            Status: Enabled
+            Filter:
+              Prefix: !Sub '${DataPrefix}/frequent/commits/'
+            ExpirationInDays: 2
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: frequent-snapshot-retention
+            Status: Enabled
+            Filter:
+              Prefix: !Sub '${DataPrefix}/frequent/snapshots/'
+            ExpirationInDays: 2
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: frequent-object-retention
+            Status: Enabled
+            Filter:
+              Prefix: !Sub '${DataPrefix}/frequent/objects/'
+            ExpirationInDays: 3
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: daily-commit-retention
+            Status: Enabled
+            Filter:
+              Prefix: !Sub '${DataPrefix}/daily/commits/'
+            ExpirationInDays: 30
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: daily-snapshot-retention
+            Status: Enabled
+            Filter:
+              Prefix: !Sub '${DataPrefix}/daily/snapshots/'
+            ExpirationInDays: 30
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: daily-object-retention
+            Status: Enabled
+            Filter:
+              Prefix: !Sub '${DataPrefix}/daily/objects/'
+            ExpirationInDays: 31
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: monthly-commit-retention
+            Status: Enabled
+            Filter:
+              Prefix: !Sub '${DataPrefix}/monthly/commits/'
+            ExpirationInDays: 365
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: monthly-snapshot-retention
+            Status: Enabled
+            Filter:
+              Prefix: !Sub '${DataPrefix}/monthly/snapshots/'
+            ExpirationInDays: 365
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: monthly-object-retention
+            Status: Enabled
+            Filter:
+              Prefix: !Sub '${DataPrefix}/monthly/objects/'
+            ExpirationInDays: 396
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Application
+          Value: Bombo
+        - Key: Purpose
+          Value: encrypted-offsite-backup
+
+  BackupBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BackupBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: WorkloadRolesReadBucketVersioning
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Ref BackupTaskRoleArn
+                - !Ref RestoreTaskRoleArn
+            Action: s3:GetBucketVersioning
+            Resource: !GetAtt BackupBucket.Arn
+          - Sid: BackupTaskListOnlyRetentionCommits
+            Effect: Allow
+            Principal:
+              AWS: !Ref BackupTaskRoleArn
+            Action: s3:ListBucket
+            Resource: !GetAtt BackupBucket.Arn
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - !Sub '${DataPrefix}/frequent/commits/*'
+                  - !Sub '${DataPrefix}/daily/commits/*'
+                  - !Sub '${DataPrefix}/monthly/commits/*'
+          - Sid: BackupTaskReadAndWriteObjects
+            Effect: Allow
+            Principal:
+              AWS: !Ref BackupTaskRoleArn
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+            Resource: !Sub '${BackupBucket.Arn}/${DataPrefix}/*'
+          - Sid: RestoreTaskReadObjects
+            Effect: Allow
+            Principal:
+              AWS: !Ref RestoreTaskRoleArn
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource: !Sub '${BackupBucket.Arn}/${DataPrefix}/*'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt BackupBucket.Arn
+              - !Sub '${BackupBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+Outputs:
+  BackupBucketName:
+    Value: !Ref BackupBucket
+  BackupBucketArn:
+    Value: !GetAtt BackupBucket.Arn
+  BackupEncryptionKeyArn:
+    Value: !GetAtt BackupEncryptionKey.Arn
+  DataPrefix:
+    Value: !Ref DataPrefix

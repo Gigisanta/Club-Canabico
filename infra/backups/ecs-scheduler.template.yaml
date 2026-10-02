@@ -1,0 +1,623 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Bombo one-shot encrypted backup and allowlisted restore tasks on ECS Fargate.
+
+Parameters:
+  ClusterArn:
+    Type: String
+  ImageUri:
+    Type: String
+  EcrRepositoryArn:
+    Type: String
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  TaskSecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+  BackupTaskRoleArn:
+    Type: String
+  BackupTaskRoleName:
+    Type: String
+  RestoreTaskRoleArn:
+    Type: String
+  RestoreTaskRoleName:
+    Type: String
+  DatabaseSecretArn:
+    Type: String
+  RestoreDatabaseSecretArn:
+    Type: String
+  BackupEncryptionSecretArn:
+    Type: String
+  BlobReadWriteTokenSecretArn:
+    Type: String
+  SecretsKmsKeyArn:
+    Type: String
+  BackupBucketName:
+    Type: String
+  BackupBucketArn:
+    Type: String
+  BackupRegion:
+    Type: String
+  BackupPrefix:
+    Type: String
+    Default: bombo
+    AllowedPattern: '^[a-z0-9][a-z0-9/_-]{0,180}$'
+  BackupKmsKeyArn:
+    Type: String
+  RestoreDatabaseAllowlist:
+    Type: String
+    MinLength: 3
+    MaxLength: 2048
+  RestoreObjectBucketName:
+    Type: String
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+    Description: Exact, pre-created, empty, versioned bucket for restored operation objects.
+  RestoreObjectRegion:
+    Type: String
+    AllowedPattern: '^[a-z0-9-]{3,32}$'
+    Description: AWS region of the dedicated restore destination bucket.
+  RestoreObjectKmsKeyArn:
+    Type: String
+    AllowedPattern: '^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/[a-f0-9-]+$'
+    Description: Exact customer-managed KMS key ARN used to encrypt objects written during restore.
+  BackupAlertTopicArn:
+    Type: AWS::SNS::Topic::Arn
+    Description: Existing SNS topic for backup freshness, scheduler dead-letter, and ECS task failure alerts.
+  ScheduleState:
+    Type: String
+    AllowedValues: [ENABLED, DISABLED]
+    Default: DISABLED
+  EphemeralStorageGiB:
+    Type: Number
+    MinValue: 21
+    MaxValue: 200
+    Default: 60
+
+Rules:
+  RestoreObjectBucketMustDifferFromBackupBucket:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref RestoreObjectBucketName, !Ref BackupBucketName]]
+        AssertDescription: The restore destination must not be the backup source bucket.
+
+Conditions:
+  FrequentBackupScheduleEnabled: !Equals [!Ref ScheduleState, ENABLED]
+
+Resources:
+  BackupLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /bombo/operations-backup
+      RetentionInDays: 90
+
+  WorkerExecutionBasePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Pull the one worker ECR repository and write its own task logs.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EcrAuthorizationToken
+            Effect: Allow
+            Action: ecr:GetAuthorizationToken
+            Resource: '*'
+          - Sid: PullOnlyWorkerImageRepository
+            Effect: Allow
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+            Resource: !Ref EcrRepositoryArn
+          - Sid: WriteOnlyWorkerLogGroup
+            Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub '${BackupLogGroup.Arn}:*'
+
+  BackupExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - !Ref WorkerExecutionBasePolicy
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*'
+      Policies:
+        - PolicyName: read-only-backup-task-secrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadOnlyInjectedSecretValues
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref DatabaseSecretArn
+                  - !Ref BackupEncryptionSecretArn
+                  - !Ref BlobReadWriteTokenSecretArn
+              - Sid: DecryptOnlyConfiguredSecretKey
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Ref SecretsKmsKeyArn
+
+  RestoreExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - !Ref WorkerExecutionBasePolicy
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*'
+      Policies:
+        - PolicyName: read-only-restore-task-secrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadOnlyInjectedSecretValues
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref RestoreDatabaseSecretArn
+                  - !Ref BackupEncryptionSecretArn
+              - Sid: DecryptOnlyConfiguredSecretKey
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Ref SecretsKmsKeyArn
+
+  BackupTaskPermissions:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: bombo-versioned-backup-write
+      Roles: [!Ref BackupTaskRoleName]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CheckTargetBucketVersioning
+            Effect: Allow
+            Action: s3:GetBucketVersioning
+            Resource: !Ref BackupBucketArn
+          - Sid: ListOnlyRetentionSlotCommits
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Ref BackupBucketArn
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - !Sub '${BackupPrefix}/frequent/commits/*'
+                  - !Sub '${BackupPrefix}/daily/commits/*'
+                  - !Sub '${BackupPrefix}/monthly/commits/*'
+          - Sid: ReadAndWriteOnlyBackupPrefix
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+            Resource: !Sub '${BackupBucketArn}/${BackupPrefix}/*'
+          - Sid: EncryptWithIndependentBackupKey
+            Effect: Allow
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: !Ref BackupKmsKeyArn
+
+  RestoreTaskPermissions:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: bombo-versioned-backup-read-and-dedicated-restore-write
+      Roles: [!Ref RestoreTaskRoleName]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CheckTargetBucketVersioning
+            Effect: Allow
+            Action: s3:GetBucketVersioning
+            Resource: !Ref BackupBucketArn
+          - Sid: ReadOnlyBackupPrefix
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource: !Sub '${BackupBucketArn}/${BackupPrefix}/*'
+          - Sid: InspectOnlyDedicatedRestoreBucket
+            Effect: Allow
+            Action:
+              - s3:GetBucketVersioning
+              - s3:ListBucketVersions
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${RestoreObjectBucketName}'
+          - Sid: ReadAndWriteOnlyDedicatedRestoreObjects
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${RestoreObjectBucketName}/*'
+          - Sid: DecryptWithIndependentBackupKey
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: !Ref BackupKmsKeyArn
+          - Sid: UseOnlyDedicatedRestoreEncryptionKey
+            Effect: Allow
+            Action:
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:Decrypt
+            Resource: !Ref RestoreObjectKmsKeyArn
+
+  BackupTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: BackupTaskPermissions
+    Properties:
+      Family: bombo-operations-backup
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '1024'
+      Memory: '4096'
+      EphemeralStorage:
+        SizeInGiB: !Ref EphemeralStorageGiB
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt BackupExecutionRole.Arn
+      TaskRoleArn: !Ref BackupTaskRoleArn
+      ContainerDefinitions:
+        - Name: operations-backup
+          Image: !Ref ImageUri
+          Essential: true
+          EntryPoint: [node, /opt/bombo/scripts/operations-backup-cloud-worker.mjs]
+          Command: [backup]
+          Cpu: 768
+          Memory: 3584
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: BACKUP_S3_BUCKET
+              Value: !Ref BackupBucketName
+            - Name: BACKUP_S3_REGION
+              Value: !Ref BackupRegion
+            - Name: BACKUP_S3_KMS_KEY_ARN
+              Value: !Ref BackupKmsKeyArn
+            - Name: BACKUP_S3_PREFIX
+              Value: !Ref BackupPrefix
+            - Name: BACKUP_TIER
+              Value: frequent
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Sub '${DatabaseSecretArn}:DATABASE_URL_UNPOOLED::'
+            - Name: BACKUP_ENCRYPTION_KEY
+              ValueFrom: !Sub '${BackupEncryptionSecretArn}:BACKUP_ENCRYPTION_KEY::'
+            - Name: BLOB_READ_WRITE_TOKEN
+              ValueFrom: !Sub '${BlobReadWriteTokenSecretArn}:BLOB_READ_WRITE_TOKEN::'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref BackupLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: backup
+
+  RestoreTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: RestoreTaskPermissions
+    Properties:
+      Family: bombo-operations-restore
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '1024'
+      Memory: '4096'
+      EphemeralStorage:
+        SizeInGiB: !Ref EphemeralStorageGiB
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt RestoreExecutionRole.Arn
+      TaskRoleArn: !Ref RestoreTaskRoleArn
+      ContainerDefinitions:
+        - Name: operations-restore
+          Image: !Ref ImageUri
+          Essential: true
+          EntryPoint: [node, /opt/bombo/scripts/operations-backup-cloud-worker.mjs]
+          Command: [restore]
+          Cpu: 768
+          Memory: 3584
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: BACKUP_S3_BUCKET
+              Value: !Ref BackupBucketName
+            - Name: BACKUP_S3_REGION
+              Value: !Ref BackupRegion
+            - Name: BACKUP_S3_KMS_KEY_ARN
+              Value: !Ref BackupKmsKeyArn
+            - Name: BACKUP_S3_PREFIX
+              Value: !Ref BackupPrefix
+            - Name: RESTORE_DATABASE_ALLOWLIST
+              Value: !Ref RestoreDatabaseAllowlist
+            - Name: RESTORE_OBJECT_PROVIDER
+              Value: s3
+            - Name: RESTORE_OBJECT_BUCKET
+              Value: !Ref RestoreObjectBucketName
+            - Name: RESTORE_OBJECT_BUCKET_ALLOWLIST
+              Value: !Ref RestoreObjectBucketName
+            - Name: RESTORE_OBJECT_REGION
+              Value: !Ref RestoreObjectRegion
+            - Name: RESTORE_OBJECT_KMS_KEY_ARN
+              Value: !Ref RestoreObjectKmsKeyArn
+            - Name: BACKUP_RESTORE_COMMIT_KEY
+              Value: ''
+            - Name: BACKUP_RESTORE_COMMIT_VERSION_ID
+              Value: ''
+          Secrets:
+            - Name: RESTORE_DATABASE_URL
+              ValueFrom: !Sub '${RestoreDatabaseSecretArn}:RESTORE_DATABASE_URL::'
+            - Name: BACKUP_ENCRYPTION_KEY
+              ValueFrom: !Sub '${BackupEncryptionSecretArn}:BACKUP_ENCRYPTION_KEY::'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref BackupLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: restore
+
+  SchedulerDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  FrequentBackupCommitMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref BackupLogGroup
+      FilterPattern: '{ $.mode = "cloud-backup" && $.ok = true && $.encrypted = true && $.committed = true && $.tier = "frequent" }'
+      MetricTransformations:
+        - MetricName: FrequentBackupCommitted
+          MetricNamespace: Bombo/OperationsBackup
+          MetricValue: '1'
+          DefaultValue: 0
+
+  FrequentBackupFreshnessAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: FrequentBackupScheduleEnabled
+    Properties:
+      AlarmDescription: No successful encrypted frequent backup commit was logged in the last 15-minute window; CloudWatch evaluation and log-ingestion latency can delay notification beyond that window.
+      AlarmActions:
+        - !Ref BackupAlertTopicArn
+      Namespace: Bombo/OperationsBackup
+      MetricName: FrequentBackupCommitted
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  SchedulerDeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scheduler has messages awaiting inspection in the Bombo backup dead-letter queue.
+      AlarmActions:
+        - !Ref BackupAlertTopicArn
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt SchedulerDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  EcsTaskFailurePublisherRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/bombo-backup-task-failures'
+      Policies:
+        - PolicyName: publish-only-bombo-backup-task-failures
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PublishOnlyBackupAlertTopic
+                Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref BackupAlertTopicArn
+
+  EcsTaskFailureAlertRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: bombo-backup-task-failures
+      Description: Notify when a Bombo backup or restore ECS task stops with a nonzero container exit code.
+      EventPattern:
+        source: [aws.ecs]
+        detail-type: [ECS Task State Change]
+        detail:
+          clusterArn: [!Ref ClusterArn]
+          lastStatus: [STOPPED]
+          taskDefinitionArn:
+            - !Ref BackupTaskDefinition
+            - !Ref RestoreTaskDefinition
+          containers:
+            name: [operations-backup, operations-restore]
+            exitCode:
+              - anything-but: 0
+      Targets:
+        - Id: backup-task-failure-topic
+          Arn: !Ref BackupAlertTopicArn
+          RoleArn: !GetAtt EcsTaskFailurePublisherRole.Arn
+          InputPath: $.detail
+
+  SchedulerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/*'
+      Policies:
+        - PolicyName: run-only-bombo-backup-task-and-send-failures
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: RunOnlyTheBackupTaskDefinition
+                Effect: Allow
+                Action: ecs:RunTask
+                Resource: !Ref BackupTaskDefinition
+              - Sid: PassOnlyTheTaskRolesToEcs
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !GetAtt BackupExecutionRole.Arn
+                  - !Ref BackupTaskRoleArn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
+              - Sid: DeliverFailedInvocationsToQueue
+                Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt SchedulerDeadLetterQueue.Arn
+
+  FrequentBackupSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: bombo-backup-frequent
+      Description: Run the encrypted Bombo backup worker every ten minutes.
+      ScheduleExpression: rate(10 minutes)
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      State: !Ref ScheduleState
+      Target:
+        Arn: !Ref ClusterArn
+        RoleArn: !GetAtt SchedulerExecutionRole.Arn
+        EcsParameters:
+          TaskDefinitionArn: !Ref BackupTaskDefinition
+          LaunchType: FARGATE
+          PlatformVersion: LATEST
+          TaskCount: 1
+          Group: bombo-operations-backup
+          NetworkConfiguration:
+            AwsvpcConfiguration:
+              AssignPublicIp: DISABLED
+              Subnets: !Ref PrivateSubnetIds
+              SecurityGroups: !Ref TaskSecurityGroupIds
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
+          MaximumRetryAttempts: 3
+        DeadLetterConfig:
+          Arn: !GetAtt SchedulerDeadLetterQueue.Arn
+
+  DailyBackupSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: bombo-backup-daily
+      Description: Run the daily encrypted Bombo snapshot at 02:00 UTC.
+      ScheduleExpression: cron(0 2 * * ? *)
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      State: !Ref ScheduleState
+      Target:
+        Arn: !Ref ClusterArn
+        RoleArn: !GetAtt SchedulerExecutionRole.Arn
+        Input: '{"overrides":{"containerOverrides":[{"name":"operations-backup","environment":[{"name":"BACKUP_TIER","value":"daily"}]}]}}'
+        EcsParameters:
+          TaskDefinitionArn: !Ref BackupTaskDefinition
+          LaunchType: FARGATE
+          PlatformVersion: LATEST
+          TaskCount: 1
+          Group: bombo-operations-backup
+          NetworkConfiguration:
+            AwsvpcConfiguration:
+              AssignPublicIp: DISABLED
+              Subnets: !Ref PrivateSubnetIds
+              SecurityGroups: !Ref TaskSecurityGroupIds
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
+          MaximumRetryAttempts: 3
+        DeadLetterConfig:
+          Arn: !GetAtt SchedulerDeadLetterQueue.Arn
+
+  MonthlyBackupSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: bombo-backup-monthly
+      Description: Run the monthly encrypted Bombo snapshot on day one at 03:00 UTC.
+      ScheduleExpression: cron(0 3 1 * ? *)
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      State: !Ref ScheduleState
+      Target:
+        Arn: !Ref ClusterArn
+        RoleArn: !GetAtt SchedulerExecutionRole.Arn
+        Input: '{"overrides":{"containerOverrides":[{"name":"operations-backup","environment":[{"name":"BACKUP_TIER","value":"monthly"}]}]}}'
+        EcsParameters:
+          TaskDefinitionArn: !Ref BackupTaskDefinition
+          LaunchType: FARGATE
+          PlatformVersion: LATEST
+          TaskCount: 1
+          Group: bombo-operations-backup
+          NetworkConfiguration:
+            AwsvpcConfiguration:
+              AssignPublicIp: DISABLED
+              Subnets: !Ref PrivateSubnetIds
+              SecurityGroups: !Ref TaskSecurityGroupIds
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
+          MaximumRetryAttempts: 3
+        DeadLetterConfig:
+          Arn: !GetAtt SchedulerDeadLetterQueue.Arn
+
+Outputs:
+  BackupTaskDefinitionArn:
+    Value: !Ref BackupTaskDefinition
+  RestoreTaskDefinitionArn:
+    Value: !Ref RestoreTaskDefinition
+  SchedulerDeadLetterQueueUrl:
+    Value: !Ref SchedulerDeadLetterQueue
+  SchedulerDeadLetterQueueArn:
+    Value: !GetAtt SchedulerDeadLetterQueue.Arn
+  BackupLogGroupName:
+    Value: !Ref BackupLogGroup

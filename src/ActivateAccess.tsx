@@ -28,10 +28,11 @@ export default function ActivateAccess({ onLogin }: { onLogin: (user: User) => v
         <Form submit="Activar y entrar" onSubmit={async (fd) => {
           const password = String(fd.get("password") || "");
           if (password !== fd.get("confirm")) throw new Error("Las contraseñas no coinciden.");
-          const { user } = await send<{ user: User }>("/auth/activate", { token, password });
+          const { user } = await send<{ user: User }>("/auth/activate", { token, password, username: String(fd.get("username") || "") });
           onLogin(user);
           navigate("/app", { replace: true });
         }}>
+          <Field label="Nombre de usuario"><input name="username" type="text" minLength={2} maxLength={32} pattern="[a-zA-Z0-9][a-zA-Z0-9._-]{1,31}" autoComplete="username" autoCapitalize="none" spellCheck={false} required /></Field>
           <Field label="Contraseña"><input name="password" type="password" minLength={12} maxLength={72} autoComplete="new-password" required /></Field>
           <Field label="Repetir contraseña"><input name="confirm" type="password" minLength={12} maxLength={72} autoComplete="new-password" required /></Field>
         </Form><p className="login-note">Usá 12 caracteres o más. El enlace vence a las 48 horas y se usa una sola vez.</p>

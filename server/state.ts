@@ -1,11 +1,13 @@
 import { Prisma, type User } from "@prisma/client";
 import { db, getSettings } from "./db.js";
 import { businessDate } from "../shared/domain.js";
+import { categoryAlerts, categoryCoverage } from "./product-categories.js";
 export type ViewName = "dashboard" | "inventory" | "customers" | "sales" | "expenses" | "finance" | "responsibles" | "reports" | "settings";
 export const publicUser = {
   id: true,
   name: true,
   email: true,
+  username: true,
   role: true,
   color: true,
 } as const;
@@ -94,11 +96,14 @@ export async function getState(user: User, requested: string | undefined, view: 
   const lowStockAlerts = ownerId
     ? await db.$queryRaw<Array<{ id: string; name: string; stock: number; minimum: number; unit: string }>>`SELECT id, name, stock, minimum, unit FROM "Product" WHERE "ownerId" = ${ownerId} AND stock <= minimum ORDER BY name LIMIT 20`
     : await db.$queryRaw<Array<{ id: string; name: string; stock: number; minimum: number; unit: string }>>`SELECT id, name, stock, minimum, unit FROM "Product" WHERE stock <= minimum ORDER BY name LIMIT 20`;
+  // Variety minimums are a club-wide buying decision, so only the owner and admin see them.
+  const varietyAlerts = user.role === "owner" || user.role === "admin" ? categoryAlerts(await categoryCoverage(db, today)) : [];
   return {
     user: {
       id: user.id,
       name: user.name,
       email: user.email,
+      username: user.username,
       role: user.role,
       color: user.color,
     },
@@ -116,6 +121,7 @@ export async function getState(user: User, requested: string | undefined, view: 
     salesTodayCount: Number(todaySales[0]?.count || 0),
     lowStockCount: Number(lowRows[0]?.count || 0),
     lowStockAlerts,
+    categoryAlerts: varietyAlerts,
     operationsEnabled: process.env.DEMO_MODE === "true" || process.env.CLUB_OPERATIONS_APPROVED === "true",
     settings,
     today,

@@ -1,0 +1,44 @@
+/* Barra de equilibrio: superficie crema. En Finanzas el único bloque oliva sigue siendo el resultado del mes. */
+.app-shell .breakeven { display: grid; gap: 14px; padding: clamp(18px, 2.4vw, 28px); border: 1px solid var(--bo-rule); border-radius: 16px; background: var(--bo-paper); }
+.app-shell .breakeven-top { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px 20px; }
+.app-shell .breakeven-period { margin: 0 0 4px; color: var(--bo-ink-soft); font-size: 14px; }
+.app-shell .breakeven h2 { margin: 0; font-size: clamp(20px, 2vw, 24px); letter-spacing: -.03em; }
+.app-shell .breakeven-badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.app-shell .breakeven-status { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border: 1px solid var(--bo-rule-strong); border-radius: 99px; color: var(--bo-ink-soft); font-size: 13px; font-weight: 650; }
+.app-shell .breakeven-status.is-demo { border-color: var(--brand-lilac); background: var(--bo-info-bg); color: var(--bo-info); }
+.app-shell .breakeven-headline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin: 4px 0 0; }
+.app-shell .breakeven-headline strong { font-size: clamp(30px, 4vw, 46px); font-weight: 600; line-height: 1.05; letter-spacing: -.045em; font-variant-numeric: tabular-nums; }
+.app-shell .breakeven-headline span { color: var(--bo-ink-soft); font-size: 15px; font-variant-numeric: tabular-nums; }
+.app-shell .breakeven-track { position: relative; height: 14px; overflow: hidden; border-radius: 99px; background: #e8e4d5; }
+.app-shell .breakeven-track i { display: block; height: 100%; border-radius: inherit; background: var(--brand-olive-mid); }
+.app-shell .breakeven-track b { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--bo-paper); }
+.app-shell .breakeven-need { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.45; }
+.app-shell .breakeven-pace { margin: -6px 0 0; color: var(--bo-ink-soft); font-size: 14px; }
+.app-shell .breakeven-pace.is-short { color: var(--bo-warn); font-weight: 650; }
+.app-shell .breakeven-milestones { display: grid; margin: 4px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--bo-rule-strong); }
+.app-shell .breakeven-milestones li { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--bo-rule); }
+.app-shell .breakeven-milestones li svg { color: var(--bo-ink-soft); }
+.app-shell .breakeven-milestones li.is-covered svg, .app-shell .breakeven-milestones li.is-covered > span { color: var(--bo-ok); }
+.app-shell .breakeven-milestones strong { display: block; font-size: 15px; }
+.app-shell .breakeven-milestones small { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.app-shell .breakeven-milestones li > span { font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.app-shell .breakeven-empty { display: grid; gap: 4px; padding: 14px 0 0; border-top: 1px solid var(--bo-rule); }
+.app-shell .breakeven-empty p { margin: 0; color: var(--muted); font-size: 14px; }
+.app-shell :is(.breakeven-empty, .breakeven-card) a { display: inline-flex; align-items: center; gap: 6px; width: fit-content; min-height: 44px; color: var(--brand-olive); font-size: 14px; font-weight: 700; }
+.app-shell .breakeven-method { color: var(--bo-ink-soft); font-size: 13.5px; line-height: 1.5; }
+.app-shell .breakeven-method summary { width: fit-content; min-height: 44px; padding: 12px 0; color: var(--brand-olive); font-weight: 700; }
+.app-shell .breakeven-method p { max-width: 80ch; margin: 4px 0 0; }
+
+/* Inicio: una línea de avance y la necesidad por día. */
+.app-shell .breakeven-card { display: grid; gap: 10px; margin-top: 28px; padding: 16px 18px; border: 1px solid var(--bo-rule); border-radius: var(--bo-radius); background: var(--bo-paper); }
+.app-shell .breakeven-card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; margin-bottom: 4px; }
+.app-shell .breakeven-card h2 { margin: 0; font-size: 17px; letter-spacing: -.02em; }
+.app-shell .breakeven-card .breakeven-status { padding: 3px 9px; font-size: 12.5px; }
+.app-shell .breakeven-card p { margin: 0; color: var(--bo-ink-soft); font-size: 14px; line-height: 1.45; }
+.app-shell .breakeven-card p strong { color: var(--bo-ink); font-size: 16px; }
+.app-shell .breakeven-card .breakeven-track { height: 10px; }
+
+@media (max-width: 760px) {
+  .app-shell .breakeven-milestones li { grid-template-columns: 24px minmax(0, 1fr); }
+  .app-shell .breakeven-milestones li > span { grid-column: 2; }
+}

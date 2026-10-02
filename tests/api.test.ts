@@ -34,7 +34,7 @@ test(
       ["viewer", "viewer"],
     ] as const)
       await db.user.create({
-        data: { id, name: id, email: `${id}@test.local`, role, password },
+        data: { id, name: id, username: id, email: `${id}@test.local`, role, password },
       });
     await db.setting.create({ data: { id: 1, value: { ...defaults,pointsEvery:1000,pointValue:10,silverAt:5000,goldAt:15000 } } });
     await db.customer.create({
@@ -89,6 +89,8 @@ test(
       r1: await login("r1"),
       cashier: await login("cashier"),
       viewer: await login("viewer"),
+      // Set once the first subtest activates Camila's manager seat.
+      admin: "",
     };
     async function call(
       path: string,
@@ -128,12 +130,31 @@ test(
         assert.equal(invitation.status, 200);
         assert.equal((await invitation.json()).name, "Camila");
         assert.equal((await publicCall("/auth/activate", { token: "invalid", password: "Camila-personal-123" })).status, 404);
-        const activated = await publicCall("/auth/activate", { token, password: "Camila-personal-123" });
+        assert.equal((await publicCall("/auth/activate", { token, username: " OWNER ", password: "Camila-personal-123" })).status, 409);
+        assert.equal((await db.teamSeat.findUniqueOrThrow({ where: { id: seat.id } })).activatedAt, null);
+        const activated = await publicCall("/auth/activate", { token, username: " Camila ", password: "Camila-personal-123" });
         assert.equal(activated.status, 200);
-        assert.equal((await activated.json()).user.role, "admin");
+        const activatedUser = (await activated.json()).user;
+        assert.equal(activatedUser.role, "admin");
+        assert.equal(activatedUser.username, "camila");
         assert.equal((await publicCall("/auth/activate", { token, password: "Camila-personal-123" })).status, 404);
         assert.equal((await publicCall("/auth/invitation", { token })).status, 404);
-        assert.equal((await publicCall("/auth/login", { email: "camila@test.local", password: "Camila-personal-123" })).status, 200);
+        const camila = await publicCall("/auth/login", { username: " CAMILA ", password: "Camila-personal-123" });
+        assert.equal(camila.status, 200);
+        cookies.admin = camila.headers.get("set-cookie")!.split(";")[0];
+        for (const username of ["camila", "missing-user"]) {
+          const denied = await publicCall("/auth/login", { username, password: "Wrong-local-password" });
+          assert.equal(denied.status, 401);
+          assert.equal(denied.headers.get("set-cookie"), null);
+          assert.equal((await denied.json()).error, "Usuario o contraseña incorrectos");
+        }
+        assert.equal((await publicCall("/auth/login", { username: "camila", email: "owner@test.local", password: "Camila-personal-123" })).status, 400);
+        await db.user.update({ where: { id: seat.id }, data: { active: false } });
+        try {
+          assert.equal((await publicCall("/auth/login", { username: "camila", password: "Camila-personal-123" })).status, 401);
+        } finally {
+          await db.user.update({ where: { id: seat.id }, data: { active: true } });
+        }
       });
       await t.test("product catalog remembers saved names and optional profiles within each role's scope", async () => {
         const lots = ["catalog-lot-1", "catalog-lot-2", "catalog-lot-3"];
@@ -371,14 +392,24 @@ test(
         );
       });
       await t.test("sale history finds product names within the user's scope", async () => {
-        const owner = await (await call("/list/sales?q=P2", "owner")).json();
-        assert.equal(owner.total, 1);
-        assert.equal(owner.items[0].items[0].name, "p2");
-        assert.equal(owner.items[0].items[0].unit, "g");
-        const responsible = await (await call("/list/sales?q=p2", "r1")).json();
-        assert.equal(responsible.total, 0);
-        const ownProduct = await (await call("/list/sales?q=P1", "r1")).json();
-        assert.equal(ownProduct.total, 1);
+        // Short tokens such as P2 can also match a randomly generated sale ID.
+        // Exercise the product-name search with distinct historical item names.
+        const names = { p1: "Nombre historico producto propio", p2: "Nombre historico producto ajeno" };
+        for (const [productId, name] of Object.entries(names))
+          await db.saleItem.updateMany({ where: { productId }, data: { name } });
+        try {
+          const owner = await (await call(`/list/sales?q=${encodeURIComponent(names.p2.toUpperCase())}`, "owner")).json();
+          assert.equal(owner.total, 1);
+          assert.equal(owner.items[0].items[0].name, names.p2);
+          assert.equal(owner.items[0].items[0].unit, "g");
+          const responsible = await (await call(`/list/sales?q=${encodeURIComponent(names.p2)}`, "r1")).json();
+          assert.equal(responsible.total, 0);
+          const ownProduct = await (await call(`/list/sales?q=${encodeURIComponent(names.p1.toUpperCase())}`, "r1")).json();
+          assert.equal(ownProduct.total, 1);
+        } finally {
+          for (const productId of Object.keys(names))
+            await db.saleItem.updateMany({ where: { productId }, data: { name: productId } });
+        }
       });
       await t.test(
         "responsible sale cannot include a foreign product",
@@ -439,6 +470,24 @@ test(
           assert.equal(insight.averageTicket, 1900);
           assert.equal(insight.favoriteProduct.name, "p1");
           assert.equal(insight.nextExpectedDate, null);
+          // r1 sold p1 (Interior QA) and r2 sold p2 (Exterior QA) to this member, one purchase each: ties go to the name.
+          const [interior, exterior] = await Promise.all(["Interior QA", "Exterior QA"].map((name) =>
+            db.productCategory.create({ data: { name, key: name.toLowerCase() } })));
+          await db.product.update({ where: { id: "p1" }, data: { categoryId: interior.id } });
+          await db.product.update({ where: { id: "p2" }, data: { categoryId: exterior.id } });
+          try {
+            const favorites = async (query: string, user: string) => {
+              const read = await (await call(`/customers/customer/insights${query}`, user)).json();
+              return [read.favoriteCategory, read.favoriteProduct?.name];
+            };
+            assert.deepEqual(await favorites("", "r1"), [{ name: "Interior QA", purchases: 1, variety: "p1" }, "p1"]);
+            assert.deepEqual(await favorites("?owner=r2", "owner"), [{ name: "Exterior QA", purchases: 1, variety: "p2" }, "p2"]);
+            // Club-wide the favorite product is p1, but the variety shown comes from inside the favorite category.
+            assert.deepEqual(await favorites("", "owner"), [{ name: "Exterior QA", purchases: 1, variety: "p2" }, "p1"]);
+          } finally {
+            await db.product.updateMany({ where: { id: { in: ["p1", "p2"] } }, data: { categoryId: null } });
+            await db.productCategory.deleteMany({ where: { id: { in: [interior.id, exterior.id] } } });
+          }
           const otherScopeInsight = await (await call("/customers/customer/insights?owner=r2", "owner")).json();
           const otherScopeHistory = await (await call("/customers/customer/history?owner=r2", "owner")).json();
           assert.equal(otherScopeInsight.purchases, otherScopeHistory.total);
@@ -579,6 +628,30 @@ test(
             );
         }
       });
+      await t.test("mixed payment books each part in its own account and is idempotent", async () => {
+        // "customer" has spent 8.900 (Plata, 3 % off), so 1 g of p1 at 1.000 totals 970.
+        const payload = { requestId: randomUUID(), customerId: "customer", payment: "mixed",
+          split: { cash: 300, other: "transfer" }, items: [{ productId: "p1", quantity: 1000 }] };
+        const sales = await db.sale.count();
+        for (const invalid of [{ ...payload, split: undefined }, { ...payload, payment: "cash" }, { ...payload, split: { cash: 970, other: "transfer" } }])
+          assert.equal((await call("/sales", "owner", invalid)).status, 400);
+        assert.equal(await db.sale.count(), sales);
+        const res = await call("/sales", "owner", payload);
+        assert.equal(res.status, 201, await res.clone().text());
+        const sale = await res.json();
+        assert.equal(sale.total, 970);
+        assert.deepEqual(sale.paymentSplit, [{ method: "cash", amount: 300 }, { method: "transfer", amount: 670 }]);
+        const entries = async () => (await db.cashEntry.findMany({ where: { saleId: sale.id }, orderBy: { account: "asc" } }))
+          .map(({ account, amount }) => [account, amount]);
+        assert.deepEqual(await entries(), [["bank", 670], ["cash", 300]]);
+        const retry = await call("/sales", "owner", payload);
+        assert.equal(retry.status, 201);
+        assert.equal((await retry.json()).id, sale.id);
+        assert.equal(await db.sale.count(), sales + 1);
+        assert.deepEqual(await entries(), [["bank", 670], ["cash", 300]]);
+        // The drawer expects the 1.900 cash sale plus only the cash part of this one.
+        assert.equal((await (await call("/views/sales", "cashier")).json()).cashExpected, 2200);
+      });
       await t.test(
         "recurring expenses generate once, then cash close prevents further sales",
         async () => {
@@ -600,8 +673,9 @@ test(
           const n = await db.expense.count();
           await call("/expenses/recurring", "owner", {});
           assert.equal(await db.expense.count(), n);
+          // Cash sale 1.900 plus the 300 cash part of the mixed sale; its transfer part is not in the drawer.
           const close = await call("/closures", "cashier", {
-            counted: 1900,
+            counted: 2200,
             note: "Conciliado",
           });
           assert.equal(close.status, 201);
@@ -686,6 +760,199 @@ test(
         assert.equal((await call("/list/cash-entries", "cashier")).status, 403);
         assert.equal((await call(`/list/expenses?month=${finance.today.slice(0, 7)}`, "cashier")).status, 200);
         assert.equal((await (await call(`/list/expenses?month=${finance.today.slice(0, 7)}`, "cashier")).json()).items.length, 0);
+      });
+      await t.test("break-even adds local sales and this month's fixed costs, counting rule dates once", async () => {
+        const audits = () => db.sensitiveAccessAudit.count({ where: { area: "finance", action: "break_even" } });
+        const audited = await audits();
+        for (const role of ["cashier", "viewer", "r1"] as const)
+          assert.equal((await call("/finance/break-even", role)).status, 403);
+        const read = async () => {
+          const res = await call("/finance/break-even", "owner");
+          assert.equal(res.status, 200, await res.clone().text());
+          return res.json();
+        };
+        const before = await read();
+        assert.equal(await audits(), audited + 1);
+        assert.equal((await call("/finance/break-even", "admin")).status, 200);
+        const { today } = await (await call("/views/dashboard")).json();
+        const shift = (date: string, days: number) => {
+          const value = new Date(`${date}T12:00:00Z`);
+          value.setUTCDate(value.getUTCDate() + days);
+          return value.toISOString().slice(0, 10);
+        };
+        const sale = { customerId: "customer", userId: "owner", date: today, discount: 0, pointsEarned: 0, pointsUsed: 0, payment: "cash" };
+        await db.sale.createMany({ data: [
+          { ...sale, subtotal: 50000, total: 50000, cost: 20000, requestId: randomUUID(), channel: "local" },
+          // Delivery stays in AppSheet: an imported delivery sale must not move the local break-even.
+          { ...sale, subtotal: 90000, total: 90000, cost: 30000, requestId: randomUUID(), channel: "delivery" },
+        ] });
+        await db.expense.createMany({ data: [
+          { name: "Alquiler", amount: 70000, category: "Alquiler", kind: "fixed", date: before.monthEnd },
+          { name: "Alquiler anterior", amount: 99999, category: "Alquiler", kind: "fixed", date: shift(before.monthStart, -1) },
+          { name: "Bolsas", amount: 4000, category: "Insumos", kind: "variable", date: today },
+        ] });
+        // Both rules start four weeks before the 1st: their pending dates run from before the month through the 1st.
+        for (const [name, kind, amount] of [["Limpieza", "fixed", 1000], ["Envases", "variable", 500]] as const) {
+          const created = await call("/expenses", "owner", { name, amount, category: name, kind, ownerId: null,
+            date: shift(before.monthStart, -28), recurrence: "weekly" });
+          assert.equal(created.status, 201, await created.clone().text());
+        }
+        // Weekly dates from the 1st up to day n of the month.
+        const weekly = (n: number) => Math.floor((n - 1) / 7) + 1;
+        const after = await read();
+        assert.equal(after.revenue - before.revenue, 50000);
+        assert.equal(after.cost - before.cost, 20000);
+        assert.equal(after.variable - before.variable, 4000);
+        // The variable rule takes the kind of its first expense, so only the fixed rule adds its dates in the month.
+        assert.equal(after.fixedTotal - before.fixedTotal, 70000 + 1000 * weekly(before.daysInMonth));
+        assert.equal((await call("/expenses/recurring", "owner", {})).status, 200);
+        const materialized = await read();
+        assert.equal(materialized.fixedTotal, after.fixedTotal);
+        assert.equal(materialized.variable - after.variable, 500 * weekly(before.daysElapsed));
+      });
+      await t.test("cash ledger filters rows and keeps each account's running balance", async () => {
+        // The oldest movements in the ledger, so every balance below comes from these rows alone.
+        await db.cashEntry.createMany({ data: [
+          { date: "2026-01-02", account: "cash", category: "opening_balance", amount: 10000, description: "Ledger apertura", userId: "owner" },
+          { date: "2026-01-03", account: "cash", category: "operating_expense", amount: -2500, description: "Ledger limpieza", userId: "owner" },
+          { date: "2026-01-04", account: "bank", category: "stock_purchase", amount: -8000, description: "Ledger compra", userId: "owner" },
+          { date: "2026-01-05", account: "bank", category: "other_income", amount: 4000, description: "Ledger cobro", userId: "owner" },
+        ] });
+        assert.equal((await call("/list/cash-entries?account=cash", "admin")).status, 200);
+        const ledger = async (query: string) => {
+          const res = await call(`/list/cash-entries?${query}`);
+          assert.equal(res.status, 200, await res.clone().text());
+          return res.json();
+        };
+        const rows = (page: { items: Array<{ description: string; balanceAfter: number }> }) =>
+          page.items.map((entry) => [entry.description, entry.balanceAfter]);
+        // A filtered row still shows its account's balance: the 10.000 opening came before the 2.500 expense.
+        assert.deepEqual(rows(await ledger("q=LIMPIEZA")), [["Ledger limpieza", 7500]]);
+        assert.deepEqual(rows(await ledger("category=stock_purchase")), [["Ledger compra", -8000]]);
+        assert.deepEqual(rows(await ledger("account=bank&from=2026-01-04&to=2026-01-05")), [["Ledger cobro", -4000], ["Ledger compra", -8000]]);
+        assert.deepEqual(rows(await ledger("account=cash&direction=in&to=2026-01-31")), [["Ledger apertura", 10000]]);
+        const outflows = await ledger("direction=out&to=2026-01-31");
+        assert.deepEqual(rows(outflows), [["Ledger compra", -8000], ["Ledger limpieza", 7500]]);
+        assert.equal(outflows.total, 2);
+        assert.deepEqual([outflows.summary.inflow, outflows.summary.outflow, outflows.summary.net], [0, 10500, -10500]);
+        // Across pages, each bank row carries the running sum of the bank ledger in (date, createdAt, id) order.
+        const bank = await db.cashEntry.findMany({ where: { account: "bank" }, orderBy: [{ date: "asc" }, { createdAt: "asc" }, { id: "asc" }] });
+        let running = 0;
+        const expected = bank.map((entry) => [entry.id, (running += entry.amount)]).reverse();
+        const first = await ledger("account=bank");
+        assert(first.nextCursor);
+        const second = await ledger(`account=bank&cursor=${encodeURIComponent(first.nextCursor)}`);
+        assert.equal(second.nextCursor, null);
+        assert.deepEqual([...first.items, ...second.items].map((entry: { id: string; balanceAfter: number }) => [entry.id, entry.balanceAfter]), expected);
+        assert.equal(first.total, bank.length);
+        assert.equal(first.summary.bankBalance, running);
+        assert.equal(first.summary.bankCount, bank.length);
+        const cash = await db.cashEntry.aggregate({ where: { account: "cash" }, _sum: { amount: true }, _count: true });
+        assert.equal(first.summary.cashBalance, cash._sum.amount);
+        assert.equal(first.summary.cashCount, cash._count);
+      });
+      await t.test("upcoming payments bring the base plan, active obligations, future expenses and unregistered rule dates", async () => {
+        for (const role of ["cashier", "viewer", "r1"] as const)
+          assert.equal((await call("/finance/upcoming-payments", role)).status, 403);
+        const audits = () => db.sensitiveAccessAudit.count({ where: { area: "finance", action: "upcoming_payments" } });
+        const audited = await audits();
+        assert.equal((await call("/finance/upcoming-payments", "admin")).status, 200);
+        assert.equal(await audits(), audited + 1);
+        const { today } = await (await call("/views/dashboard")).json();
+        const shift = (days: number) => {
+          const value = new Date(`${today}T12:00:00Z`);
+          value.setUTCDate(value.getUTCDate() + days);
+          return value.toISOString().slice(0, 10);
+        };
+        const created = async (res: Response) => {
+          assert.equal(res.status, 201, await res.clone().text());
+          return res.json();
+        };
+        for (const scenario of ["base", "cautious"])
+          await created(await call("/cash-plans", "owner", { scenario, date: shift(3), account: "bank", category: "stock_purchase",
+            amount: -12345, description: `Upcoming QA plan ${scenario}` }));
+        await created(await call("/cash-plans", "owner", { scenario: "base", date: shift(4), account: "bank", category: "other_income",
+          amount: 5000, description: "Upcoming QA income" }));
+        const obligations = [];
+        for (const sourceReference of ["Upcoming QA obligation", "Upcoming QA cancelled"])
+          obligations.push(await created(await call("/decision-inputs/cash-plans", "owner", { scenario: "base", date: shift(5),
+            account: "banco", category: "operating_expense", amountCents: "-67890", sourceReference })));
+        assert.equal((await call(`/decision-inputs/cash-plans/${obligations[1].id}`, "owner", { status: "cancelled" }, "PATCH")).status, 200);
+        await created(await call("/expenses", "owner", { name: "Upcoming QA expense", amount: 4321, category: "Servicios", kind: "fixed",
+          ownerId: null, date: shift(2), recurrence: "none" }));
+        await db.recurringRule.create({ data: { name: "Upcoming QA rule", amount: 1000, category: "QA", recurrence: "weekly", nextDate: shift(-3) } });
+        // A movement dated ahead is not in the balance yet.
+        await db.cashEntry.create({ data: { date: shift(1), account: "bank", category: "other_outflow", amount: -777,
+          description: "Upcoming QA dated ahead", userId: "owner" } });
+        const res = await call("/finance/upcoming-payments");
+        assert.equal(res.status, 200, await res.clone().text());
+        const upcoming = await res.json();
+        const mine = upcoming.items.filter((item: { label: string }) => item.label.startsWith("Upcoming QA"))
+          .map((item: { label: string; date: string; source: string; amount: number; overdue: boolean }) =>
+            [item.label, item.date, item.source, item.amount, item.overdue]);
+        // The cautious plan, the income and the cancelled obligation stay out. The weekly rule missed three days ago
+        // keeps that date as overdue and brings its next four inside the 30 days.
+        assert.deepEqual(mine, [
+          ["Upcoming QA rule", shift(-3), "recurring", 1000, true],
+          ["Upcoming QA expense", shift(2), "expense", 4321, false],
+          ["Upcoming QA plan base", shift(3), "plan", 12345, false],
+          ["Upcoming QA rule", shift(4), "recurring", 1000, false],
+          ["Upcoming QA obligation", shift(5), "obligation", 67890, false],
+          ["Upcoming QA rule", shift(11), "recurring", 1000, false],
+          ["Upcoming QA rule", shift(18), "recurring", 1000, false],
+          ["Upcoming QA rule", shift(25), "recurring", 1000, false],
+        ]);
+        const ledger = await db.cashEntry.aggregate({ where: { date: { lte: today } }, _sum: { amount: true } });
+        assert.equal(upcoming.balance, ledger._sum.amount);
+      });
+      await t.test("categories count distinct sellable varieties and alert managers below the minimum", async () => {
+        for (const role of ["cashier", "r1"] as const)
+          assert.equal((await call("/categories", role, { name: "Sin permiso", minVarieties: 1 })).status, 403);
+        const created = await call("/categories", "admin", { name: "  Interior   Premium ", minVarieties: 2 });
+        assert.equal(created.status, 201, await created.clone().text());
+        const category = await created.json();
+        assert.equal(category.name, "Interior Premium");
+        assert.equal((await call("/categories", "owner", { name: "interior premium" })).status, 409);
+        // The manager's edit sets the minimum of 3 that the alert below reports.
+        assert.equal((await call(`/categories/${category.id}`, "admin", { name: category.name, minVarieties: 3 }, "PATCH")).status, 200);
+        const { today } = await (await call("/views/dashboard")).json();
+        const base = { strain: "", type: "Flor", unit: "g", minimum: 0, cost: 400, price: 1000, location: "A", categoryId: category.id };
+        // One variety in two lots of different owners, one that expires today (still sellable), one without stock and one expired.
+        for (const [name, code, stock, ownerId] of [["Gelato", "cat-1", 1000, "r1"], [" gelato ", "cat-2", 2000, "r2"],
+          ["Mimosa", "cat-3", 1000, "r1"], ["Runtz", "cat-4", 0, "r1"], ["Zkittlez", "cat-5", 1000, "r1"]] as const) {
+          const res = await call("/products", "owner", { ...base, name, lot: code, stock, ownerId });
+          assert.equal(res.status, 201, await res.clone().text());
+        }
+        await db.product.update({ where: { lot: "cat-3" }, data: { expires: today } });
+        await db.product.update({ where: { lot: "cat-5" }, data: { expires: "2000-01-01" } });
+        const coverage = async (role: "owner" | "r1") =>
+          (await (await call("/categories", role)).json()).items.find((item: { id: string }) => item.id === category.id);
+        const owned = await coverage("owner");
+        assert.equal(owned.varieties, 2);
+        assert.deepEqual(owned.varietyNames.map((name: string) => name.toLowerCase()).sort(), ["gelato", "mimosa"]);
+        assert.equal(owned.lotCount, 5);
+        // The stock of the same lots: both Gelato lots and Mimosa, not the empty or the expired one.
+        assert.deepEqual(owned.stock, [{ unit: "g", milliunits: 4000 }]);
+        assert.deepEqual(Object.keys(await coverage("r1")).sort(), ["active", "id", "name"]);
+        const alerts = async (role: "owner" | "cashier" | "r1") => (await (await call("/views/dashboard", role)).json()).categoryAlerts;
+        assert.deepEqual(await alerts("owner"), [{ id: category.id, name: "Interior Premium", minVarieties: 3, varieties: 2 }]);
+        assert.deepEqual(await alerts("cashier"), []);
+        assert.deepEqual(await alerts("r1"), []);
+        const listed = await (await call(`/list/products?category=${category.id}`)).json();
+        assert.equal(listed.total, 5);
+        assert(listed.items.every((product: { category: string }) => product.category === "Interior Premium"));
+        const unassigned = await (await call("/list/products?category=unassigned")).json();
+        assert.equal(unassigned.total, await db.product.count({ where: { categoryId: null } }));
+        assert(unassigned.items.every((product: { categoryId: string | null }) => product.categoryId === null));
+        assert.equal((await call(`/categories/${category.id}/status`, "admin", { active: false }, "PATCH")).status, 200);
+        assert.deepEqual(await alerts("owner"), []);
+        assert.equal((await call("/products", "owner", { ...base, name: "Nuevo", lot: "cat-6", stock: 1000, ownerId: "r1" })).status, 400);
+        // An edited lot keeps its archived category, and an edit that leaves the field out does not clear it.
+        const gelato = await db.product.findUniqueOrThrow({ where: { lot: "cat-1" } });
+        assert.equal((await call(`/products/${gelato.id}`, "owner", { ...gelato, minimum: 500 }, "PATCH")).status, 200);
+        assert.equal((await call(`/products/${gelato.id}`, "owner", { ...gelato, minimum: 600, categoryId: undefined }, "PATCH")).status, 200);
+        const edited = await db.product.findUniqueOrThrow({ where: { lot: "cat-1" } });
+        assert.deepEqual([edited.minimum, edited.categoryId], [600, category.id]);
       });
     } finally {
       await new Promise<void>((r) => server.close(() => r()));

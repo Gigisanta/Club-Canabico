@@ -86,7 +86,7 @@ export function StockCard({
         <div className="stock-card-body">
           <div className="stock-name">
             <MinimalCardTitle>{p.name}</MinimalCardTitle>
-            {p.strain && <span>{p.strain}</span>}
+            {(p.category || p.strain) && <span>{[p.category, p.strain].filter(Boolean).join(" · ")}</span>}
           </div>
           <div className="stock-quantity-row">
             <div>

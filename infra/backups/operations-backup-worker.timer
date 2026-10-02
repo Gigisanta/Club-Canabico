@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Bombo operations backup schedule
+
+[Timer]
+OnCalendar=*-*-* 02:10:00
+Persistent=true
+RandomizedDelaySec=20m
+AccuracySec=1m
+Unit=operations-backup-worker.service
+
+[Install]
+WantedBy=timers.target

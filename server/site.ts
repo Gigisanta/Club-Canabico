@@ -1,6 +1,6 @@
 import { Router, raw } from "express";
 import rateLimit from "express-rate-limit";
-import sharp from "sharp";
+import type { OutputInfo } from "sharp";
 import { z } from "zod";
 import { db } from "./db.js";
 import { HttpError } from "./validation.js";
@@ -176,14 +176,15 @@ adminSite.delete("/showcase/:id", async (req, res) => {
   res.json({ deleted: true });
 });
 adminSite.put("/showcase/:id/image", raw({
-  type: ["image/jpeg", "image/png", "image/webp"], limit: "6mb",
+  type: ["image/jpeg", "image/png", "image/webp"], limit: 3_000_000,
 }), async (req, res) => {
   const id = z.string().parse(req.params.id);
   const input = req.body;
-  if (!Buffer.isBuffer(input) || input.length < 100 || input.length > 6 * 1024 * 1024)
-    throw new HttpError(400, "Elegí una imagen JPEG, PNG o WebP de hasta 6 MB");
-  let buffer: Buffer, info: sharp.OutputInfo;
+  if (!Buffer.isBuffer(input) || input.length < 100 || input.length > 3_000_000)
+    throw new HttpError(400, "Elegí una imagen JPEG, PNG o WebP de hasta 3 MB");
+  let buffer: Buffer, info: OutputInfo;
   try {
+    const { default: sharp } = await import("sharp");
     const metadata = await sharp(input, { limitInputPixels: 40_000_000 }).metadata();
     if (!["jpeg", "png", "webp"].includes(metadata.format || "") || !metadata.width || !metadata.height)
       throw new Error("Formato inválido");

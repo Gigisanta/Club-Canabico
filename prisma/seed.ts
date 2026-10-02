@@ -1,7 +1,8 @@
 import "dotenv/config";
 import { PrismaClient, type Role } from "@prisma/client";
 import bcrypt from "bcryptjs";
-import { defaults, businessDate } from "../shared/domain.js";
+import { defaults, businessDate, nextDate } from "../shared/domain.js";
+import { profileCapabilities } from "../shared/operations/contracts.js";
 const db = new PrismaClient();
 async function seed() {
   const demo = process.env.DEMO_MODE === "true";
@@ -10,13 +11,15 @@ async function seed() {
       throw new Error("La conexión apunta a una base llamada demo. Usá una base real separada.");
     if (await db.user.count({ where: { email: { endsWith: "@demo.bombo.local" } } }))
       throw new Error("La base contiene usuarios de demostración. Usá una base real separada.");
-    for (const [id, name, role] of [
-      ["tiziano", "Tiziano", "owner"],
-      ["camila", "Camila", "admin"],
-      ["gio", "Gio", "admin"],
+    for (const [id, name, role, profile] of [
+      ["tiziano", "Tiziano", "owner", "owner"],
+      ["camila", "Camila", "admin", "commercial"],
+      ["gio", "Gio", "admin", "finance"],
     ] as const) {
       if (await db.user.findUnique({ where: { id }, select: { id: true } })) continue;
       await db.teamSeat.upsert({ where: { id }, create: { id, name, role }, update: {} });
+      // Initial profiles come from the approved migration plan; preserve any existing grants.
+      await db.operationAccess.upsert({ where: { userId: id }, create: { userId: id, profile, capabilities: profileCapabilities[profile]!, scope: {} }, update: {} });
     }
   }
   if (await db.user.count()) {
@@ -78,6 +81,7 @@ async function seed() {
             color,
             password,
             email: `${id}@demo.bombo.local`,
+            username: id,
           },
         });
       const names = [
@@ -143,6 +147,18 @@ async function seed() {
       const stockLocations = [];
       for (const [index, name] of ["Almacén A", "Almacén B"].entries())
         stockLocations.push(await tx.location.create({ data: { name, key: name.toLowerCase(), isDefault: index === 0 } }));
+      // Tiziano's commercial categories. Interior Premium+ stays one variety short so Inicio shows the alert.
+      const categories: [string, number, number[]][] = [
+        ["Interior Premium+", 3, [3, 6]],
+        ["Interior Premium", 3, [2, 5, 11]],
+        ["Exterior Premium", 2, [1, 8]],
+        ["Exterior", 2, [4, 7]],
+      ];
+      const categoryOf = new Map<number, string>();
+      for (const [name, minVarieties, lots] of categories) {
+        const category = await tx.productCategory.create({ data: { name, key: name.toLowerCase(), minVarieties } });
+        for (const lot of lots) categoryOf.set(lot, category.id);
+      }
       for (const [i, p] of list.entries())
         await tx.product.create({
           data: {
@@ -159,13 +175,52 @@ async function seed() {
             lot: `RC-26-${String(i + 1).padStart(3, "0")}`,
             location: `Almacén ${i % 2 ? "B" : "A"}`,
             locationId: stockLocations[i % 2].id,
+            categoryId: categoryOf.get(i + 1) ?? null,
             expires: i === 8 ? ago(-20) : null,
             createdAt: new Date(`${ago(100)}T09:00:00Z`),
           },
         });
       let seq = 1;
       const products = await tx.product.findMany();
+      // Caja: opening balances, one entry per sale in its account, a Monday deposit of the drawer above
+      // the float and the bank payment of each expense. Today's times stay at or before the seed run,
+      // so a movement made afterwards is the newest in its account.
+      const seededAt = new Date();
+      const at = (date: string, time: string) => {
+        const value = new Date(`${date}T${time}Z`);
+        return value > seededAt ? seededAt : value;
+      };
+      const float = 25_000_000;
+      let drawer = float;
+      await tx.cashEntry.createMany({
+        data: [
+          { account: "cash", amount: float, description: "Saldo inicial de la caja del local" },
+          { account: "bank", amount: 800_000_000, description: "Saldo inicial de la cuenta bancaria" },
+        ].map((entry) => ({
+          ...entry,
+          date: ago(100),
+          category: "opening_balance",
+          userId: "owner",
+          createdAt: at(ago(100), "09:00:00"),
+        })),
+      });
       for (let day = 89; day >= 0; day--) {
+        const deposit = drawer - float;
+        if (day > 0 && deposit > 0 && new Date(`${ago(day)}T12:00:00Z`).getUTCDay() === 1) {
+          await tx.cashEntry.createMany({
+            data: [
+              { account: "cash", amount: -deposit, description: "Depósito del efectivo en el banco · sale de la caja" },
+              { account: "bank", amount: deposit, description: "Depósito del efectivo en el banco · entra al banco" },
+            ].map((entry) => ({
+              ...entry,
+              date: ago(day),
+              category: "adjustment",
+              userId: "owner",
+              createdAt: at(ago(day), "09:00:00"),
+            })),
+          });
+          drawer = float;
+        }
         const count = 5 + ((day * 17) % 7);
         for (let n = 0; n < count; n++) {
           const p = products[(day * 7 + n * 5) % products.length];
@@ -176,22 +231,22 @@ async function seed() {
           const date = ago(day);
           const id = `V-${String(seq++).padStart(5, "0")}`;
           const pointsEarned = Math.floor(total / defaults.pointsEvery);
+          const payment = n % 3 ? "card" : "cash";
+          const time = `${String(10 + n).padStart(2, "0")}:30:00`;
           await tx.sale.create({
             data: {
               id,
               customerId,
               userId: "cashier",
               date,
-              createdAt: new Date(
-                `${date}T${String(10 + n).padStart(2, "0")}:30:00Z`,
-              ),
+              createdAt: new Date(`${date}T${time}Z`),
               subtotal: total,
               discount: 0,
               total,
               cost,
               pointsEarned,
               pointsUsed: 0,
-              payment: n % 3 ? "card" : "cash",
+              payment,
               requestId: id,
               items: {
                 create: {
@@ -207,6 +262,19 @@ async function seed() {
               },
             },
           });
+          await tx.cashEntry.create({
+            data: {
+              date,
+              account: payment === "cash" ? "cash" : "bank",
+              category: "sale",
+              amount: total,
+              description: `Venta local ${id}`,
+              saleId: id,
+              userId: "cashier",
+              createdAt: at(date, time),
+            },
+          });
+          if (payment === "cash") drawer += total;
           await tx.customer.update({
             where: { id: customerId },
             data: { points: { increment: pointsEarned } },
@@ -252,6 +320,8 @@ async function seed() {
           });
         }
       }
+      // Rent and staff repeat monthly: each rule's next date is the 1st of next month, one of Finanzas' upcoming payments.
+      const fixedRules = new Map<string, string>();
       for (let month = 0; month < 3; month++) {
         const d = new Date(`${today}T12:00:00Z`);
         d.setUTCDate(1);
@@ -264,7 +334,13 @@ async function seed() {
           ["Insumos de mantenimiento", 34000, "Insumos", "variable"],
           ["Transporte y logística", 21500, "Transporte", "variable"],
         ];
-        for (const [i, e] of expenses.entries())
+        for (const [i, e] of expenses.entries()) {
+          let ruleId = fixedRules.get(e[0]);
+          if (e[3] === "fixed" && !ruleId) {
+            ruleId = (await tx.recurringRule.create({ data: { name: e[0], amount: e[1] * 1000, category: e[2],
+              recurrence: "monthly", nextDate: nextDate(date, "monthly") } })).id;
+            fixedRules.set(e[0], ruleId);
+          }
           await tx.expense.create({
             data: {
               name: e[0],
@@ -273,15 +349,33 @@ async function seed() {
               kind: e[3],
               ownerId: i === 3 ? "r1" : null,
               date,
-              recurrence: "none",
+              recurrence: ruleId ? "monthly" : "none",
+              ruleId,
             },
           });
+          await tx.cashEntry.create({
+            data: {
+              date,
+              account: "bank",
+              category: "operating_expense",
+              amount: -e[1] * 1000,
+              description: `Pago · ${e[0]}`,
+              userId: "owner",
+              createdAt: at(date, "08:00:00"),
+            },
+          });
+        }
       }
+      // A stock purchase on credit and a tax advance, in the base plan: the payments Tizi wants to see coming.
+      await tx.cashPlan.createMany({ data: [
+        { date: ago(-12), category: "stock_purchase", amount: -240_000_000, description: "Compra a plazo · lote Interior Premium" },
+        { date: ago(-19), category: "operating_expense", amount: -38_000_000, description: "Anticipo de impuestos" },
+      ].map((plan) => ({ ...plan, account: "bank", scenario: "base", userId: "owner" })) });
     },
     { timeout: 120000 },
   );
   console.log(
-    "Demo creada: 8 usuarios, 24 socios, 12 lotes y 90 días de actividad.",
+    "Demo creada: 8 usuarios, 24 socios, 12 lotes y 90 días de actividad con caja, banco y pagos previstos.",
   );
 }
 seed()

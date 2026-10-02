@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Bombo backup workload roles bootstrap; permissions are attached by ecs-scheduler.template.yaml.
+
+Resources:
+  BackupTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: BomboBackupTaskRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*'
+      Tags:
+        - Key: Application
+          Value: Bombo
+        - Key: Purpose
+          Value: encrypted-offsite-backup
+
+  RestoreTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: BomboBackupRestoreTaskRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*'
+      Tags:
+        - Key: Application
+          Value: Bombo
+        - Key: Purpose
+          Value: isolated-restore
+
+Outputs:
+  BackupTaskRoleArn:
+    Value: !GetAtt BackupTaskRole.Arn
+  BackupTaskRoleName:
+    Value: !Ref BackupTaskRole
+  RestoreTaskRoleArn:
+    Value: !GetAtt RestoreTaskRole.Arn
+  RestoreTaskRoleName:
+    Value: !Ref RestoreTaskRole

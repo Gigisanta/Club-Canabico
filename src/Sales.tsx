@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Plus,
   Receipt,
@@ -34,7 +34,10 @@ const payments: Record<string, string> = {
   cash: "Efectivo",
   card: "Tarjeta",
   transfer: "Transferencia",
+  mixed: "Mixto",
 };
+const splitSummary = (sale: Sale, money: (n: number) => string) =>
+  sale.paymentSplit?.map((part) => `${payments[part.method]} ${money(part.amount)}`).join(" · ") || "";
 type CheckoutCustomer = Pick<Customer, "id" | "name" | "points" | "tier">;
 type CheckoutProduct = Pick<Product, "id" | "name" | "lot" | "price" | "stock" | "unit" | "ownerId" | "expires">;
 function CustomerPicker({
@@ -118,7 +121,8 @@ function CustomerPicker({
   );
 }
 export default function Sales({ onSale }: { onSale: () => void }) {
-  const { state, money, canSell, user, reload, owner } = useClub();
+  const { state, money, canSell, user, reload, owner, isManager } = useClub();
+  const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const [query, setQuery] = useState(params.get("q") || "");
   const [debouncedQuery, setDebouncedQuery] = useState(query);
@@ -228,7 +232,8 @@ export default function Sales({ onSale }: { onSale: () => void }) {
                     </span>
                   </td>
                   <td data-label="Pago">
-                    <Badge tone="gray">{payments[s.payment]}</Badge>
+                    <Badge tone="gray">{payments[s.payment] || s.payment}</Badge>
+                    {!!s.paymentSplit?.length && <small className="cell-small">{splitSummary(s, money)}</small>}
                   </td>
                   <td className="numeric amount" data-label="Total">{money(s.total)}</td>
                   <td data-label="Comprobante">
@@ -277,7 +282,7 @@ export default function Sales({ onSale }: { onSale: () => void }) {
         <summary>Resumen y estado de caja</summary>
         <div className="sales-summary">
           <div><span>Ventas de hoy</span><strong>{money(state.salesTodayTotal)}</strong><small>{state.salesTodayCount} operaciones</small></div>
-          <div><span>Efectivo esperado</span><strong>{money(cash)}</strong><small>Saldo anterior más movimientos de efectivo registrados</small></div>
+          <div><span>Efectivo esperado</span><strong>{money(cash)}</strong><small>Saldo anterior más movimientos de efectivo registrados</small>{isManager && <button type="button" className="sales-summary-link" onClick={() => navigate("/app/finanzas?view=activity&account=cash")}>Ver movimientos de efectivo</button>}</div>
           <div><span>Estado de caja</span><strong className="status-label"><span className="live-dot" />{closed ? "Cerrada" : "Abierta"}</strong><small>{shortDate(state.today)} {closed && `· Diferencia ${money(closed.difference)}`}</small></div>
         </div>
       </details>
@@ -369,10 +374,16 @@ export function SaleModal({
   const customerOptions = customerData.data?.items || [];
   const [lines, setLines] = useState([{ productId: "", quantity: 1 }]);
   const [points, setPoints] = useState(0);
+  const [payment, setPayment] = useState("cash");
+  const [splitCash, setSplitCash] = useState("");
+  const [splitOther, setSplitOther] = useState<"transfer" | "card">("transfer");
   const [requestId, setRequestId] = useState(() => crypto.randomUUID());
   const [ticket, setTicket] = useState<Sale | null>(null);
   useEffect(() => {
     if (open) {
+      setPayment("cash");
+      setSplitCash("");
+      setSplitOther("transfer");
       setCustomerId("");
       setCustomerSearch("");
       setSelectedCustomer(null);
@@ -411,6 +422,11 @@ export function SaleModal({
   } catch (e) {
     pricingError = (e as Error).message;
   }
+  const mixed = payment === "mixed";
+  const cashPart = mixed && splitCash !== "" && Number.isFinite(Number(splitCash)) ? Math.round(Number(splitCash) * 100) : null;
+  const splitError = !mixed || cashPart === null ? ""
+    : total <= 0 ? `Primero elegí los productos: con total ${money(0)} no hay pago para dividir.`
+    : cashPart < 1 || cashPart >= total ? `Tiene que ser mayor que ${money(0)} y menor que el total (${money(total)}).` : "";
   return (
     <>
       <Modal
@@ -427,6 +443,8 @@ export function SaleModal({
           onSubmit={async (fd) => {
             if (pricingError) throw new Error(pricingError);
             if (!customerId) throw new Error("Seleccioná un socio para continuar.");
+            if (mixed && (cashPart === null || splitError))
+              throw new Error(`Revisá la parte en efectivo: ${splitError || "indicá cuánto paga en efectivo."}`);
             if (lines.some((line) => {
               const product = products.find((item) => item.id === line.productId);
               return !product || !Number.isFinite(line.quantity) || line.quantity <= 0 || line.quantity * 1000 > product.stock
@@ -437,7 +455,8 @@ export function SaleModal({
             }
             const sale = await send<Sale>("/sales", {
               customerId,
-              payment: fd.get("payment"),
+              payment,
+              ...(mixed ? { split: { cash: cashPart, other: splitOther } } : {}),
               points,
               requestId,
               items: lines.map((l) => ({
@@ -466,8 +485,8 @@ export function SaleModal({
                   onSelect={(selected) => { setSelectedCustomer(selected); setCustomerId(selected?.id || ""); setCustomerSearch(selected?.name || ""); setPoints(0); }}
                 />
               </Field>
-              <Field label="Medio de pago">
-                <select name="payment">
+              <Field label="Medio de pago" hint={mixed ? "Parte en efectivo y el resto por transferencia o tarjeta. Indicá los importes junto al total." : undefined}>
+                <select name="payment" value={payment} onChange={(e) => setPayment(e.target.value)}>
                   {Object.entries(payments).map(([key, name]) => (
                     <option key={key} value={key}>{name}</option>
                   ))}
@@ -600,6 +619,20 @@ export function SaleModal({
                   El servidor aplica el nivel de fidelidad vigente al confirmar.
                 </small>
               )}
+              {mixed && <fieldset className="sale-split">
+                <legend>Pago mixto</legend>
+                <Field label="Parte en efectivo (ARS)" hint={splitError || "Solo esta parte entra a la caja de efectivo."}>
+                  <input type="number" inputMode="decimal" min="0.01" step="0.01" value={splitCash}
+                    onChange={(e) => setSplitCash(e.target.value)} onWheel={(e) => e.currentTarget.blur()}
+                    aria-invalid={!!splitError} placeholder="0.00" required />
+                </Field>
+                <Field label="El resto por">
+                  <select value={splitOther} onChange={(e) => setSplitOther(e.target.value as "transfer" | "card")}>
+                    <option value="transfer">Transferencia</option>
+                    <option value="card">Tarjeta</option>
+                  </select>
+                </Field>
+              </fieldset>}
             </div>
             <div className="sale-totals">
               <div>
@@ -614,6 +647,16 @@ export function SaleModal({
                 <strong>Total</strong>
                 <strong>{money(total)}</strong>
               </div>
+              {mixed && <>
+                <div className="sale-split-part">
+                  <span>En efectivo</span>
+                  <span>{cashPart === null || splitError ? "—" : money(cashPart)}</span>
+                </div>
+                <div className="sale-split-part">
+                  <span>Por {payments[splitOther].toLowerCase()}</span>
+                  <span>{cashPart === null || splitError ? "—" : money(total - cashPart)}</span>
+                </div>
+              </>}
             </div>
           </div>
           </section>
@@ -676,6 +719,7 @@ export function Ticket({
               <strong>{money(sale.total)}</strong>
             </div>
             <div className="ticket-payment"><span>Medio de pago</span><strong>{payments[sale.payment] || sale.payment}</strong></div>
+            {sale.paymentSplit?.map((part) => <div className="ticket-payment ticket-payment-part" key={part.method}><span>{payments[part.method]}</span><strong>{money(part.amount)}</strong></div>)}
             {(sale.pointsEarned > 0 || sale.pointsUsed > 0) && <p className="ticket-points">{sale.pointsEarned > 0 && `+${sale.pointsEarned} puntos acumulados`}{sale.pointsEarned > 0 && sale.pointsUsed > 0 && " · "}{sale.pointsUsed > 0 && `${sale.pointsUsed} puntos canjeados`}</p>}
             <p className="ticket-disclaimer">
               Importes en {state.settings.currency}. Este es un comprobante interno de la operación y no constituye una factura fiscal.

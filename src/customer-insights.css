@@ -39,6 +39,7 @@
 .customer-insights-grid > div:first-child { padding-left: 0; border-left: 0; }
 .customer-insights-grid span { display: block; margin-bottom: 5px; color: var(--muted); font-size: 13px; line-height: 1.35; }
 .customer-insights-grid strong { display: block; color: var(--text); font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.customer-insights-grid small { display: block; margin-top: 2px; color: var(--muted); font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
 
 .customer-insights-next {
   display: flex;

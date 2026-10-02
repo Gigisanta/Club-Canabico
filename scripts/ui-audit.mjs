@@ -26,7 +26,7 @@ const publicRoutes = ["/", "/productos", "/productos/ficha-inexistente"];
 const appRoutes = [
   "/app", "/app/panorama", "/app/decisiones", "/app/decisiones/stock", "/app/decisiones/comercial", "/app/decisiones/caja", "/app/decisiones/socios",
   "/app/ventas", "/app/inventario", "/app/socios", "/app/gastos",
-  "/app/finanzas", "/app/responsables", "/app/reportes", "/app/vidriera",
+  "/app/finanzas", "/app/finanzas?view=activity&account=cash", "/app/responsables", "/app/reportes", "/app/vidriera",
   "/app/consultas", "/app/configuracion", "/app/configuracion?tab=public", "/app/importar", "/app/preparar",
 ];
 const captureRoutes = new Set(["/", "/productos", "/app", "/app/panorama", "/app/decisiones", "/app/ventas", "/app/inventario", "/app/socios", "/app/importar", "/app/preparar", "/app/vidriera", "/app/consultas"]);

@@ -93,11 +93,40 @@
 .app-shell .finance-activity-lead h2, .app-shell .finance-plan-head h2 { margin: 0 0 6px; font-size: clamp(20px, 2vw, 26px); letter-spacing: -.03em; }
 .app-shell .finance-activity-lead p, .app-shell .finance-plan-head p { max-width: 64ch; margin: 0; color: var(--muted); font-size: 14px; }
 .app-shell .finance-activity-lead .button, .app-shell .finance-plan-head .button { flex: none; }
-.app-shell .finance-activity-total { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border: 1px solid var(--bo-rule); border-left: 4px solid var(--brand-olive-mid); border-radius: 10px; background: var(--bo-paper); }
-.app-shell .finance-activity-total p { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 14px; margin: 0; }
-.app-shell .finance-activity-total strong { font-size: 22px; font-variant-numeric: tabular-nums; }
-.app-shell .finance-activity-total span { color: var(--muted); font-size: 14px; }
 .app-shell .finance-load { padding: 0 20px; }
+
+/* Caja por cuenta: una franja de libro con tres cuentas, sin tarjetas. La cuenta elegida lleva subrayado y aria-pressed. */
+.app-shell .cash-accounts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--bo-rule); border-radius: 12px; background: var(--bo-paper); overflow: hidden; }
+.app-shell .cash-accounts button { display: grid; align-content: start; gap: 4px; min-width: 0; min-height: 96px; padding: 14px 18px 11px; border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: transparent; color: var(--bo-ink); text-align: left; cursor: pointer; }
+.app-shell .cash-accounts button + button { border-left: 1px solid var(--bo-rule); }
+.app-shell .cash-accounts button:hover { background: #f0e9d2; }
+.app-shell .cash-accounts button[aria-pressed="true"] { border-bottom-color: var(--brand-orange); background: #fffdf6; }
+.app-shell .cash-accounts button > span { color: var(--bo-ink-soft); font-size: 14px; font-weight: 650; }
+.app-shell .cash-accounts button[aria-pressed="true"] > span { color: var(--bo-ink); font-weight: 750; }
+.app-shell .cash-accounts strong { font-size: clamp(20px, 2vw, 26px); line-height: 1.15; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.app-shell .cash-accounts small { color: var(--muted); font-size: 13px; }
+.app-shell .cash-accounts-note { display: flex; align-items: flex-start; gap: 6px; max-width: 80ch; margin: -16px 0 0; color: var(--muted); font-size: 13.5px; line-height: 1.45; }
+.app-shell .cash-accounts-note svg { flex: none; margin-top: 2px; }
+.app-shell .cash-ledger-toolbar { flex-wrap: wrap; align-items: flex-end; }
+.app-shell .cash-ledger-toolbar .search-field { min-width: 220px; flex: 1; }
+.app-shell .cash-ledger-toolbar .filter-group { flex-wrap: wrap; align-items: flex-end; }
+.app-shell .cash-ledger-toolbar :is(input, select, .button) { min-height: 44px; }
+.app-shell .cash-ledger-date { display: grid; gap: 2px; color: var(--bo-ink-soft); font-size: 12.5px; font-weight: 650; }
+.app-shell .cash-ledger-totals { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 0; padding: 0 21px 14px; color: var(--muted); font-size: 14px; }
+.app-shell .cash-ledger-totals strong { color: var(--bo-ink); font-variant-numeric: tabular-nums; }
+.app-shell .cash-balance-after { color: var(--bo-ink-soft); font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (max-width: 760px) {
+  .app-shell .cash-accounts { grid-template-columns: minmax(0, 1fr); }
+  .app-shell .cash-accounts button { grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 2px 12px; min-height: 64px; padding: 11px 15px 9px; }
+  .app-shell .cash-accounts button + button { border-left: 0; border-top: 1px solid var(--bo-rule); }
+  .app-shell .cash-accounts small { grid-column: 1 / -1; }
+  .app-shell .cash-accounts-note { margin-top: -18px; }
+  .app-shell .cash-ledger-toolbar { flex-direction: column; align-items: stretch; padding: 0 15px 15px; }
+  .app-shell .cash-ledger-toolbar .search-field { min-width: 0; width: 100%; }
+  .app-shell .cash-ledger-toolbar .filter-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .app-shell .cash-ledger-toolbar .filter-group > * { min-width: 0; width: 100%; }
+  .app-shell .cash-ledger-totals { padding: 0 15px 12px; }
+}
 .app-shell .finance-plan-summary { display: grid; grid-template-columns: minmax(160px, .65fr) repeat(2, minmax(0, 1fr)); border: 1px solid var(--bo-rule); border-radius: 12px; background: var(--bo-paper); }
 .app-shell .finance-plan-summary > :is(label, div) { display: flex; flex-direction: column; justify-content: center; min-width: 0; min-height: 104px; padding: 16px 20px; }
 .app-shell .finance-plan-summary > * + * { border-left: 1px solid var(--bo-rule); }

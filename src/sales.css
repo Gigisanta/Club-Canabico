@@ -32,6 +32,7 @@
 .sales-page .sales-summary > div > span { color: var(--muted); font-size: 13px; font-weight: 700; }
 .sales-page .sales-summary strong { color: var(--text); font-size: clamp(22px, 2.2vw, 31px); font-weight: 700; letter-spacing: -.04em; line-height: 1.1; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .sales-page .sales-summary small { color: var(--muted); font-size: 13px; line-height: 1.4; }
+.sales-page .sales-summary .sales-summary-link { justify-self: start; min-height: 44px; padding: 4px 0; border: 0; background: transparent; color: var(--brand-olive); font-size: 14px; font-weight: 700; text-align: left; text-decoration: underline; text-underline-offset: 4px; cursor: pointer; }
 .sales-page .sales-summary .status-label { display: inline-flex; align-items: center; gap: 8px; color: var(--text); font-size: 21px; letter-spacing: -.025em; }
 .sales-page .sales-summary .live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--brand-olive-mid); }
 .sales-page .sales-summary > div:last-child { border-right: 1px solid var(--border); }
@@ -113,6 +114,12 @@
 .sales-checkout-content .sale-totals .total { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--border); }
 .sales-checkout-content .sale-totals .total strong:last-child { color: var(--brand-olive); font-size: 24px; letter-spacing: -.04em; }
 .sales-checkout-content > form > .form-error { margin-top: 10px; }
+.sales-checkout-content .sale-split { display: grid; gap: 10px; min-width: 0; margin: 12px 0 0; padding: 10px 14px 4px; border: 1px solid var(--border); border-radius: 12px; }
+.sales-checkout-content .sale-split legend { padding: 0 6px; color: var(--text); font-size: 13px; font-weight: 750; }
+.sales-checkout-content .sale-split input[aria-invalid="true"] { border-color: var(--warm); }
+.sales-checkout-content .sale-totals .total + .sale-split-part { margin-top: 12px; }
+.sales-checkout-content .sale-totals .sale-split-part { color: var(--muted); }
+.sales-checkout-content .sale-totals .sale-split-part span:last-child { color: var(--text); font-weight: 700; }
 
 .sales-ticket-content { min-width: 0; }
 .sales-ticket-content .print-ticket { max-width: 540px; margin-inline: auto; padding: 2px 2px 0; color: var(--text); }
@@ -142,6 +149,9 @@
 .sales-ticket-content .ticket-payment { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 12px 3px; border-top: 1px solid var(--border); }
 .sales-ticket-content .ticket-payment span { margin: 0; }
 .sales-ticket-content .ticket-payment strong { font-size: 13px; }
+.sales-ticket-content .ticket-payment-part { padding: 6px 3px 6px 16px; border-top: 0; }
+.sales-ticket-content .ticket-payment-part span { font-weight: 600; letter-spacing: 0; text-transform: none; }
+.sales-ticket-content .ticket-payment-part strong { font-variant-numeric: tabular-nums; }
 .sales-ticket-content .ticket-points { margin: 5px 3px 0; color: var(--brand-olive-mid); font-size: 13px; font-weight: 700; }
 .sales-ticket-content .ticket-disclaimer { margin: 17px 0 14px; padding: 12px; border-radius: 9px; background: var(--surface-raised); color: var(--muted); font-size: 13px; line-height: 1.55; }
 .sales-ticket-content .ticket-print { justify-content: center; min-height: 44px; }
