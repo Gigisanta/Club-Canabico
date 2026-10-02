@@ -473,7 +473,7 @@ Resources:
           containers:
             name: [operations-backup, operations-restore]
             exitCode:
-              - numeric: ['!=', 0]
+              - anything-but: 0
       Targets:
         - Id: backup-task-failure-topic
           Arn: !Ref BackupAlertTopicArn

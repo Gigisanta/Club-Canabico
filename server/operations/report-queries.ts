@@ -2187,7 +2187,6 @@ function parseScenarioCashDefinition(value: unknown): {
 async function approvedCashScenarioProjections(
   asOfDate: string,
   firstWeekStart: string,
-  payables: readonly { id: string }[],
   obligations: ReturnType<typeof aggregateThirteenWeekObligations>,
 ) {
   const where = {
@@ -2210,7 +2209,15 @@ async function approvedCashScenarioProjections(
   const latestByName = new Map<string, (typeof rows)[number]>();
   for (const row of rows) if (!latestByName.has(row.name)) latestByName.set(row.name, row);
 
-  const existingObligationIds = new Set(payables.map(row => row.id));
+  const referencedCommitmentIds = [...new Set([...latestByName.values()].flatMap(row =>
+    parseScenarioCashDefinition(row.definition)?.items.flatMap(item => item.commitmentId ? [item.commitmentId] : []) ?? []))];
+  // Match only the commitments named by approved scenarios, over the complete
+  // payable horizon. The visible detail page cannot establish deduplication.
+  const matchedPayables = referencedCommitmentIds.length ? await reportDb().operationPayable.findMany({
+    where: { id: { in: referencedCommitmentIds }, dueDate: { gte: firstWeekStart, lt: addDays(firstWeekStart, 13 * 7) } },
+    select: { id: true },
+  }) : [];
+  const existingObligationIds = new Set(matchedPayables.map(row => row.id));
   let invalidConfigurationCount = 0;
   let malformedScenarioItemCount = 0;
   const scenarioProjections = [];
@@ -2354,14 +2361,7 @@ async function obligationsThirteenWeeks(range: ReportDateRange) {
     ORDER BY r."accountId" ASC, r."date" DESC, r."createdAt" DESC, r."id" DESC
   `) : [];
   const sourceCoverage = attestation && payableSummaryComplete ? "complete" as const : payableCount ? "partial" as const : "unknown" as const;
-  const aggregate = aggregateThirteenWeekObligations(firstWeekStart, payableRowsComplete && payableSummaryComplete ? payables.map(row => ({
-    id: row.id,
-    dueDate: row.dueDate,
-    currency: row.currency as "ARS" | "USD",
-    amountMinor: row.amountMinor.toString(),
-    paidMinor: row.paidMinor.toString(),
-    verified: row.verified,
-  })) : [], sourceCoverage);
+  const aggregate = aggregateThirteenWeekObligations(firstWeekStart, [], sourceCoverage);
   const weeklyGroupsByStart = new Map<string, typeof payableWeekGroups>();
   for (const row of payableWeekGroups) {
     const group = weeklyGroupsByStart.get(row.weekStart) ?? [];
@@ -2381,7 +2381,7 @@ async function obligationsThirteenWeeks(range: ReportDateRange) {
       verifiedOutstandingByCurrency: groups.filter(row => row.verifiedOutstandingMinor !== "0").map(row => ({ currency: row.currency as "ARS" | "USD", minor: row.verifiedOutstandingMinor })),
     };
   });
-  const cashScenarios = payableRowsComplete && payableSummaryComplete ? await approvedCashScenarioProjections(referenceDate, firstWeekStart, payables, aggregate) : {
+  const cashScenarios = payableSummaryComplete ? await approvedCashScenarioProjections(referenceDate, firstWeekStart, { ...aggregate, weeks: weeklySummary }) : {
     scenarioProjections: [],
     scenarioConfigurationCoverage: {
       source: "current-approved-versioned-operational-configurations",
@@ -2392,8 +2392,7 @@ async function obligationsThirteenWeeks(range: ReportDateRange) {
       validScenarioCount: null,
       invalidConfigurationCount: null,
       malformedScenarioItemCount: null,
-      reason: !payableRowsComplete ? "payable-population-over-visible-row-limit; scenario-cash-values-not-calculated"
-        : "invalid-or-incomplete-payable-population; scenario-cash-values-not-calculated",
+      reason: "invalid-or-incomplete-payable-population; scenario-cash-values-not-calculated",
     },
     scenarioCombinationPolicy: "each-approved-scenario-is-an-alternative; no-scenario-balances-are-added-together",
   };

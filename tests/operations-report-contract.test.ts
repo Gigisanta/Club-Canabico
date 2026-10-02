@@ -474,6 +474,14 @@ test("cash, expenses, purchases, delivery and scoped stock aggregate complete po
   `);
 
   const range = { from: "2026-09-01", to: "2026-09-30" };
+  await db.operationalConfiguration.create({ data: {
+    id: "volume-approved-cash-scenario", name: "Volume cash scenario", kind: "scenarios", version: 1,
+    state: "approved", proposedBy: "fixture", approvedBy: "reviewer", approvedAt: new Date("2026-09-01T12:00:00Z"),
+    validFrom: "2026-09-01", definition: { currency: "ARS", weeks: 13, items: [
+      { id: "income", date: "2026-09-28", kind: "income", amountMinor: "2000000" },
+      { id: "recorded-payment", date: "2026-09-28", kind: "payment", amountMinor: "100", commitmentId: "volume-obligation-10001" },
+    ] },
+  } });
   const cash = await reportTestSchema!.queries.queryOperationsReport("cash-ledger", range);
   assert.equal(cash.metrics.ledgerLegRows, 40004);
   assert.equal(cash.metrics.accounts.length, 10000);
@@ -492,6 +500,13 @@ test("cash, expenses, purchases, delivery and scoped stock aggregate complete po
   assert.equal(obligations.metrics.payableRowsComplete, false);
   assert.equal(obligations.metrics.visiblePayableRows, 500);
   assert.equal(obligations.metrics.payableDetailLimit, 500);
+  assert.equal(obligations.metrics.scenarioProjections.length, 1);
+  const scenario = obligations.metrics.scenarioProjections[0]!;
+  assert.equal(scenario.matchedExistingObligationCount, 1);
+  assert.equal(scenario.includedItemCount, 1);
+  assert.equal(scenario.weeks[0]!.openPayableMinor, "1000100");
+  assert.equal(scenario.weeks[0]!.verifiedOpenPayableMinor, "1000100");
+  assert.equal(scenario.weeks[0]!.netFlowAfterAllOpenPayablesMinor, "999900");
   const weekly = obligations.metrics.weekly as Array<{
     weekStart: string;
     obligationCount: number;
