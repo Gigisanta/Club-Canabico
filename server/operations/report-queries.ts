@@ -2210,7 +2210,7 @@ async function approvedCashScenarioProjections(
   for (const row of rows) if (!latestByName.has(row.name)) latestByName.set(row.name, row);
 
   const referencedCommitmentIds = [...new Set([...latestByName.values()].flatMap(row =>
-    parseScenarioCashDefinition(row.definition)?.items.flatMap(item => item.commitmentId ? [item.commitmentId] : []) ?? []))];
+    parseScenarioCashDefinition(row.definition)?.items.flatMap(item => item.commitmentId?.trim() ? [item.commitmentId.trim()] : []) ?? []))];
   // Match only the commitments named by approved scenarios, over the complete
   // payable horizon. The visible detail page cannot establish deduplication.
   const matchedPayables = referencedCommitmentIds.length ? await reportDb().operationPayable.findMany({

@@ -479,7 +479,7 @@ test("cash, expenses, purchases, delivery and scoped stock aggregate complete po
     state: "approved", proposedBy: "fixture", approvedBy: "reviewer", approvedAt: new Date("2026-09-01T12:00:00Z"),
     validFrom: "2026-09-01", definition: { currency: "ARS", weeks: 13, items: [
       { id: "income", date: "2026-09-28", kind: "income", amountMinor: "2000000" },
-      { id: "recorded-payment", date: "2026-09-28", kind: "payment", amountMinor: "100", commitmentId: "volume-obligation-10001" },
+      { id: "recorded-payment", date: "2026-09-28", kind: "payment", amountMinor: "100", commitmentId: " volume-obligation-10001 " },
     ] },
   } });
   const cash = await reportTestSchema!.queries.queryOperationsReport("cash-ledger", range);
