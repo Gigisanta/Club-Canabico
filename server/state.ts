@@ -7,6 +7,7 @@ export const publicUser = {
   id: true,
   name: true,
   email: true,
+  username: true,
   role: true,
   color: true,
 } as const;
@@ -102,6 +103,7 @@ export async function getState(user: User, requested: string | undefined, view: 
       id: user.id,
       name: user.name,
       email: user.email,
+      username: user.username,
       role: user.role,
       color: user.color,
     },

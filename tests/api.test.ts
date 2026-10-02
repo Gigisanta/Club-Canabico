@@ -34,7 +34,7 @@ test(
       ["viewer", "viewer"],
     ] as const)
       await db.user.create({
-        data: { id, name: id, email: `${id}@test.local`, role, password },
+        data: { id, name: id, username: id, email: `${id}@test.local`, role, password },
       });
     await db.setting.create({ data: { id: 1, value: { ...defaults,pointsEvery:1000,pointValue:10,silverAt:5000,goldAt:15000 } } });
     await db.customer.create({
@@ -130,14 +130,31 @@ test(
         assert.equal(invitation.status, 200);
         assert.equal((await invitation.json()).name, "Camila");
         assert.equal((await publicCall("/auth/activate", { token: "invalid", password: "Camila-personal-123" })).status, 404);
-        const activated = await publicCall("/auth/activate", { token, password: "Camila-personal-123" });
+        assert.equal((await publicCall("/auth/activate", { token, username: " OWNER ", password: "Camila-personal-123" })).status, 409);
+        assert.equal((await db.teamSeat.findUniqueOrThrow({ where: { id: seat.id } })).activatedAt, null);
+        const activated = await publicCall("/auth/activate", { token, username: " Camila ", password: "Camila-personal-123" });
         assert.equal(activated.status, 200);
-        assert.equal((await activated.json()).user.role, "admin");
+        const activatedUser = (await activated.json()).user;
+        assert.equal(activatedUser.role, "admin");
+        assert.equal(activatedUser.username, "camila");
         assert.equal((await publicCall("/auth/activate", { token, password: "Camila-personal-123" })).status, 404);
         assert.equal((await publicCall("/auth/invitation", { token })).status, 404);
-        const camila = await publicCall("/auth/login", { email: "camila@test.local", password: "Camila-personal-123" });
+        const camila = await publicCall("/auth/login", { username: " CAMILA ", password: "Camila-personal-123" });
         assert.equal(camila.status, 200);
         cookies.admin = camila.headers.get("set-cookie")!.split(";")[0];
+        for (const username of ["camila", "missing-user"]) {
+          const denied = await publicCall("/auth/login", { username, password: "Wrong-local-password" });
+          assert.equal(denied.status, 401);
+          assert.equal(denied.headers.get("set-cookie"), null);
+          assert.equal((await denied.json()).error, "Usuario o contraseña incorrectos");
+        }
+        assert.equal((await publicCall("/auth/login", { username: "camila", email: "owner@test.local", password: "Camila-personal-123" })).status, 400);
+        await db.user.update({ where: { id: seat.id }, data: { active: false } });
+        try {
+          assert.equal((await publicCall("/auth/login", { username: "camila", password: "Camila-personal-123" })).status, 401);
+        } finally {
+          await db.user.update({ where: { id: seat.id }, data: { active: true } });
+        }
       });
       await t.test("product catalog remembers saved names and optional profiles within each role's scope", async () => {
         const lots = ["catalog-lot-1", "catalog-lot-2", "catalog-lot-3"];

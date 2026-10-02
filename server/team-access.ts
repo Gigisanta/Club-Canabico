@@ -1,6 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
 import { db } from "./db.js";
 import { HttpError } from "./validation.js";
+import { z } from "zod";
+
+export const usernameSchema = z.string().trim().toLowerCase().regex(/^[a-z0-9][a-z0-9._-]{1,31}$/, "Usá de 2 a 32 letras, números, puntos, guiones o guiones bajos.");
 
 export const setupHash = (token: string) => createHash("sha256").update(token).digest("hex");
 

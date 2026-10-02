@@ -2,7 +2,8 @@ export type Role = "owner" | "admin" | "responsible" | "cashier" | "viewer";
 export interface User {
   id: string;
   name: string;
-  email: string;
+  email: string | null;
+  username?: string | null;
   role: Role;
   color: string;
 }

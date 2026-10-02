@@ -344,7 +344,7 @@ export default function Settings() {
                         <Avatar name={u.name} color={u.color} />
                         <div>
                           <strong>{u.name}</strong>
-                          <small>{u.email}</small>
+                          <small>{u.username || u.email}</small>
                         </div>
                       </div>
                     </td>

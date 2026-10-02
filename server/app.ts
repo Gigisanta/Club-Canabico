@@ -12,7 +12,7 @@ import { AuthRateStore } from "./auth-rate-store.js";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { randomUUID } from "node:crypto";
-import { findValidSeat, prepareSeat, setupHash } from "./team-access.js";
+import { findValidSeat, prepareSeat, setupHash, usernameSchema } from "./team-access.js";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { Prisma, type User, type Role } from "@prisma/client";
@@ -178,6 +178,7 @@ async function session(res: Response, user: User) {
       name: user.name,
       role: user.role,
       email: user.email,
+      username: user.username,
       color: user.color,
     },
   });
@@ -206,7 +207,7 @@ app.post("/api/auth/invitation", setupLimit, async (req, res) => {
 });
 app.post("/api/auth/activate", setupLimit, async (req, res) => {
   realTeamOnly();
-  const { token, password } = z.object({ token: z.string().max(200), password: z.string().min(12).max(72) }).parse(req.body);
+  const { token, password, username } = z.object({ token: z.string().max(200), password: z.string().min(12).max(72), username: usernameSchema.optional() }).parse(req.body);
   const seat = await findValidSeat(token);
   if (!seat) throw new HttpError(404, "El enlace venció o ya se usó. Pedí uno nuevo.");
   const passwordHash = await bcrypt.hash(password, 12);
@@ -214,7 +215,7 @@ app.post("/api/auth/activate", setupLimit, async (req, res) => {
     const valid = await tx.teamSeat.findUnique({ where: { tokenHash: setupHash(token) } });
     if (!valid?.email || valid.activatedAt || !valid.expiresAt || valid.expiresAt <= new Date())
       throw new HttpError(404, "El enlace venció o ya se usó. Pedí uno nuevo.");
-    const created = await tx.user.create({ data: { id: valid.id, name: valid.name, email: valid.email, role: valid.role, password: passwordHash } });
+    const created = await tx.user.create({ data: { id: valid.id, name: valid.name, email: valid.email, username, role: valid.role, password: passwordHash } });
     await tx.teamSeat.update({ where: { id: valid.id }, data: { activatedAt: new Date(), tokenHash: null, expiresAt: null } });
     return created;
   });
@@ -231,14 +232,17 @@ app.post(
     message: { error: "Demasiados intentos. Reintentá en 15 minutos." },
   }),
   async (req, res) => {
-    const v = z
-      .object({ email: z.email(), password: z.string().max(200) })
-      .parse(req.body);
+    // Email remains an explicit compatibility field for existing API clients.
+    // A username never falls back to a name or email lookup.
+    const v = z.union([
+      z.strictObject({ username: usernameSchema, password: z.string().min(1).max(200) }),
+      z.strictObject({ email: z.email(), password: z.string().min(1).max(200) }),
+    ]).parse(req.body);
     const user = await db.user.findUnique({
-      where: { email: v.email.toLowerCase() },
+      where: "username" in v ? { username: v.username } : { email: v.email.toLowerCase() },
     });
-    if (!user || !(await bcrypt.compare(v.password, user.password)))
-      throw new HttpError(401, "Email o contraseña incorrectos");
+    if (!user?.active || !(await bcrypt.compare(v.password, user.password)))
+      throw new HttpError(401, "Usuario o contraseña incorrectos");
     await session(res, user);
   },
 );
@@ -263,6 +267,7 @@ app.get("/api/auth/me", auth, (req, res) =>
       name: req.user.name,
       role: req.user.role,
       email: req.user.email,
+      username: req.user.username,
       color: req.user.color,
     },
   }),

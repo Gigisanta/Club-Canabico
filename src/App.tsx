@@ -88,7 +88,7 @@ function Login({
       <section className="login-form">
         <Brand />
         <h2>{demo ? "Bienvenido a tu club" : "Entrá a Bombo"}</h2>
-        <p>{demo ? "Ingresá con tu cuenta para continuar." : "Usá el correo con el que activaste tu acceso."}</p>
+        <p>Ingresá con tu nombre de usuario para continuar.</p>
         <Form
           submit="Iniciar sesión"
           onSubmit={async (fd) =>
@@ -102,13 +102,16 @@ function Login({
             )
           }
         >
-          <Field label="Correo electrónico">
+          <Field label="Nombre de usuario">
             <input
-              type="email"
-              name="email"
+              type="text"
+              name="username"
               autoComplete="username"
+              autoCapitalize="none"
+              spellCheck={false}
+              maxLength={64}
               required
-              placeholder="nombre@tuclub.com"
+              placeholder="Tu usuario"
             />
           </Field>
           <Field label="Contraseña">

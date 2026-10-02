@@ -81,6 +81,7 @@ async function seed() {
             color,
             password,
             email: `${id}@demo.bombo.local`,
+            username: id,
           },
         });
       const names = [
