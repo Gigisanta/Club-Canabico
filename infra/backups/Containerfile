@@ -1,0 +1,38 @@
+FROM node:24.14.1-bookworm-slim AS build
+WORKDIR /opt/bombo
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY package.json package-lock.json ./
+COPY prisma ./prisma
+RUN npm ci
+COPY . .
+RUN npm run db:generate && npm run build && npm prune --omit=dev
+
+FROM node:24.14.1-bookworm-slim
+ENV NODE_ENV=production
+ENV PG_BIN=/usr/lib/postgresql/18/bin
+WORKDIR /opt/bombo
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl openssl \
+ && install -d /usr/share/postgresql-common/pgdg \
+ && curl --fail --silent --show-error --location https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+      --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+ && echo 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' \
+      > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-client-18 \
+ && apt-get purge -y --auto-remove curl \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /opt/bombo/node_modules ./node_modules
+COPY --from=build /opt/bombo/dist-server ./dist-server
+COPY --from=build /opt/bombo/prisma ./prisma
+COPY --from=build /opt/bombo/package.json /opt/bombo/package-lock.json ./
+COPY scripts/operations-backup.mjs scripts/backup-streams.mjs scripts/backup-restore-policy.mjs scripts/backup-object-reuse.mjs ./scripts/
+COPY scripts/backup-cloud-store.mjs scripts/operations-backup-cloud-worker.mjs ./scripts/
+RUN chown -R node:node /opt/bombo
+USER node
+ENTRYPOINT ["node", "/opt/bombo/scripts/operations-backup-cloud-worker.mjs"]
+CMD ["backup"]

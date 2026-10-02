@@ -1,0 +1,13 @@
+{
+  "id": "/app/delivery",
+  "name": "Bombo · Reparto",
+  "short_name": "Bombo Reparto",
+  "description": "Turno de reparto con cola cifrada y uso sin conexión.",
+  "start_url": "/app/delivery",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6efdd",
+  "theme_color": "#3e402e",
+  "lang": "es-AR",
+  "icons": [{ "src": "/brand/bombo-symbol.png", "sizes": "192x192", "type": "image/png", "purpose": "any" }]
+}

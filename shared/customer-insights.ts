@@ -3,6 +3,8 @@ export interface CustomerInsights {
   averageTicket: number;
   lastPurchase: string | null;
   favoriteProduct: { name: string; purchases: number } | null;
+  /** The category bought in the most purchases, by each lot's current category, with its most bought variety; null when no line has one. */
+  favoriteCategory: { name: string; purchases: number; variety: string } | null;
   typicalIntervalDays: number | null;
   nextExpectedDate: string | null;
 }

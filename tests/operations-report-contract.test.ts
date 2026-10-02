@@ -1,0 +1,629 @@
+import test, { after } from "node:test";
+import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { PrismaClient } from "@prisma/client";
+import { splitSqlStatements } from "./migration-sql.js";
+
+async function createReportTestSchema() {
+  const raw = process.env.TEST_DATABASE_URL?.trim();
+  if (!raw) return null;
+  const base = new URL(raw);
+  assert.ok(["postgres:", "postgresql:"].includes(base.protocol), "TEST_DATABASE_URL must be PostgreSQL");
+  const host = base.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  assert.ok(["localhost", "127.0.0.1", "::1"].includes(host), "TEST_DATABASE_URL must use loopback");
+  const databaseName = decodeURIComponent(base.pathname.slice(1));
+  assert.match(databaseName, /^bombo_(?:ui|test)_[a-z0-9][a-z0-9_-]*$/i, "TEST_DATABASE_URL must name a dedicated bombo_ui_* or bombo_test_* database");
+
+  const schema = `report_contract_${process.pid}_${randomBytes(6).toString("hex")}`;
+  assert.match(schema, /^report_contract_[0-9]+_[a-f0-9]+$/);
+  const adminUrl = new URL(base);
+  adminUrl.searchParams.set("schema", "public");
+  const admin = new PrismaClient({ datasourceUrl: adminUrl.toString() });
+  let scoped: PrismaClient | undefined;
+  let created = false;
+  try {
+    await admin.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
+    created = true;
+    const scopedUrl = new URL(base);
+    scopedUrl.searchParams.set("schema", schema);
+    scoped = new PrismaClient({ datasourceUrl: scopedUrl.toString() });
+    const migrationsDir = new URL("../prisma/migrations/", import.meta.url);
+    const migrationsPath = decodeURIComponent(migrationsDir.pathname);
+    const migrations = (await readdir(migrationsPath, { withFileTypes: true }))
+      .filter(entry => entry.isDirectory())
+      .map(entry => entry.name)
+      .sort();
+    assert.ok(migrations.length > 0, "expected checked-in database migrations");
+    for (const migration of migrations) {
+      const sql = await readFile(join(migrationsPath, migration, "migration.sql"), "utf8");
+      for (const statement of splitSqlStatements(sql)) await scoped.$executeRawUnsafe(statement);
+    }
+    const scopedUrlString = scopedUrl.toString();
+    process.env.DATABASE_URL = scopedUrlString;
+    process.env.NODE_ENV = "test";
+    const [{ db }, queries] = await Promise.all([
+      import("../server/db.js"),
+      import("../server/operations/report-queries.js"),
+    ]);
+    return {
+      db,
+      queries,
+      schema,
+      async close() {
+        await db.$disconnect();
+        await scoped?.$disconnect();
+        await admin.$executeRawUnsafe(`DROP SCHEMA "${schema}" CASCADE`);
+        await admin.$disconnect();
+      },
+    };
+  } catch (error) {
+    await scoped?.$disconnect().catch(() => undefined);
+    if (created) await admin.$executeRawUnsafe(`DROP SCHEMA "${schema}" CASCADE`).catch(() => undefined);
+    await admin.$disconnect();
+    throw error;
+  }
+}
+
+const reportTestSchema = await createReportTestSchema();
+const reportQueries = reportTestSchema?.queries ?? await import("../server/operations/report-queries.js");
+const { parseReportParams, reportAreaIds, reportDefinitions } = await import("../server/operations/report-definitions.js");
+after(async () => { await reportTestSchema?.close(); });
+
+const {
+  aggregateCustomerSegmentationProfiles,
+  customerSegmentationQueryContract,
+  reportPeriodDateBounds,
+  reportTodayCivilDate,
+  summarizeMemberCreditBalances,
+  summarizeStockFactMovements,
+  supportsReportScope,
+} = reportQueries;
+
+test("report catalog defines all eleven selectable areas and explicit coverage outputs", () => {
+  assert.equal(reportDefinitions.length, 11);
+  assert.deepEqual(reportDefinitions.map(area => area.id), reportAreaIds);
+  for (const area of reportDefinitions) {
+    assert.ok(area.output.some(field => field.name === "coverage"));
+    assert.ok(area.output.some(field => field.name === "evidenceState"));
+    assert.ok(area.version.queryState.startsWith("operations-v1-"));
+  }
+  const inventory = reportDefinitions.find(area => area.id === "inventory")!;
+  assert.ok(inventory.output.some(field => field.name === "stockMovementEventsByKindAndUnit"));
+  assert.ok(inventory.inclusionRules.some(rule => rule.includes("actualQuantity - deliveredQuantity - (returnedQuantity - returnedDeliveredQuantity)")));
+  const collections = reportDefinitions.find(area => area.id === "delivery-collections")!;
+  assert.ok(collections.output.some(field => field.name === "reversedCount"));
+  assert.ok(collections.inclusionRules.some(rule => rule.includes("reversed treatment is excluded")));
+});
+
+test("report date parser supports the mounted UI aliases and fromDate/throughDate", () => {
+  assert.deepEqual(parseReportParams({ area: "cash-ledger", from: "2026-09-01", to: "2026-09-30" }), {
+    area: "cash-ledger",
+    from: "2026-09-01",
+    to: "2026-09-30",
+  });
+  assert.deepEqual(parseReportParams({ area: "cash-ledger", fromDate: "2026-09-01", throughDate: "2026-09-30" }), {
+    area: "cash-ledger",
+    from: "2026-09-01",
+    to: "2026-09-30",
+  });
+  assert.throws(() => parseReportParams({ area: "cash-ledger", fromDate: "2026-10-01", throughDate: "2026-09-30" }), /anterior o igual/);
+  assert.throws(() => parseReportParams({ area: "cash-ledger", from: "2026-09-01", fromDate: "2026-09-02" }), /nombres alternativos/);
+});
+
+test("report periods follow Buenos Aires civil dates across UTC midnight", () => {
+  const afterUtcMidnight = new Date("2026-10-02T00:30:00.000Z");
+  assert.equal(reportTodayCivilDate(afterUtcMidnight), "2026-10-01");
+
+  const bounds = reportPeriodDateBounds({ from: "2026-10-01", to: "2026-10-01" });
+  assert.equal(bounds.gte?.toISOString(), "2026-10-01T03:00:00.000Z");
+  assert.equal(bounds.lt?.toISOString(), "2026-10-02T03:00:00.000Z");
+});
+
+test("report areas advertise only scopes their query sources can enforce", () => {
+  assert.equal(supportsReportScope("cash-ledger", { accountIds: ["a"] }), true);
+  assert.equal(supportsReportScope("product-contribution", { memberIds: ["m"] }), true);
+  assert.equal(supportsReportScope("inventory", { locationIds: ["l"] }), true);
+  assert.equal(supportsReportScope("inventory", { custodianIds: ["c"] }), true);
+  assert.equal(supportsReportScope("cash-ledger", { memberIds: ["m"] }), false);
+  assert.equal(supportsReportScope("operating-expenses", { accountIds: [] }), false);
+});
+
+test("customer segmentation uses all confirmed history through the inclusive Buenos Aires as-of date", () => {
+  const query = customerSegmentationQueryContract(
+    { from: "2026-01-01", to: "2026-09-30" },
+    { memberIds: ["member-a"] },
+  );
+
+  assert.equal(query.asOfDate, "2026-09-30");
+  assert.equal(query.where.confirmedAt.lt.toISOString(), "2026-10-01T03:00:00.000Z");
+  assert.equal("gte" in query.where.confirmedAt, false);
+  assert.deepEqual(query.where.memberId, { in: ["member-a"] });
+  assert.deepEqual(query.where.fulfillmentState, { not: "cancelled" });
+});
+
+test("sales SQL includes a 00:30Z order in the prior Buenos Aires civil day", { skip: !reportTestSchema }, async () => {
+  const fixture = new Date("2026-10-02T00:30:00.000Z");
+  const civilDate = reportQueries.reportTodayCivilDate(fixture);
+  assert.equal(civilDate, "2026-10-01");
+
+  await reportTestSchema!.db.operationOrder.create({
+    data: {
+      id: "utc-boundary-order",
+      memberId: "utc-boundary-member",
+      channel: "local",
+      currency: "ARS",
+      commercialState: "confirmed",
+      quote: {},
+      subtotalMinor: 5_500_000n,
+      totalMinor: 5_500_000n,
+      address: {},
+      createdBy: "report-contract-fixture",
+      confirmedAt: fixture,
+    },
+  });
+  await reportTestSchema!.db.historicalDeliverySale.createMany({
+    data: [
+      {
+        id: "utc-boundary-history-in",
+        sourceSystem: "report-contract-boundary",
+        sourceId: "in-civil-day",
+        factHash: "in-civil-day",
+        saleDate: new Date("2026-10-01T00:00:00.000Z"),
+        totalCents: 1234n,
+      },
+      {
+        id: "utc-boundary-history-out",
+        sourceSystem: "report-contract-boundary",
+        sourceId: "next-civil-day",
+        factHash: "next-civil-day",
+        saleDate: new Date("2026-10-02T00:00:00.000Z"),
+        totalCents: 5678n,
+      },
+    ],
+  });
+
+  const report = await reportTestSchema!.queries.queryOperationsReport(
+    "sales-revenue",
+    { from: civilDate, to: civilDate },
+  );
+  assert.equal(report.metrics.operational.confirmedOrderCount, 1);
+  assert.deepEqual(report.metrics.operational.orderTotalByCurrency, [{ currency: "ARS", minor: "5500000" }]);
+  assert.equal(report.metrics.historicalDelivery.saleCount, 1);
+});
+
+test("cancelled demand and customer returns do not inflate spend, months or recency", () => {
+  const base = { memberId: "m", currency: "ARS", subtotalMinor: 300000000n, discountMinor: 0n, refundedMinor: 0n, confirmedAt: new Date("2026-09-29T15:00:00Z"), fulfillmentState: "unprepared" };
+  const full = { ...base, fulfillmentState: "cancelled", lines: [{ unit: "g", requested: "10", cancelled: "10", delivered: "0", revenueMinor: 300000000n }] };
+  assert.deepEqual([...aggregateCustomerSegmentationProfiles([{ id: "m" }], [full], "2026-09-30")], [["no-purchase-history", 1]]);
+  const half = { ...base, lines: [{ unit: "g", requested: "10", cancelled: "5", delivered: "5", revenueMinor: 300000000n }] };
+  assert.deepEqual([...aggregateCustomerSegmentationProfiles([{ id: "m" }], [half], "2026-09-30")], [["occasional", 1]]);
+  const returned = { ...base, fulfillmentState: "delivered", refundedMinor: 150000000n, lines: [{ unit: "g", requested: "10", cancelled: "0", delivered: "10", returnedBilled: "5", revenueMinor: 300000000n }] };
+  assert.deepEqual([...aggregateCustomerSegmentationProfiles([{ id: "m" }], [returned], "2026-09-30")], [["occasional", 1]]);
+  const old = { ...half, confirmedAt: new Date("2026-06-01T15:00:00Z") };
+  assert.deepEqual([...aggregateCustomerSegmentationProfiles([{ id: "m" }], [old, full], "2026-09-30")], [["recency-priority", 1]]);
+});
+
+test("reversed collection credits are excluded from both spendable and refundable open balances", () => {
+  assert.deepEqual(summarizeMemberCreditBalances([
+    { treatment: "member_credit", currency: "ARS", amountMinor: 1_000n, resolvedMinor: 250n },
+    { treatment: "refund_due", currency: "USD", amountMinor: 500n, resolvedMinor: 100n },
+    { treatment: "reversed", currency: "ARS", amountMinor: 9_999n, resolvedMinor: 0n },
+  ]), {
+    spendableMemberCreditOpenByCurrency: [{ currency: "ARS", minor: "750" }],
+    refundDueOpenByCurrency: [{ currency: "USD", minor: "400" }],
+    spendableOpenCount: 1,
+    refundDueOpenCount: 1,
+    reversedCount: 1,
+    unclassifiedCount: 0,
+    invalidCount: 0,
+  });
+});
+
+test("stock fact summaries keep waste, signed count adjustments, and internal transfers distinct", () => {
+  assert.deepEqual(summarizeStockFactMovements([
+    { kind: "waste", quantity: "2.5", unit: "g" },
+    { kind: "count_adjustment", quantity: "-1.25", unit: "g" },
+    { kind: "transfer", quantity: "3", unit: "g" },
+    { kind: "transfer_internal", quantity: "1", unit: "g" },
+    { kind: "waste", quantity: "-1", unit: "g" },
+  ]), {
+    byKindAndUnit: [
+      { kind: "count_adjustment", meaning: "signed-count-difference", unit: "g", eventCount: 1, recordedQuantity: "-1.25" },
+      { kind: "transfer_internal", meaning: "internal-transfer-flow-not-club-wide-loss", unit: "g", eventCount: 1, recordedQuantity: "1" },
+      { kind: "transfer", meaning: "internal-transfer-flow-not-club-wide-loss", unit: "g", eventCount: 1, recordedQuantity: "3" },
+      { kind: "waste", meaning: "positive-waste-quantity", unit: "g", eventCount: 1, recordedQuantity: "2.5" },
+    ],
+    invalidCount: 1,
+  });
+});
+
+test("report metrics and period fingerprints cover populations beyond ten thousand rows", { skip: !reportTestSchema }, async () => {
+  const amount = 9_007_199_254_740_993n;
+  await reportTestSchema!.db.$executeRawUnsafe(`
+    INSERT INTO "OperationMember" ("id", "name", "address", "preferences")
+    VALUES ('member-a', 'Fixture', '{}'::jsonb, '{}'::jsonb), ('member-b', 'Fixture', '{}'::jsonb, '{}'::jsonb)
+  `);
+  await reportTestSchema!.db.$executeRawUnsafe(`
+    INSERT INTO "OperationMember" ("id", "name", "address", "preferences")
+    SELECT 'segment-no-history-' || lpad(n::text, 5, '0'), 'Fixture', '{}'::jsonb, '{}'::jsonb
+    FROM generate_series(1, 10000) AS n
+  `);
+  await reportTestSchema!.db.$executeRawUnsafe(`
+    INSERT INTO "OperationOrder" ("id", "memberId", "channel", "currency", "commercialState", "quote", "subtotalMinor", "totalMinor", "fulfillmentState", "address", "createdBy", "confirmedAt")
+    SELECT 'metric-order-' || lpad(n::text, 5, '0'), 'member-a', 'local', 'ARS', 'confirmed', '{}'::jsonb, ${amount.toString()}::bigint, ${amount.toString()}::bigint, 'delivered', '{}'::jsonb, 'test-actor', '2026-09-15 12:00:00'::timestamp
+    FROM generate_series(1, 10001) AS n
+  `);
+  await reportTestSchema!.db.$executeRawUnsafe(`
+    INSERT INTO "OperationOrderLine" ("id", "orderId", "skuId", "unit", "requested", "delivered", "unitPrice", "referenceMinor", "revenueMinor")
+    SELECT 'metric-line-' || lpad(n::text, 5, '0'), 'metric-order-' || lpad(n::text, 5, '0'), 'sku-a', 'g', 1, 1, 1, ${amount.toString()}::bigint, ${amount.toString()}::bigint
+    FROM generate_series(1, 10001) AS n
+  `);
+  await reportTestSchema!.db.$executeRawUnsafe(`
+    INSERT INTO "OperationOrder" ("id", "memberId", "channel", "currency", "commercialState", "quote", "subtotalMinor", "totalMinor", "fulfillmentState", "address", "createdBy", "confirmedAt")
+    VALUES
+      ('metric-order-other-member', 'member-b', 'local', 'USD', 'confirmed', '{}'::jsonb, 17, 17, 'delivered', '{}'::jsonb, 'test-actor', '2026-09-15 12:00:00'::timestamp),
+      ('metric-order-cancelled', 'member-a', 'local', 'ARS', 'confirmed', '{}'::jsonb, 19, 19, 'cancelled', '{}'::jsonb, 'test-actor', '2026-09-15 12:00:00'::timestamp),
+      ('metric-order-outside-period', 'member-a', 'local', 'ARS', 'confirmed', '{}'::jsonb, 23, 23, 'delivered', '{}'::jsonb, 'test-actor', '2026-08-15 12:00:00'::timestamp)
+  `);
+  await reportTestSchema!.db.$executeRawUnsafe(`
+    INSERT INTO "OperationOrderLine" ("id", "orderId", "skuId", "unit", "requested", "delivered", "unitPrice", "referenceMinor", "revenueMinor")
+    VALUES ('metric-line-other-member', 'metric-order-other-member', 'sku-a', 'g', 1, 1, 1, 17, 17)
+  `);
+
+  const report = await reportTestSchema!.queries.queryOperationsReport(
+    "sales-revenue",
+    { from: "2026-09-01", to: "2026-09-30" },
+    { memberIds: ["member-a"] },
+  );
+  const total = (amount * 10001n).toString();
+  assert.equal(report.metrics.operational.confirmedOrderCount, 10001);
+  assert.deepEqual(report.metrics.operational.netProductRevenueByCurrency, [{ currency: "ARS", minor: total }]);
+  assert.deepEqual(report.metrics.operational.orderTotalByCurrency, [{ currency: "ARS", minor: total }]);
+  assert.equal(report.metrics.operationalChannels[0]?.orderCount, 10001);
+  assert.equal(report.coverage.find(row => row.source === "operation-orders")?.queryComplete, true);
+
+  await reportTestSchema!.db.$executeRawUnsafe(`
+    INSERT INTO "PreparationAllocation" ("id", "orderId", "lineId", "lotId", "balanceId", "requestedQuantity", "actualQuantity", "deliveredQuantity", "returnedQuantity", "returnedDeliveredQuantity", "costMinor", "state")
+    VALUES ('metric-return-1', 'metric-order-00001', 'metric-line-00001', 'test-lot', 'test-balance', 1, 1, 1, 0.5, 0.5, 0, 'delivered')
+  `);
+  const segmentation = await reportTestSchema!.queries.queryOperationsReport(
+    "customer-segmentation",
+    { to: "2026-09-30" },
+  );
+  assert.equal(segmentation.metrics.includedMemberCount, 10002);
+  assert.equal(segmentation.metrics.visibleMemberRows, 10000);
+  assert.equal(segmentation.metrics.memberRowsComplete, false);
+  // Segmentation uses all retained history through `to`; the August fixture remains in scope.
+  assert.equal(segmentation.metrics.currentOperationOrderCount, 10003);
+  assert.equal(segmentation.metrics.visibleOperationOrderRows, 10000);
+  assert.equal(segmentation.metrics.operationOrderRowsComplete, false);
+  assert.equal(segmentation.metrics.sourceRowsComplete, true);
+  assert.equal(segmentation.metrics.segmentationSummaryComplete, true);
+  assert.deepEqual(segmentation.metrics.segmentCounts, [
+    { segment: "high-spend", memberCount: null, suppressed: true },
+    { segment: "insufficient-data", memberCount: null, suppressed: true },
+    { segment: "no-purchase-history", memberCount: 10000, suppressed: false },
+  ]);
+  assert.equal(segmentation.coverage.find(row => row.source === "operation-members")?.queryComplete, false);
+  assert.equal(segmentation.coverage.find(row => row.source === "confirmed-orders-for-segmentation")?.queryComplete, false);
+  assert.deepEqual(
+    [segmentation.coverage.find(row => row.source === "customer-segmentation-full-population")?.knownCount, segmentation.coverage.find(row => row.source === "customer-segmentation-full-population")?.expectedCount, segmentation.coverage.find(row => row.source === "customer-segmentation-full-population")?.queryComplete],
+    [10002, 10002, true],
+  );
+  assert.equal(segmentation.coverage.find(row => row.source === "customer-return-allocations")?.expectedCount, 1);
+  assert.equal(segmentation.coverage.find(row => row.source === "customer-return-allocations")?.queryComplete, true);
+
+  const { getManagementPeriodCoverageSnapshot } = await import("../server/operations/period-coverage.js");
+  const snapshot = await reportTestSchema!.db.$transaction(
+    tx => getManagementPeriodCoverageSnapshot(tx, "2026-09"),
+    { isolationLevel: "RepeatableRead", timeout: 30000 },
+  );
+  const orderPopulation = snapshot.populations.find(row => row.name === "confirmed-orders-with-delivered-lines");
+  const linePopulation = snapshot.populations.find(row => row.name === "delivered-order-lines");
+  assert.deepEqual([orderPopulation?.recordCount, orderPopulation?.observedCount, orderPopulation?.complete], [10002, 10002, true]);
+  assert.deepEqual([linePopulation?.recordCount, linePopulation?.observedCount, linePopulation?.complete], [10002, 10002, true]);
+  assert.equal(snapshot.queryComplete, true);
+});
+
+test("cash, expenses, purchases, delivery and scoped stock aggregate complete populations beyond the visible-row limit", { skip: !reportTestSchema }, async () => {
+  const db = reportTestSchema!.db;
+  await db.$executeRawUnsafe(`
+    INSERT INTO "OperationAccount" ("id", "name", "currency", "kind", "holder", "purpose", "verified", "active", "openingMinor", "openingApprovedBy")
+    VALUES ('volume-cash-account', 'Volume test', 'ARS', 'club', 'Fixture', 'Report contract', TRUE, TRUE, 0, 'reviewer')
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "OperationAccount" ("id", "name", "currency", "kind", "holder", "purpose", "verified", "active", "openingMinor", "openingApprovedBy")
+    SELECT 'volume-cash-account-' || lpad(n::text, 5, '0'), 'Volume test', 'ARS', 'club', 'Fixture', 'Report contract', TRUE, TRUE, 0, 'reviewer'
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "LedgerEvent" ("id", "requestId", "kind", "occurredAt", "actorId", "sourceObjectId", "description", "metadata")
+    SELECT 'volume-ledger-event-' || lpad(n::text, 5, '0'), gen_random_uuid(), 'cash_receipt', '2026-09-15 12:00:00'::timestamp,
+      'fixture', 'volume', 'volume report fixture', '{}'::jsonb
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "LedgerLeg" ("id", "eventId", "accountId", "currency", "amountMinor")
+    SELECT 'volume-ledger-leg-' || lpad(n::text, 5, '0'), 'volume-ledger-event-' || lpad(n::text, 5, '0'), 'volume-cash-account', 'ARS', 2
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "LedgerLeg" ("id", "eventId", "accountId", "currency", "amountMinor")
+    SELECT 'volume-ledger-account-leg-' || lpad(n::text, 5, '0'), 'volume-ledger-event-' || lpad(n::text, 5, '0'), 'volume-cash-account-' || lpad(n::text, 5, '0'), 'ARS', 3
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "OperationAccount" ("id", "name", "currency", "kind", "holder", "purpose", "verified", "active", "openingMinor")
+    VALUES
+      ('volume-fx-account-ars', 'FX fixture ARS', 'ARS', 'club', 'Fixture', 'Report contract', TRUE, FALSE, 0),
+      ('volume-fx-account-usd', 'FX fixture USD', 'USD', 'club', 'Fixture', 'Report contract', TRUE, FALSE, 0)
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "LedgerEvent" ("id", "requestId", "kind", "occurredAt", "actorId", "sourceObjectId", "description", "metadata")
+    SELECT 'volume-fx-event-' || lpad(n::text, 5, '0'), gen_random_uuid(), 'fx', '2026-09-15 12:00:00'::timestamp,
+      'fixture', 'volume-fx', 'volume report FX fixture',
+      CASE WHEN n = 10001 THEN '{"rate":"1.5","differenceMinor":"0","commissionMinor":"invalid","evidence":{}}'::jsonb
+        ELSE '{"rate":"1.5","differenceMinor":"0","commissionMinor":"0","evidence":{}}'::jsonb END
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "LedgerLeg" ("id", "eventId", "accountId", "currency", "amountMinor")
+    SELECT 'volume-fx-leg-ars-' || lpad(n::text, 5, '0'), 'volume-fx-event-' || lpad(n::text, 5, '0'), 'volume-fx-account-ars', 'ARS', 1
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "LedgerLeg" ("id", "eventId", "accountId", "currency", "amountMinor")
+    SELECT 'volume-fx-leg-usd-' || lpad(n::text, 5, '0'), 'volume-fx-event-' || lpad(n::text, 5, '0'), 'volume-fx-account-usd', 'USD', -1
+    FROM generate_series(1, 10001) AS n
+  `);
+
+  await db.$executeRawUnsafe(`
+    INSERT INTO "HistoricalExpense" ("id", "sourceSystem", "sourceId", "factHash", "expenseDate", "category", "amountCents")
+    SELECT 'volume-historical-expense-' || lpad(n::text, 5, '0'), 'report-volume', 'expense-' || n, 'hash-' || n, '2026-09-15'::date, 'fixture', 3
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "Expense" ("id", "name", "amount", "category", "kind", "date")
+    SELECT 'volume-compat-expense-' || lpad(n::text, 5, '0'), 'Fixture', 4, 'fixture', 'operating', '2026-09-15'
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "OperationPayable" ("id", "beneficiaryId", "kind", "currency", "amountMinor", "paidMinor", "dueDate", "accrualPeriod", "evidence", "verified")
+    SELECT 'volume-expense-payable-' || lpad(n::text, 5, '0'), 'fixture', 'operating_expense', 'ARS', 11, 4, '2026-09-20', '2026-09', '{"costTreatment":"variable"}'::jsonb, TRUE
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "PayablePayment" ("id", "payableId", "accountId", "currency", "amountMinor", "appliedMinor", "date", "eventId")
+    SELECT 'volume-expense-payment-' || lpad(n::text, 5, '0'), 'volume-expense-payable-' || lpad(n::text, 5, '0'), 'fixture', 'ARS', 5, 5, '2026-09-21', 'fixture-event'
+    FROM generate_series(1, 10001) AS n
+  `);
+
+  await db.$executeRawUnsafe(`
+    INSERT INTO "PurchaseOrder" ("id", "supplierId", "agreementDate", "currency", "totalMinor", "status", "items")
+    SELECT 'volume-purchase-' || lpad(n::text, 5, '0'), 'fixture', '2026-09-15', 'USD', 13, 'received', '[]'::jsonb
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "GoodsReceipt" ("id", "purchaseId", "receivedDate", "receivedBy", "items", "evidence")
+    SELECT 'volume-receipt-' || lpad(n::text, 5, '0'), 'volume-purchase-' || lpad(n::text, 5, '0'), '2026-09-16', 'fixture', '[]'::jsonb, '{}'::jsonb
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "HistoricalPurchaseReceipt" ("id", "sourceSystem", "sourceId", "factHash", "receivedDate", "totalCents")
+    SELECT 'volume-historical-purchase-' || lpad(n::text, 5, '0'), 'report-volume', 'purchase-' || n, 'hash-' || n, '2026-09-16'::date, 7
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "OperationPayable" ("id", "purchaseId", "beneficiaryId", "kind", "currency", "amountMinor", "paidMinor", "dueDate", "evidence", "verified")
+    SELECT 'volume-purchase-payable-' || lpad(n::text, 5, '0'), 'volume-purchase-' || lpad(n::text, 5, '0'), 'fixture', 'purchase', 'USD', 19, 4, '2026-09-20', '{}'::jsonb, TRUE
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "OperationPayable" ("id", "beneficiaryId", "kind", "currency", "amountMinor", "paidMinor", "dueDate", "evidence", "verified")
+    SELECT 'volume-obligation-' || lpad(n::text, 5, '0'), 'fixture', 'operating_expense', 'ARS', 100, 0, '2026-10-01', '{}'::jsonb, TRUE
+    FROM generate_series(1, 10001) AS n
+  `);
+
+  await db.$executeRawUnsafe(`
+    INSERT INTO "DeliveryAssignment" ("id", "orderId", "status", "address", "incidents")
+    SELECT 'volume-delivery-' || lpad(n::text, 5, '0'), 'volume-order-' || n, 'delivered', '{}'::jsonb, '[]'::jsonb
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "CollectionReport" ("id", "orderId", "reporterId", "method", "currency", "amountMinor", "custodianId", "evidence", "status", "verifiedBy", "verifiedAt", "appliedMinor", "excessMinor")
+    SELECT 'volume-collection-' || lpad(n::text, 5, '0'), 'volume-order-' || n, 'fixture', 'cash', 'ARS', 23, 'custodian', '{}'::jsonb, 'verified', 'reviewer', '2026-09-17 12:00:00'::timestamp, 20, 3
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "Rendition" ("id", "driverId", "fromAccountId", "toAccountId", "currency", "grossMinor", "deliveredMinor", "feeMinor", "acceptedBy", "acceptedAt")
+    SELECT 'volume-rendition-' || lpad(n::text, 5, '0'), 'driver', 'custody', 'club', 'ARS', 31, 29, 2, 'reviewer', '2026-09-17 12:00:00'::timestamp
+    FROM generate_series(1, 10001) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "MemberCredit" ("id", "memberId", "collectionId", "currency", "amountMinor", "resolvedMinor", "treatment")
+    SELECT 'volume-credit-' || lpad(n::text, 5, '0'), 'member', 'volume-collection-' || lpad(n::text, 5, '0'), 'ARS', 100, 25, 'member_credit'
+    FROM generate_series(1, 10001) AS n
+  `);
+
+  await db.$executeRawUnsafe(`
+    INSERT INTO "CatalogSku" ("id", "code", "name", "variety", "category", "unit")
+    VALUES ('volume-sku', 'VOLUME', 'Volume fixture', 'test', 'test', 'g')
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "InventoryLot" ("id", "skuId", "receiptId", "label", "unit", "unitCost", "costCurrency", "receivedAt")
+    SELECT 'volume-lot-' || lpad(n::text, 5, '0'), 'volume-sku', 'volume-receipt-' || lpad(n::text, 5, '0'), 'Volume lot', 'g', 2.5, 'ARS', '2026-09-16 12:00:00'::timestamp
+    FROM generate_series(1, 10002) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "StockBalance" ("id", "lotId", "locationId", "custodianId", "unit", "quantity", "reserved")
+    SELECT 'volume-balance-' || lpad(n::text, 5, '0'), 'volume-lot-' || lpad(n::text, 5, '0'), CASE WHEN n = 10002 THEN 'warehouse-b' ELSE 'warehouse-a' END, 'custodian', 'g', 2, 0.5
+    FROM generate_series(1, 10002) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "StockFact" ("id", "requestId", "lotId", "kind", "quantity", "unit", "fromLocationId", "reason", "actorId", "occurredAt")
+    SELECT gen_random_uuid(), gen_random_uuid(), 'volume-lot-' || lpad(n::text, 5, '0'), 'waste', 1, 'g',
+      CASE WHEN n = 10002 THEN 'warehouse-b' ELSE 'warehouse-a' END, 'volume fixture', 'fixture', '2026-09-18 12:00:00'::timestamp
+    FROM generate_series(1, 10002) AS n
+  `);
+  await db.$executeRawUnsafe(`
+    INSERT INTO "PreparationAllocation" ("id", "orderId", "lineId", "lotId", "balanceId", "requestedQuantity", "actualQuantity", "deliveredQuantity", "returnedQuantity", "returnedDeliveredQuantity", "costMinor", "state")
+    SELECT 'volume-allocation-' || lpad(n::text, 5, '0'), 'volume-custody-order', 'volume-custody-line', 'volume-lot-00001', 'volume-balance-00001', 1, 1, 0, 0, 0, 10, 'prepared'
+    FROM generate_series(1, 10001) AS n
+  `);
+
+  const range = { from: "2026-09-01", to: "2026-09-30" };
+  const cash = await reportTestSchema!.queries.queryOperationsReport("cash-ledger", range);
+  assert.equal(cash.metrics.ledgerLegRows, 40004);
+  assert.equal(cash.metrics.accounts.length, 10000);
+  assert.deepEqual(cash.metrics.clubAccountPeriodNetMovementByCurrency, [{ currency: "ARS", minor: "50005" }]);
+  assert.equal(cash.coverage.find(row => row.source === "dated-ledger-legs")?.queryComplete, true);
+  assert.deepEqual(
+    [cash.coverage.find(row => row.source === "active-accounts")?.knownCount, cash.coverage.find(row => row.source === "active-accounts")?.expectedCount, cash.coverage.find(row => row.source === "active-accounts")?.queryComplete],
+    [10000, 10002, false],
+  );
+
+  const obligations = await reportTestSchema!.queries.queryOperationsReport("obligations-13-weeks", range);
+  assert.equal(obligations.metrics.payableSummaryComplete, true);
+  assert.equal(obligations.metrics.invalidPayableDateCount, 0);
+  assert.equal(obligations.metrics.invalidPayableCurrencyCount, 0);
+  assert.equal(obligations.metrics.invalidPayableAmountCount, 0);
+  assert.equal(obligations.metrics.payableRowsComplete, false);
+  assert.equal(obligations.metrics.visiblePayableRows, 500);
+  assert.equal(obligations.metrics.payableDetailLimit, 500);
+  const weekly = obligations.metrics.weekly as Array<{
+    weekStart: string;
+    obligationCount: number;
+    verifiedCount: number;
+    unverifiedCount: number;
+    outstandingByCurrency: Array<{ currency: string; minor: string }>;
+    verifiedOutstandingByCurrency: Array<{ currency: string; minor: string }>;
+  }>;
+  assert.equal(weekly.length, 13);
+  const firstObligationWeek = weekly.find(row => row.weekStart === "2026-09-28");
+  assert.deepEqual(firstObligationWeek && {
+    obligationCount: firstObligationWeek.obligationCount,
+    verifiedCount: firstObligationWeek.verifiedCount,
+    unverifiedCount: firstObligationWeek.unverifiedCount,
+    outstandingByCurrency: firstObligationWeek.outstandingByCurrency,
+    verifiedOutstandingByCurrency: firstObligationWeek.verifiedOutstandingByCurrency,
+  }, {
+    obligationCount: 10001,
+    verifiedCount: 10001,
+    unverifiedCount: 0,
+    outstandingByCurrency: [{ currency: "ARS", minor: "1000100" }],
+    verifiedOutstandingByCurrency: [{ currency: "ARS", minor: "1000100" }],
+  });
+  assert.equal(obligations.coverage.find(row => row.source === "13-week-payables")?.queryComplete, true);
+  assert.equal(obligations.coverage.find(row => row.source === "visible-13-week-payable-details")?.queryComplete, false);
+  assert.equal(obligations.metrics.activeAccountRowsComplete, false);
+  assert.equal(obligations.metrics.visibleActiveAccountRows, 10000);
+  assert.equal(obligations.coverage.find(row => row.source === "club-and-custody-accounts")?.queryComplete, false);
+
+  const fx = await reportTestSchema!.queries.queryOperationsReport("fx-reconciliation", range);
+  const fxBytes = Buffer.byteLength(JSON.stringify(fx), "utf8");
+  assert.ok(fxBytes <= 4_000_000, `the FX report must leave room below the Function response limit; observed ${fxBytes} bytes`);
+  assert.equal(fx.metrics.conversionEventCount, 10001);
+  assert.equal(fx.metrics.visibleConversionEventRows, 500);
+  assert.equal(fx.metrics.fxEvents.length, 500);
+  assert.equal(fx.metrics.conversionEventDetailLimit, 500);
+  assert.equal(fx.metrics.conversionEventRowsComplete, false);
+  assert.equal(fx.metrics.conversionEventSummaryComplete, true);
+  assert.equal(fx.metrics.validatedPairedConversionCount, 10000);
+  assert.equal(fx.metrics.invalidOrIncompleteFxEventCount, 1);
+  assert.equal(fx.coverage.find(row => row.source === "fx-ledger-events")?.queryComplete, false);
+  assert.deepEqual(
+    [fx.coverage.find(row => row.source === "fx-events-with-complete-recorded-legs-and-metadata")?.knownCount, fx.coverage.find(row => row.source === "fx-events-with-complete-recorded-legs-and-metadata")?.expectedCount, fx.coverage.find(row => row.source === "fx-events-with-complete-recorded-legs-and-metadata")?.queryComplete, fx.coverage.find(row => row.source === "fx-events-with-complete-recorded-legs-and-metadata")?.state],
+    [10000, 10001, true, "partial"],
+  );
+
+  const expenses = await reportTestSchema!.queries.queryOperationsReport("operating-expenses", range);
+  assert.deepEqual(expenses.metrics.historicalExpenseByCurrency, [{ currency: null, minor: "30003" }]);
+  assert.deepEqual(expenses.metrics.compatibilityExpenseByCurrency, [{ currency: null, minor: "40004" }]);
+  assert.deepEqual(expenses.metrics.verifiedPayableAccrualByCurrency, [{ currency: "ARS", minor: "1110111" }]);
+  assert.deepEqual(expenses.metrics.openVerifiedOperatingPayablesByCurrency, [{ currency: "ARS", minor: "1070107" }]);
+  assert.deepEqual(expenses.metrics.paidPayableByObligationCurrency, [{ currency: "ARS", minor: "50005" }]);
+  assert.equal(expenses.coverage.find(row => row.source === "payable-payments")?.queryComplete, true);
+
+  const purchases = await reportTestSchema!.queries.queryOperationsReport("purchases", range);
+  assert.equal(purchases.metrics.purchaseOrders.count, 10001);
+  assert.deepEqual(purchases.metrics.purchaseOrders.totalsByCurrency, [{ currency: "USD", minor: "130013" }]);
+  assert.equal(purchases.metrics.receipts.count, 10001);
+  assert.equal(purchases.metrics.historicalPurchaseReceiptCount, 10001);
+  assert.deepEqual(purchases.metrics.historicalPurchaseTotalByCurrency, [{ currency: null, minor: "70007" }]);
+  assert.deepEqual(purchases.metrics.verifiedOpenPurchasePayablesByCurrency, [{ currency: "USD", minor: "150015" }]);
+
+  const delivery = await reportTestSchema!.queries.queryOperationsReport("delivery-collections", range);
+  assert.equal(delivery.metrics.deliveryCount, 10001);
+  assert.equal(delivery.metrics.collectionReportCount, 10001);
+  assert.deepEqual(delivery.metrics.reportedCollectionByCurrency, [{ currency: "ARS", minor: "230023" }]);
+  assert.deepEqual(delivery.metrics.verifiedAppliedCollectionByCurrency, [{ currency: "ARS", minor: "200020" }]);
+  assert.deepEqual(delivery.metrics.renditionGrossByCurrency, [{ currency: "ARS", minor: "310031" }]);
+  assert.deepEqual(delivery.metrics.spendableMemberCreditOpenByCurrency, [{ currency: "ARS", minor: "750075" }]);
+
+  const inventory = await reportTestSchema!.queries.queryOperationsReport("inventory", range, { locationIds: ["warehouse-a"] });
+  assert.equal(inventory.metrics.current.balanceRows, 10001);
+  assert.equal(inventory.metrics.current.visibleBalanceRows, 500);
+  assert.equal(inventory.metrics.current.balanceRowsState, "partial-visible-row-limit");
+  assert.deepEqual(inventory.metrics.current.balanceOnHandByUnit, [{ unit: "g", quantity: "20002" }]);
+  assert.deepEqual(inventory.metrics.current.availableByUnit, [{ unit: "g", quantity: "15001.5" }]);
+  assert.deepEqual(inventory.metrics.current.stockValuationByCostCurrencyMinor, [{ currency: "ARS", minor: "5000500" }]);
+  assert.equal(inventory.metrics.current.stockMovementEventCount, 10001);
+  assert.deepEqual(inventory.metrics.current.stockMovementEventsByKindAndUnit, [{
+    kind: "waste", meaning: "positive-waste-quantity", unit: "g", eventCount: 10001, recordedQuantity: "10001",
+  }]);
+  assert.equal(inventory.metrics.current.custodyAllocationCount, 10001);
+  assert.equal(inventory.metrics.current.visibleCustodyRows, 1);
+  assert.equal(inventory.metrics.current.custodyRowsState, "partial-visible-row-limit");
+  assert.equal(inventory.metrics.current.custodySummaryState, "not-calculated-source-incomplete-or-invalid");
+  assert.equal(inventory.metrics.current.preparationCustodyByUnit, null);
+  assert.equal(inventory.metrics.current.physicalClubStockByUnit, null);
+  assert.equal(inventory.coverage.find(row => row.source === "preparation-delivery-custody")?.queryComplete, false);
+  assert.equal(inventory.coverage.find(row => row.source === "current-stock-balance-aggregates")?.queryComplete, true);
+  assert.equal(inventory.coverage.find(row => row.source === "visible-current-stock-balance-rows")?.queryComplete, false);
+
+  const reportBytes = Object.entries({ cash, obligations, fx, expenses, purchases, delivery, inventory })
+    .map(([name, report]) => ({ name, bytes: Buffer.byteLength(JSON.stringify(report), "utf8") }));
+  assert.ok(reportBytes.every(row => row.bytes <= 4_000_000),
+    `reports must leave room below the Function response limit; observed ${JSON.stringify(reportBytes)}`);
+
+  await db.$executeRawUnsafe(`
+    INSERT INTO "StockFact" ("id", "requestId", "lotId", "kind", "quantity", "unit", "fromLocationId", "toLocationId", "fromCustodianId", "toCustodianId", "reason", "actorId", "occurredAt")
+    SELECT gen_random_uuid(), gen_random_uuid(), 'volume-lot-00001', 'waste', 1, 'g', sample."fromLocationId", sample."toLocationId", sample."fromCustodianId", sample."toCustodianId", sample."reason", 'fixture', '2026-09-18 12:00:00'::timestamp
+    FROM (VALUES
+      ('warehouse-a', 'warehouse-a', 'custodian', 'custodian', 'scope-in-both'),
+      ('warehouse-a', NULL, 'custodian', NULL, 'scope-in-null'),
+      ('warehouse-b', 'warehouse-a', 'custodian', 'custodian', 'leak-location-from'),
+      ('warehouse-a', 'warehouse-b', 'custodian', 'custodian', 'leak-location-to'),
+      ('warehouse-a', NULL, 'private-custodian', 'custodian', 'leak-custodian-from'),
+      ('warehouse-a', NULL, 'custodian', 'private-custodian', 'leak-custodian-to'),
+      ('warehouse-b', NULL, 'custodian', NULL, 'leak-no-known-location')
+    ) AS sample("fromLocationId", "toLocationId", "fromCustodianId", "toCustodianId", "reason")
+  `);
+  const scopedInventory = await reportTestSchema!.queries.queryOperationsReport("inventory", range, {
+    locationIds: ["warehouse-a"],
+    custodianIds: ["custodian"],
+  });
+  assert.equal(scopedInventory.metrics.current.stockMovementEventCount, 2);
+  assert.equal(scopedInventory.metrics.current.stockMovementEventRowsVisible, 2);
+  assert.deepEqual(scopedInventory.metrics.current.stockMovementEventsByKindAndUnit, [{
+    kind: "waste", meaning: "positive-waste-quantity", unit: "g", eventCount: 2, recordedQuantity: "2",
+  }]);
+  assert.equal(scopedInventory.coverage.find(row => row.source === "dated-stock-fact-aggregates")?.queryComplete, true);
+  assert.equal(scopedInventory.coverage.find(row => row.source === "visible-dated-stock-fact-rows")?.expectedCount, 2);
+  for (const event of scopedInventory.metrics.current.stockMovementEvents) {
+    assert.ok(event.fromLocationId === null || event.fromLocationId === "warehouse-a");
+    assert.ok(event.toLocationId === null || event.toLocationId === "warehouse-a");
+    assert.ok(event.fromCustodianId === null || event.fromCustodianId === "custodian");
+    assert.ok(event.toCustodianId === null || event.toCustodianId === "custodian");
+    assert.equal(event.outsideScopeEndpoint, false);
+  }
+  const emptyLocationInventory = await reportTestSchema!.queries.queryOperationsReport("inventory", range, {
+    locationIds: [],
+    custodianIds: ["custodian"],
+  });
+  assert.equal(emptyLocationInventory.metrics.current.stockMovementEventCount, 0);
+  assert.deepEqual(emptyLocationInventory.metrics.current.stockMovementEventsByKindAndUnit, []);
+  assert.equal(emptyLocationInventory.coverage.find(row => row.source === "visible-dated-stock-fact-rows")?.expectedCount, 0);
+});

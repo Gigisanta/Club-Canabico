@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.12.0"
+    "node": "24.x"
   },
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "tsc -p tsconfig.server.json && tsc -b && NODE_ENV=production vite build",
+    "build": "tsc -p tsconfig.server.json && tsc -b && NODE_ENV=production vite build && node scripts/pwa-shell.mjs && node scripts/release-fingerprint.mjs",
     "start": "node dist-server/server/index.js",
     "db:migrate": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
@@ -22,12 +22,21 @@
     "test": "tsx --test tests/*.test.ts",
     "test:e2e": "node scripts/e2e-isolated.mjs",
     "typecheck": "tsc -b && tsc -p tsconfig.server.json --noEmit",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm test && npm run build",
+    "ops:backup": "node scripts/operations-backup.mjs backup",
+    "ops:restore": "node scripts/operations-backup.mjs restore",
+    "ops:verify-backup": "node scripts/operations-backup.mjs verify",
+    "build:landing": "node scripts/build-landing.mjs",
+    "ops:import": "tsx scripts/legacy-import.ts",
+    "ops:benchmark": "tsx scripts/operations-benchmark.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1144.0",
     "@phosphor-icons/react": "2.1.10",
     "@prisma/client": "6.19.0",
     "@radix-ui/react-dialog": "1.1.15",
+    "@vercel/blob": "2.8.0",
+    "@vercel/functions": "3.9.9",
     "bcryptjs": "3.0.2",
     "cookie-parser": "1.4.7",
     "cors": "2.8.5",
@@ -35,20 +44,20 @@
     "dotenv": "17.2.2",
     "exceljs": "4.4.0",
     "express": "5.1.0",
-    "express-rate-limit": "8.1.0",
+    "express-rate-limit": "8.7.0",
     "helmet": "8.1.0",
     "jsonwebtoken": "9.0.2",
     "pdfkit": "0.17.2",
     "react": "19.1.1",
     "react-dom": "19.1.1",
-    "react-router-dom": "7.8.2",
+    "react-router-dom": "7.18.4",
     "recharts": "3.1.2",
-    "sharp": "^0.34.5",
+    "sharp": "0.35.5",
     "sonner": "2.0.7",
     "zod": "4.1.5"
   },
   "devDependencies": {
-    "@playwright/test": "1.55.0",
+    "@playwright/test": "1.63.0",
     "@types/cookie-parser": "1.4.9",
     "@types/cors": "2.8.19",
     "@types/express": "5.0.3",
@@ -61,9 +70,18 @@
     "prisma": "6.19.0",
     "tsx": "4.20.5",
     "typescript": "5.9.2",
-    "vite": "7.1.4"
+    "vite": "7.3.6"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
+  },
+  "overrides": {
+    "@prisma/config": {
+      "deepmerge-ts": "8.0.2",
+      "effect": "3.20.0"
+    },
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
   }
 }

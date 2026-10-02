@@ -11,6 +11,7 @@ export const defaults: Settings = {
   goldDiscount: 5,
   inactiveDays: 60,
   budget: 800000000,
+  dailySalesGoal: 0,
 };
 export function businessDate(settings: Settings, now = new Date()) {
   return new Intl.DateTimeFormat("en-CA", {

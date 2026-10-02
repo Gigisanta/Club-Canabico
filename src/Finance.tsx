@@ -1,31 +1,25 @@
-import { useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { ArrowRight, CheckCircle, ChartBar, Clock, Info, Wallet, WarningCircle } from "@phosphor-icons/react";
 import { useClub, send, offsetDate, shortDate, number, useResource } from "./lib";
-import type { CashEntry, Page } from "../shared/types";
-import { PageHeader, Panel, Modal, Form, Field, Empty } from "./ui";
+import type { CashEntry, CashLedgerSummary, Page } from "../shared/types";
+import { PageHeader, Panel, Modal, Form, Field, Empty, Search } from "./ui";
+import { BreakEvenSection } from "./BreakEven";
+import { UpcomingPaymentsSection } from "./UpcomingPayments";
+import { cashCategories as categories } from "./cash-categories";
+import type { BreakEvenResult } from "../shared/break-even";
+import type { UpcomingPaymentsReport } from "../shared/upcoming-payments";
 import "./panorama.css";
 import "./finance.css";
 
-const categories: Record<string, string> = {
-  opening_balance: "Saldo inicial",
-  sale: "Ingreso local",
-  operating_expense: "Gasto operativo",
-  stock_purchase: "Compra de stock",
-  local_investment: "Inversión en local",
-  capital_contribution: "Aporte de capital",
-  owner_draw: "Retiro personal",
-  delivery_receipt: "Cobro delivery (AppSheet)",
-  other_income: "Otro ingreso",
-  other_outflow: "Otro egreso",
-  adjustment: "Ajuste documentado",
-};
 const scenarios = ["base", "cautious", "growth"] as const;
 const scenarioNames = { base: "Base", cautious: "Prudente", growth: "Crecimiento" };
 const incomeCategories = ["opening_balance", "capital_contribution", "delivery_receipt", "other_income", "adjustment"];
 const outflowCategories = ["operating_expense", "stock_purchase", "local_investment", "owner_draw", "other_outflow", "adjustment"];
 type View = "overview" | "activity" | "forecast";
+type Account = "all" | "cash" | "bank";
+const accountNames: Record<Account, string> = { all: "Todas", cash: "Efectivo", bank: "Banco" };
 type CheckState = "recorded" | "review" | "pending" | "empty";
 const checkLabels: Record<CheckState, string> = { recorded: "Registrado", review: "A revisar", pending: "Sin conciliar", empty: "Sin registros" };
 const checkIcons = { recorded: CheckCircle, review: WarningCircle, pending: Clock, empty: Info };
@@ -42,12 +36,52 @@ export default function Finance() {
   const [category, setCategory] = useState("operating_expense");
   const [entryKey, setEntryKey] = useState(() => crypto.randomUUID());
   const [scenario, setScenario] = useState<(typeof scenarios)[number]>("base");
-  const [view, setView] = useState<View>("overview");
+  const [params, setParams] = useSearchParams();
+  const requestedView = params.get("view");
+  const view: View = requestedView === "activity" || requestedView === "forecast" ? requestedView : "overview";
+  const requestedAccount = params.get("account");
+  const account: Account = requestedAccount === "cash" || requestedAccount === "bank" ? requestedAccount : "all";
+  function setView(next: View, nextAccount: Account = "all") {
+    const query = new URLSearchParams(params);
+    if (next === "overview") query.delete("view");
+    else query.set("view", next);
+    if (next === "activity" && nextAccount !== "all") query.set("account", nextAccount);
+    else query.delete("account");
+    setParams(query, { replace: true });
+  }
   const stockDetail = useRef<HTMLDetailsElement>(null);
   const [cashCursor, setCashCursor] = useState<string | null>(null);
   const [cashPrevious, setCashPrevious] = useState<(string | null)[]>([]);
-  const cashPage = useResource<Page<CashEntry>>(view === "activity"
-    ? `/list/cash-entries${cashCursor ? `?cursor=${encodeURIComponent(cashCursor)}` : ""}` : null);
+  const [flow, setFlow] = useState<"all" | "in" | "out">("all");
+  const [ledgerCategory, setLedgerCategory] = useState("all");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [ledgerQuery, setLedgerQuery] = useState("");
+  const [debouncedLedgerQuery, setDebouncedLedgerQuery] = useState("");
+  useEffect(() => { const timer = window.setTimeout(() => setDebouncedLedgerQuery(ledgerQuery.trim()), 250); return () => clearTimeout(timer); }, [ledgerQuery]);
+  useEffect(() => { setCashCursor(null); setCashPrevious([]); }, [account, flow, ledgerCategory, fromDate, toDate, debouncedLedgerQuery]);
+  const ledgerFilters = new URLSearchParams({ account, direction: flow, category: ledgerCategory, q: debouncedLedgerQuery,
+    ...(fromDate ? { from: fromDate } : {}), ...(toDate ? { to: toDate } : {}), ...(cashCursor ? { cursor: cashCursor } : {}) });
+  const cashPage = useResource<Page<CashEntry, CashLedgerSummary>>(view === "activity" ? `/list/cash-entries?${ledgerFilters}` : null);
+  const breakEven = useResource<BreakEvenResult>(view === "overview" ? "/finance/break-even" : null);
+  const upcoming = useResource<UpcomingPaymentsReport>(view === "overview" ? "/finance/upcoming-payments" : null);
+  // Inicio links to #proximos-pagos: scroll there once the section has its content.
+  const location = useLocation();
+  const upcomingLoaded = Boolean(upcoming.data);
+  useEffect(() => {
+    if (upcomingLoaded && location.hash === "#proximos-pagos") document.getElementById("proximos-pagos")?.scrollIntoView({ block: "start" });
+  }, [upcomingLoaded, location.hash]);
+  // Account balances do not depend on the filters; keep the last ones while a new page loads.
+  const [ledgerSummary, setLedgerSummary] = useState<CashLedgerSummary | null>(null);
+  useEffect(() => { if (cashPage.data) setLedgerSummary(cashPage.data.summary); }, [cashPage.data]);
+  const filtered = flow !== "all" || ledgerCategory !== "all" || Boolean(fromDate || toDate || debouncedLedgerQuery);
+  function clearLedgerFilters() {
+    setFlow("all");
+    setLedgerCategory("all");
+    setFromDate("");
+    setToDate("");
+    setLedgerQuery("");
+  }
 
   const today = state.today;
   const month = new Date(`${today.slice(0, 7)}-01T12:00:00`).toLocaleDateString("es-AR", { month: "long", year: "numeric" });
@@ -112,6 +146,8 @@ export default function Finance() {
       setCashPrevious([]);
       if (view === "activity") await cashPage.reload();
       else setView("activity");
+    } else if (view === "overview") {
+      await upcoming.reload();
     } else {
       setView("forecast");
     }
@@ -128,6 +164,12 @@ export default function Finance() {
     setDirection("outflow");
     setCategory("operating_expense");
     setMode("plan");
+  }
+
+  // Próximos pagos lists the base scenario only.
+  function schedulePayment() {
+    setScenario("base");
+    openPlan();
   }
 
   function changeDirection(nextDirection: "income" | "outflow") {
@@ -185,6 +227,9 @@ export default function Finance() {
         </section>
       </div>
 
+      <BreakEvenSection data={breakEven.data} loading={breakEven.loading} error={breakEven.error} onRetry={() => void breakEven.reload()} money={money} demo={state.demo || Boolean(state.settings.sampleData)} />
+      <UpcomingPaymentsSection data={upcoming.data} loading={upcoming.loading} error={upcoming.error} onRetry={() => void upcoming.reload()} onSchedule={schedulePayment} money={money} demo={state.demo || Boolean(state.settings.sampleData)} />
+
         <section className="finance-sources" aria-labelledby="finance-sources-title">
           <h2 id="finance-sources-title">Estado de los datos</h2>
           <p className="finance-lead">Registro visible; cobertura pendiente de verificar.</p>
@@ -205,12 +250,49 @@ export default function Finance() {
 
     {view === "activity" && <div className="finance-section">
       <div className="finance-activity-lead"><div><span className="finance-status-label">Movimientos reales</span><h2>Un registro de entradas y salidas</h2><p>Las ventas locales entran automáticamente. Un gasto cargado en Gastos afecta la caja cuando registrás su pago acá.</p></div><button className="button primary" type="button" onClick={openEntry}>Nuevo movimiento</button></div>
-      <div className="finance-activity-total"><Wallet size={20} /><p><strong>{money(cashMovement)}</strong><span>movimiento neto acumulado · caja y banco · no es saldo disponible</span></p></div>
-      <Panel title="Historial de caja y banco" sub="Cada movimiento conserva fecha, cuenta, categoría y origen.">
+      <div className="cash-accounts" role="group" aria-label="Cuenta">
+        {(["all", "cash", "bank"] as const).map((key) => {
+          const balance = !ledgerSummary ? null : key === "cash" ? ledgerSummary.cashBalance : key === "bank" ? ledgerSummary.bankBalance : ledgerSummary.cashBalance + ledgerSummary.bankBalance;
+          const count = !ledgerSummary ? null : key === "cash" ? ledgerSummary.cashCount : key === "bank" ? ledgerSummary.bankCount : ledgerSummary.cashCount + ledgerSummary.bankCount;
+          // Without records the balance is unknown, not zero.
+          return <button key={key} type="button" className={account === key ? "active" : ""} aria-pressed={account === key} onClick={() => setView("activity", key)}>
+            <span>{accountNames[key]}</span>
+            <strong>{balance === null || !count ? "—" : money(balance)}</strong>
+            <small>{count === null ? "Cargando…" : !count ? "Sin movimientos registrados" : `${key === "all" ? "caja y banco" : "saldo según registros"} · ${count} ${count === 1 ? "movimiento" : "movimientos"}`}</small>
+          </button>;
+        })}
+      </div>
+      <p className="cash-accounts-note"><Clock size={15} weight="fill" aria-hidden="true" /> Sin conciliar. El saldo suma los movimientos registrados, incluido el saldo inicial si se cargó; no reemplaza el arqueo ni el extracto.</p>
+      <Panel title="Historial de caja y banco" sub="Cada movimiento conserva fecha, cuenta, categoría y origen. «Saldo de la cuenta» es el saldo de esa cuenta justo después del movimiento.">
+        <div className="table-toolbar cash-ledger-toolbar">
+          <Search value={ledgerQuery} onChange={setLedgerQuery} placeholder="Buscar en el detalle…" />
+          <div className="filter-group">
+            <select aria-label="Tipo de movimiento" value={flow} onChange={(event) => setFlow(event.target.value as typeof flow)}>
+              <option value="all">Entradas y salidas</option>
+              <option value="in">Solo entradas</option>
+              <option value="out">Solo salidas</option>
+            </select>
+            <select aria-label="Categoría de caja" value={ledgerCategory} onChange={(event) => setLedgerCategory(event.target.value)}>
+              <option value="all">Todas las categorías</option>
+              {Object.entries(categories).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+            </select>
+            <label className="cash-ledger-date"><span>Desde</span><input type="date" value={fromDate} max={toDate || undefined} onChange={(event) => setFromDate(event.target.value)} /></label>
+            <label className="cash-ledger-date"><span>Hasta</span><input type="date" value={toDate} min={fromDate || undefined} onChange={(event) => setToDate(event.target.value)} /></label>
+            {filtered && <button className="button" type="button" onClick={clearLedgerFilters}>Quitar filtros</button>}
+          </div>
+        </div>
+        {cashPage.data && cashPage.data.total > 0 && <p className="cash-ledger-totals" aria-live="polite">
+          <span>Entradas <strong>{money(cashPage.data.summary.inflow)}</strong></span>
+          <span>Salidas <strong>{money(cashPage.data.summary.outflow)}</strong></span>
+          <span>Neto <strong>{money(cashPage.data.summary.net)}</strong></span>
+          <span>{cashPage.data.total} {cashPage.data.total === 1 ? "movimiento" : "movimientos"}{account !== "all" ? ` de ${accountNames[account].toLowerCase()}` : ""}{filtered ? " con estos filtros" : ""}</span>
+        </p>}
         {cashPage.loading && <p role="status" className="muted finance-load">Cargando movimientos…</p>}
         {cashPage.error && <div className="panorama-inline-error" role="alert"><p>{cashPage.error}</p><button className="button" onClick={() => void cashPage.reload()}>Reintentar carga</button></div>}
-        <div className="table-scroll"><table><thead><tr><th scope="col">Fecha</th><th scope="col">Cuenta</th><th scope="col">Categoría</th><th scope="col">Detalle</th><th scope="col">Origen</th><th scope="col" className="numeric">Importe</th></tr></thead><tbody>{cashPage.data?.items.map((entry) => <tr key={entry.id}><td>{shortDate(entry.date)}</td><td>{entry.account === "cash" ? "Efectivo" : "Banco"}</td><td>{categories[entry.category] || entry.category}</td><td className="table-name">{entry.description}</td><td><span className="source-id" title={entry.sourceSystem && entry.sourceId ? `${entry.sourceSystem} · ${entry.sourceId}` : "App local"}>{entry.sourceSystem && entry.sourceId ? `${entry.sourceSystem} · ${entry.sourceId}` : "App local"}</span></td><td className="numeric amount">{money(entry.amount)}</td></tr>)}</tbody></table></div>
-        {cashPage.data && !cashPage.data.items.length && <Empty title="Todavía no hay movimientos" description="Registrá el primer movimiento real con su fuente." />}
+        <div className="table-scroll"><table><thead><tr><th scope="col">Fecha</th><th scope="col">Cuenta</th><th scope="col">Categoría</th><th scope="col">Detalle</th><th scope="col">Origen</th><th scope="col" className="numeric">Importe</th><th scope="col" className="numeric">Saldo de la cuenta</th></tr></thead><tbody>{cashPage.data?.items.map((entry) => <tr key={entry.id}><td>{shortDate(entry.date)}</td><td>{entry.account === "cash" ? "Efectivo" : "Banco"}</td><td>{categories[entry.category] || entry.category}</td><td className="table-name">{entry.description}</td><td><span className="source-id" title={entry.sourceSystem && entry.sourceId ? `${entry.sourceSystem} · ${entry.sourceId}` : "App local"}>{entry.sourceSystem && entry.sourceId ? `${entry.sourceSystem} · ${entry.sourceId}` : "App local"}</span></td><td className="numeric amount">{money(entry.amount)}</td><td className="numeric cash-balance-after">{entry.balanceAfter === undefined ? "—" : money(entry.balanceAfter)}</td></tr>)}</tbody></table></div>
+        {cashPage.data && !cashPage.data.items.length && (filtered || account !== "all"
+          ? <Empty title="Sin movimientos con estos filtros" description="Probá otra cuenta, categoría o rango de fechas." />
+          : <Empty title="Todavía no hay movimientos" description="Registrá el primer movimiento real con su fuente." />)}
         {cashPage.data && <div className="list-pagination"><span>Página {cashPrevious.length + 1} · {cashPage.data.total} movimientos</span><div><button className="button" disabled={!cashPrevious.length} onClick={() => { setCashCursor(cashPrevious.at(-1) || null); setCashPrevious((rows) => rows.slice(0, -1)); }}>Anterior</button><button className="button" disabled={!cashPage.data.nextCursor} onClick={() => { setCashPrevious((rows) => [...rows, cashCursor]); setCashCursor(cashPage.data!.nextCursor); }}>Siguiente</button></div></div>}
       </Panel>
     </div>}
@@ -228,7 +310,9 @@ export default function Finance() {
       <button className="finance-text-action" type="button" onClick={() => navigate("/app/decisiones/caja")}>Abrir análisis de caja <ArrowRight size={16} /></button>
     </div>}
 
-    <Modal title={mode === "entry" ? "Registrar movimiento real" : "Agregar partida proyectada"} description="Indicá la cuenta, la categoría y una referencia que permita revisar el importe." open={mode !== null} onClose={() => setMode(null)}>
+    <Modal title={mode === "entry" ? "Registrar movimiento real" : view === "overview" ? "Agendar un pago" : "Agregar partida proyectada"}
+      description={mode === "plan" && view === "overview" ? "Queda como pago previsto en Planificación y aparece en Próximos pagos si es del escenario Base." : "Indicá la cuenta, la categoría y una referencia que permita revisar el importe."}
+      open={mode !== null} onClose={() => setMode(null)}>
       <Form onCancel={() => setMode(null)} onSubmit={save}>
         <div className="form-grid"><Field label="Fecha"><input name="date" type="date" defaultValue={mode === "entry" ? today : offsetDate(today, 7)} required /></Field><Field label="Cuenta"><select name="account"><option value="cash">Efectivo</option><option value="bank">Banco</option></select></Field></div>
         {mode === "plan" && <Field label="Escenario"><select name="scenario" defaultValue={scenario}>{scenarios.map((item) => <option key={item} value={item}>{scenarioNames[item]}</option>)}</select></Field>}

@@ -1,5 +1,6 @@
 generator client {
   provider = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 datasource db {
   provider = "postgresql"
@@ -19,6 +20,8 @@ model User {
   password String
   role Role
   color String @default("#789b84")
+  active Boolean @default(true)
+  authorizationEpoch Int @default(1)
   products Product[]
   sales Sale[]
   items SaleItem[]
@@ -82,6 +85,16 @@ model Location {
   decisionInboundOrders DecisionInboundOrder[]
   @@index([active, name])
 }
+model ProductCategory {
+  id String @id @default(cuid())
+  name String
+  key String @unique
+  minVarieties Int @default(0)
+  active Boolean @default(true)
+  createdAt DateTime @default(now())
+  products Product[]
+  @@index([active, name])
+}
 model Product {
   id String @id @default(cuid())
   name String
@@ -101,6 +114,8 @@ model Product {
   location String
   locationId String?
   locationRef Location? @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  categoryId String?
+  categoryRef ProductCategory? @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   ownerId String
   owner User @relation(fields: [ownerId], references: [id])
   expires String?
@@ -113,6 +128,7 @@ model Product {
   @@index([ownerId])
   @@index([supplierId])
   @@index([locationId])
+  @@index([categoryId])
   @@index([name, id])
   @@index([ownerId, name, id])
   @@unique([sourceSystem, sourceId])
@@ -149,10 +165,12 @@ model Sale {
   pointsEarned Int
   pointsUsed Int
   payment String
+  // Only for payment "mixed": [{ method: "cash", amount }, { method: "transfer" | "card", amount }] in cents.
+  paymentSplit Json?
   requestId String @unique
   channel String @default("local")
   items SaleItem[]
-  cashEntry CashEntry?
+  cashEntries CashEntry[]
   @@index([date])
   @@index([customerId])
   @@index([createdAt, id])
@@ -168,12 +186,13 @@ model CashEntry {
   description String
   sourceSystem String?
   sourceId String?
-  saleId String? @unique
+  saleId String?
   sale Sale? @relation(fields: [saleId], references: [id])
   userId String
   user User @relation(fields: [userId], references: [id])
   createdAt DateTime @default(now())
   @@unique([sourceSystem, sourceId])
+  @@unique([saleId, account])
   @@index([date, account])
   @@index([date, createdAt, id])
   @@index([account, date])
@@ -721,4 +740,764 @@ model DecisionInputAttestation {
   confirmedByUser User @relation(fields: [confirmedByUserId], references: [id], onDelete: Restrict)
   confirmedAt DateTime @default(now())
   @@index([domain, scenario, fromDate, throughDate])
+}
+
+// Canonical operations. Existing tables remain historical compatibility projections.
+model OperationAuthority {
+  id String @id @default("operations")
+  mode String @default("shadow")
+  epoch Int @default(1)
+  firstRealWriteAt DateTime?
+  approvedBy String?
+  evidence Json?
+  updatedAt DateTime @updatedAt
+}
+model OperationObject {
+  id String @id
+  kind String
+  version Int @default(0)
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([kind, updatedAt])
+}
+model CommandReceipt {
+  requestId String @id @db.Uuid
+  actorId String
+  targetId String
+  command String
+  bodyHash String
+  response Json
+  resultingVersion Int
+  authorityEpoch Int
+  occurredAt DateTime
+  committedAt DateTime @default(now())
+  @@index([actorId, committedAt])
+  @@index([targetId, committedAt])
+}
+model OperationOutbox {
+  id String @id @default(uuid()) @db.Uuid
+  requestId String @db.Uuid
+  topic String
+  payload Json
+  status String @default("pending")
+  attempts Int @default(0)
+  createdAt DateTime @default(now())
+  processedAt DateTime?
+  @@index([status, createdAt])
+}
+model OperationAudit {
+  id String @id @default(uuid()) @db.Uuid
+  actorId String
+  action String
+  objectId String
+  requestId String?
+  details Json
+  createdAt DateTime @default(now())
+  @@index([objectId, createdAt])
+}
+model OperationAccess {
+  userId String @id
+  profile String
+  capabilities Json
+  scope Json @default("{}")
+  enabled Boolean @default(true)
+  updatedAt DateTime @updatedAt
+}
+model OperationSession {
+  id String @id @default(uuid()) @db.Uuid
+  userId String
+  authorizationEpoch Int
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  @@index([userId, expiresAt])
+}
+model OperationDevice {
+  id String @id @default(uuid()) @db.Uuid
+  userId String
+  name String
+  storageCertified Boolean @default(false)
+  storageCertifiedAt DateTime?
+  evidence Json?
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  @@index([userId])
+}
+model OfflineLease {
+  id String @id @default(uuid()) @db.Uuid
+  userId String
+  deviceId String @db.Uuid
+  sessionId String @db.Uuid
+  authorizationEpoch Int
+  authorityEpoch Int
+  assignments Json
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  @@index([userId, expiresAt])
+}
+model OfflineBackup {
+  id String @id @default(uuid()) @db.Uuid
+  userId String
+  deviceId String @db.Uuid
+  leaseId String @db.Uuid
+  sha256 String
+  package Json
+  recoveredBy String?
+  createdAt DateTime @default(now())
+  @@unique([userId, deviceId, sha256])
+}
+model OfflineQuarantine {
+  requestId String @id @db.Uuid
+  userId String
+  deviceId String @db.Uuid
+  leaseId String @db.Uuid
+  targetId String
+  envelope Json
+  reason String
+  resolvedBy String?
+  resolutionRequestId String?
+  createdAt DateTime @default(now())
+  @@index([userId, createdAt])
+}
+model OfflineRecovery {
+  id String @id @default(uuid()) @db.Uuid
+  backupId String @db.Uuid
+  ownerId String
+  reviewerId String?
+  reason String
+  status String @default("requested")
+  createdAt DateTime @default(now())
+  approvedAt DateTime?
+}
+model OperationMember {
+  id String @id
+  legacyCustomerId String? @unique
+  name String
+  email String @default("")
+  phone String @default("")
+  address Json
+  preferences Json
+  sourceSystem String?
+  sourceId String?
+  createdAt DateTime @default(now())
+  @@unique([sourceSystem, sourceId])
+  @@index([name, id])
+}
+model MemberClinicalRecord {
+  memberId String @id
+  provenance Json
+  encryptedObjectKey String?
+  verification String @default("unverified")
+  reviewedBy String?
+  reviewedAt DateTime?
+}
+model MemberPermission {
+  id String @id @default(uuid()) @db.Uuid
+  memberId String
+  kind String
+  status String @default("unverified")
+  validFrom String?
+  validUntil String?
+  evidenceDocumentId String?
+  reviewerId String?
+  reviewedAt DateTime?
+  @@index([memberId, kind, status])
+}
+model OperationDocument {
+  id String @id @default(uuid()) @db.Uuid
+  memberId String?
+  orderId String?
+  deliveryId String?
+  kind String
+  sensitivity String
+  state String @default("referenced")
+  objectKey String?
+  checksum String?
+  objectVersion String?
+  mediaType String?
+  bytes Int?
+  templateId String?
+  templateVersion Int?
+  validUntil String?
+  metadata Json
+  createdBy String
+  createdAt DateTime @default(now())
+  @@index([memberId, kind])
+  @@index([deliveryId])
+}
+model DocumentAuthorization {
+  id String @id @default(uuid()) @db.Uuid
+  documentId String @db.Uuid
+  userId String
+  deliveryId String?
+  expiresAt DateTime
+  grantedBy String
+  @@unique([documentId, userId])
+}
+model DocumentTemplate {
+  id String @id
+  version Int
+  kind String
+  definition Json
+  approvedBy String?
+  approvedAt DateTime?
+  @@unique([id, version])
+}
+model CatalogSku {
+  id String @id
+  code String @unique
+  name String
+  variety String
+  category String
+  unit String
+  minQuantity Decimal @default(0) @db.Decimal(38, 12)
+  minVarieties Int @default(0)
+  active Boolean @default(true)
+  sourceSystem String?
+  sourceId String?
+  lots InventoryLot[]
+  @@unique([sourceSystem, sourceId])
+  @@index([category, active])
+}
+model PricePolicy {
+  id String @id
+  version Int
+  name String
+  currency String
+  definition Json
+  validFrom String
+  validUntil String?
+  status String @default("draft")
+  proposedBy String
+  approvedBy String?
+  approvedAt DateTime?
+  @@index([status, validFrom])
+}
+model CommercialPack {
+  id String @id
+  version Int
+  name String
+  currency String
+  priceMinor BigInt
+  components Json
+  allocationWeights Json
+  validFrom String
+  validUntil String?
+  status String @default("draft")
+  proposedBy String
+  approvedBy String?
+  approvedAt DateTime?
+}
+model CommercialPromotion {
+  id String @id
+  version Int
+  name String
+  definition Json
+  validFrom String
+  validUntil String
+  status String @default("draft")
+  proposedBy String
+  approvedBy String?
+  approvedAt DateTime?
+}
+model OperationTask {
+  id String @id
+  title String
+  responsibleId String
+  dueDate String
+  status String @default("open")
+  links Json
+  evidence Json
+  createdBy String
+}
+model PurchaseOrder {
+  id String @id
+  supplierId String
+  agreementDate String
+  expectedDate String?
+  currency String
+  totalMinor BigInt
+  status String @default("draft")
+  items Json
+  sourceSystem String?
+  sourceId String?
+  @@unique([sourceSystem, sourceId])
+  @@index([agreementDate, id])
+}
+model GoodsReceipt {
+  id String @id
+  purchaseId String
+  receivedDate String
+  receivedBy String
+  items Json
+  evidence Json
+  @@index([purchaseId])
+}
+model InventoryLot {
+  id String @id
+  skuId String
+  sku CatalogSku @relation(fields: [skuId], references: [id], onDelete: Restrict)
+  receiptId String?
+  purchaseLineId String?
+  label String
+  unit String
+  unitCost Decimal @db.Decimal(38, 12)
+  costCurrency String
+  receivedAt DateTime
+  expiresOn String?
+  legacyProductId String? @unique
+  sourceSystem String?
+  sourceId String?
+  balances StockBalance[]
+  @@unique([sourceSystem, sourceId])
+  @@index([skuId, receivedAt, id])
+  @@index([label])
+}
+model StockBalance {
+  id String @id
+  lotId String
+  lot InventoryLot @relation(fields: [lotId], references: [id], onDelete: Restrict)
+  locationId String
+  custodianId String
+  unit String
+  quantity Decimal @db.Decimal(38, 12)
+  reserved Decimal @default(0) @db.Decimal(38, 12)
+  @@unique([lotId, locationId, custodianId])
+  @@index([locationId, custodianId])
+}
+model StockReservation {
+  id String @id
+  orderId String
+  lineId String
+  balanceId String
+  quantity Decimal @db.Decimal(38, 12)
+  consumed Decimal @default(0) @db.Decimal(38, 12)
+  status String @default("active")
+  @@index([orderId, status])
+  @@index([balanceId, status])
+}
+model StockFact {
+  id String @id @default(uuid()) @db.Uuid
+  requestId String @db.Uuid
+  lotId String
+  orderId String?
+  lineId String?
+  kind String
+  quantity Decimal @db.Decimal(38, 12)
+  unit String
+  fromLocationId String?
+  toLocationId String?
+  fromCustodianId String?
+  toCustodianId String?
+  costMinor BigInt?
+  currency String?
+  reason String
+  actorId String
+  occurredAt DateTime
+  @@index([lotId, occurredAt])
+  @@index([orderId])
+}
+model OperationalStockCount {
+  id String @id
+  balanceId String
+  unit String
+  recordedQuantity Decimal @db.Decimal(38, 12)
+  recordedReserved Decimal @db.Decimal(38, 12)
+  countedQuantity Decimal @db.Decimal(38, 12)
+  countedBy String
+  countedAt DateTime
+  evidence Json
+  status String @default("pending")
+  reviewedBy String?
+  reviewedAt DateTime?
+  resolution Json?
+  @@index([balanceId, countedAt])
+}
+model OperationOrder {
+  id String @id
+  memberId String
+  channel String
+  currency String
+  commercialState String @default("draft")
+  quote Json
+  quoteVersion Int @default(0)
+  subtotalMinor BigInt @default(0)
+  discountMinor BigInt @default(0)
+  deliveryMinor BigInt @default(0)
+  deliveryDiscountMinor BigInt @default(0)
+  surchargeMinor BigInt @default(0)
+  totalMinor BigInt @default(0)
+  verifiedMinor BigInt @default(0)
+  refundedMinor BigInt @default(0)
+  refundedDeliveryMinor BigInt @default(0)
+  refundedSurchargeMinor BigInt @default(0)
+  fulfillmentState String @default("unprepared")
+  financialState String @default("unpaid")
+  address Json
+  createdBy String
+  confirmedAt DateTime?
+  createdAt DateTime @default(now())
+  legacySaleId String? @unique
+  sourceSystem String?
+  sourceId String?
+  lines OperationOrderLine[]
+  @@unique([sourceSystem, sourceId])
+  @@index([commercialState, createdAt])
+  @@index([createdAt, id])
+  @@index([memberId, createdAt])
+}
+model OperationOrderLine {
+  id String @id
+  orderId String
+  order OperationOrder @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  skuId String
+  unit String
+  requested Decimal @db.Decimal(38, 12)
+  prepared Decimal @default(0) @db.Decimal(38, 12)
+  delivered Decimal @default(0) @db.Decimal(38, 12)
+  cancelled Decimal @default(0) @db.Decimal(38, 12)
+  returned Decimal @default(0) @db.Decimal(38, 12)
+  extra Decimal @default(0) @db.Decimal(38, 12)
+  unitPrice Decimal @db.Decimal(38, 12)
+  referenceMinor BigInt
+  discountMinor BigInt @default(0)
+  revenueMinor BigInt
+  costMinor BigInt @default(0)
+  refundedMinor BigInt @default(0)
+  costCurrency String?
+  costCoverage String @default("unknown")
+  policyId String?
+  policyVersion Int?
+  packId String?
+  packCount Int?
+  @@index([orderId])
+}
+model PreparationAllocation {
+  id String @id
+  orderId String
+  lineId String
+  lotId String
+  balanceId String
+  requestedQuantity Decimal @db.Decimal(38, 12)
+  actualQuantity Decimal @db.Decimal(38, 12)
+  deliveredQuantity Decimal @default(0) @db.Decimal(38, 12)
+  returnedQuantity Decimal @default(0) @db.Decimal(38, 12)
+  returnedDeliveredQuantity Decimal @default(0) @db.Decimal(38, 12)
+  costMinor BigInt
+  state String @default("prepared")
+  @@index([orderId, state])
+  @@index([balanceId, state])
+}
+model DeliveryAssignment {
+  id String @id
+  orderId String
+  routeId String?
+  driverId String?
+  status String @default("pending")
+  stopSequence Int @default(0)
+  windowStart String?
+  windowEnd String?
+  address Json
+  eta String?
+  etaIsEstimate Boolean @default(true)
+  dispatchedAt DateTime?
+  deliveredAt DateTime?
+  incidents Json
+  @@index([driverId, status])
+  @@index([routeId, stopSequence])
+  @@index([orderId])
+  @@index([routeId, status, id])
+}
+model DeliveryRoute {
+  id String @id
+  driverId String
+  shiftDate String
+  status String @default("planned")
+  custodianAccountId String?
+  remunerationMinor BigInt @default(0)
+  remunerationCurrency String @default("ARS")
+  remunerationApprovedBy String?
+  closedWithPending Boolean @default(false)
+  exportBackupId String?
+  @@index([driverId, shiftDate])
+  @@index([shiftDate, id])
+}
+model CollectionReport {
+  id String @id
+  orderId String
+  deliveryId String?
+  reporterId String
+  method String
+  currency String
+  amountMinor BigInt
+  accountId String?
+  custodianId String?
+  evidence Json
+  status String @default("reported")
+  verifiedBy String?
+  verifiedAt DateTime?
+  appliedMinor BigInt @default(0)
+  excessMinor BigInt @default(0)
+  exchangeRate Decimal? @db.Decimal(38, 12)
+  @@index([orderId, status])
+  @@index([custodianId, status])
+}
+model MemberCredit {
+  id String @id
+  memberId String
+  collectionId String
+  currency String
+  amountMinor BigInt
+  resolvedMinor BigInt @default(0)
+  treatment String
+}
+model Rendition {
+  id String @id
+  routeId String?
+  driverId String
+  fromAccountId String
+  toAccountId String
+  currency String
+  grossMinor BigInt
+  deliveredMinor BigInt
+  feeMinor BigInt @default(0)
+  mode String @default("gross")
+  acceptedBy String
+  acceptedAt DateTime @default(now())
+}
+model OperationAccount {
+  id String @id
+  name String
+  currency String
+  kind String
+  holder String
+  purpose String
+  verified Boolean @default(false)
+  active Boolean @default(true)
+  custodianId String?
+  openingMinor BigInt @default(0)
+  openingApprovedBy String?
+  openingEvidence Json?
+  sourceSystem String?
+  sourceId String?
+  legs LedgerLeg[]
+  @@unique([sourceSystem, sourceId])
+  @@index([currency, kind])
+}
+model LedgerEvent {
+  id String @id
+  requestId String @db.Uuid
+  kind String
+  occurredAt DateTime
+  actorId String
+  sourceObjectId String
+  description String
+  metadata Json
+  legs LedgerLeg[]
+  @@index([kind, occurredAt])
+  @@index([sourceObjectId])
+}
+model LedgerLeg {
+  id String @id
+  eventId String
+  event LedgerEvent @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  accountId String
+  account OperationAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  currency String
+  amountMinor BigInt
+  @@index([accountId, eventId])
+  @@index([accountId, id])
+}
+model AccountReconciliation {
+  id String @id
+  accountId String
+  date String
+  calculatedMinor BigInt
+  countedMinor BigInt
+  differenceMinor BigInt
+  evidence Json
+  reviewerId String
+  createdAt DateTime @default(now())
+  @@index([accountId, createdAt, id])
+}
+model OperationPayable {
+  id String @id
+  purchaseId String?
+  beneficiaryId String
+  kind String
+  currency String
+  amountMinor BigInt
+  paidMinor BigInt @default(0)
+  dueDate String
+  accrualPeriod String?
+  evidence Json
+  verified Boolean @default(false)
+  sourceSystem String?
+  sourceId String?
+  @@unique([sourceSystem, sourceId])
+  @@index([dueDate, verified])
+  @@index([purchaseId])
+}
+model PayablePayment {
+  id String @id
+  payableId String
+  accountId String
+  currency String
+  amountMinor BigInt
+  appliedMinor BigInt
+  exchangeRate Decimal? @db.Decimal(38, 12)
+  date String
+  eventId String
+}
+model LegacyImportSnapshot {
+  id String @id
+  sourceSystem String
+  filename String
+  fileHash String
+  importerVersion String
+  status String @default("staged")
+  createdBy String
+  reviewedBy String?
+  reviewedAt DateTime?
+  controls Json
+  coverage Json
+  createdAt DateTime @default(now())
+  upload LegacyImportUpload?
+  @@unique([sourceSystem, fileHash, importerVersion])
+}
+model LegacyImportUpload {
+  snapshotId String @id
+  snapshot LegacyImportSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Restrict)
+  manifestHash String
+  manifest Json
+  expectedRecords Int
+  expectedChunks Int
+  receivedRecords Int @default(0)
+  receivedBytes BigInt @default(0)
+  cutoverEpoch Int
+  cutoverMode String
+  completedAt DateTime?
+  quarantinedAt DateTime?
+  chunks LegacyImportChunk[]
+}
+model LegacyImportChunk {
+  snapshotId String
+  upload LegacyImportUpload @relation(fields: [snapshotId], references: [snapshotId], onDelete: Restrict)
+  index Int
+  contentHash String
+  recordCount Int
+  byteCount Int
+  createdAt DateTime @default(now())
+  @@id([snapshotId, index])
+}
+model LegacySourceRecord {
+  id String @id
+  snapshotId String
+  sourceTable String
+  sourceKey String
+  sourceRow Int
+  fileHash String
+  contentHash String
+  importerVersion String
+  original Json
+  normalized Json
+  treatment String
+  resolution Json?
+  @@unique([snapshotId, sourceTable, sourceRow])
+  @@index([sourceTable, sourceKey])
+  @@index([snapshotId, sourceTable, sourceKey])
+}
+model LegacyIdentity {
+  id String @id
+  sourceSystem String
+  sourceTable String
+  sourceKey String
+  destinationType String
+  destinationId String
+  approvedBy String?
+  @@unique([sourceSystem, sourceTable, sourceKey, destinationType])
+}
+model LegacyHistoricalFact {
+  id String @id
+  snapshotId String
+  sourceRecordId String
+  sourceTable String
+  sourceKey String
+  sourceRow Int
+  sourceHash String
+  mappingId String
+  kind String
+  occurredOn String?
+  dateState String
+  currency String?
+  currencyState String
+  unit String?
+  unitState String
+  amountMinor BigInt?
+  amountState String
+  quantity Decimal? @db.Decimal(38, 12)
+  quantityState String
+  attributes Json
+  correctionOf String? @unique
+  createdBy String
+  createdAt DateTime @default(now())
+  @@index([snapshotId, sourceRecordId, mappingId])
+  @@index([snapshotId, kind, occurredOn, id])
+  @@index([sourceTable, sourceKey])
+}
+model LegacyHistoryPublication {
+  sourceSystem String @id
+  snapshotId String
+  fileHash String
+  mappingId String
+  fingerprint String
+  publishedBy String
+  evidence Json
+  publishedAt DateTime @default(now())
+}
+model LegacyException {
+  id String @id
+  snapshotId String
+  sourceRecordId String?
+  kind String
+  severity String
+  description String
+  status String @default("open")
+  resolution Json?
+  resolvedBy String?
+  resolvedAt DateTime?
+  @@index([snapshotId, status])
+}
+model CutoverGate {
+  id String @id
+  status String @default("pending")
+  evidence Json?
+  approvedBy String?
+  reviewedBy String?
+  approvedAt DateTime?
+}
+model OperationalConfiguration {
+  id String @id
+  name String
+  kind String
+  version Int
+  state String @default("proposed")
+  definition Json
+  validFrom String
+  validUntil String?
+  proposedBy String
+  approvedBy String?
+  approvedAt DateTime?
+  createdAt DateTime @default(now())
+  @@unique([name, version])
+  @@index([kind, state, validFrom])
+}
+
+model AuthRateBucket {
+  key String @id
+  hits Int
+  expiresAt DateTime
+  @@index([expiresAt])
 }

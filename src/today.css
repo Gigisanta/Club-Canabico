@@ -20,3 +20,5 @@
 .today-source-warning { color: #8b4a18; font-size: 14px; }
 .today-source-note { padding-top: 15px; border-top: 1px solid var(--border); }
 @media (max-width: 760px) { .today-figures { grid-template-columns: 1fr; gap: 9px; } .today-figures > div { padding: 15px 17px; } .today-tasks { padding: 18px; } .today-tasks li { flex-direction: column; align-items: flex-start; gap: 9px; } .today-next { gap: 15px; } }
+.app-shell .today-figures .today-goal-track { grid-column: 2; height: 6px; margin-top: 6px; overflow: hidden; border-radius: 99px; background: #e8e4d5; }
+.app-shell .today-figures .today-goal-track i { display: block; height: 100%; border-radius: inherit; background: var(--brand-olive-mid); }

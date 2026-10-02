@@ -226,8 +226,8 @@ async function main() {
   let schema;
   let schemaCreated = false;
   try {
-    if (process.argv.length > 2)
-      throw new Error("El runner aislado no acepta overrides de Playwright; ejecutá `npm run test:e2e` sin argumentos.");
+    if (process.argv.slice(2).some(file => !/^tests\/browser\/[a-zA-Z0-9_-]+\.spec\.ts$/.test(file) || !existsSync(resolve(projectRoot, file))))
+      throw new Error("El runner aislado sólo acepta archivos tests/browser/*.spec.ts; no admite overrides de Playwright.");
     throwIfInterrupted();
 
     const adminURL = await validateTestDatabase();
@@ -248,6 +248,7 @@ async function main() {
     childEnv.DEMO_MODE = "true";
     childEnv.HOST = "127.0.0.1";
     childEnv.PUBLIC_SITE_PREVIEW = "true";
+    childEnv.VITE_PUBLIC_SITE_PREVIEW = "true";
     childEnv.JWT_SECRET = randomBytes(48).toString("hex");
     childEnv.COOKIE_SECURE = "false";
     childEnv.PUBLIC_SITE_APPROVED = "false";
@@ -259,6 +260,7 @@ async function main() {
 
     console.log("[e2e] Sembrando datos demo en el esquema desechable.");
     await runCommand("seed", process.execPath, ["--import", "tsx", "prisma/seed.ts"], childEnv);
+    await runCommand("operations-seed", process.execPath, ["--import", "tsx", "scripts/seed-operations-rehearsal.ts"], childEnv);
 
     const [apiPort, vitePort] = await Promise.all([freeLoopbackPort(), freeLoopbackPort()]);
     if (apiPort === vitePort) throw new Error("No se pudieron asignar puertos locales distintos para API y Vite.");
@@ -283,7 +285,7 @@ async function main() {
     const playwrightCLI = resolve(projectRoot, "node_modules/@playwright/test/cli.js");
     if (!existsSync(playwrightCLI)) throw new Error("No se encontró Playwright instalado en node_modules.");
     console.log("[e2e] Ejecutando Playwright contra la instancia aislada.");
-    await runCommand("playwright", process.execPath, [playwrightCLI, "test", "--config=playwright.config.ts"], appEnv);
+    await runCommand("playwright", process.execPath, [playwrightCLI, "test", "--config=playwright.config.ts", ...process.argv.slice(2)], appEnv);
     console.log("[e2e] Suite de navegador completada.");
   } catch (error) {
     exitCode = 1;

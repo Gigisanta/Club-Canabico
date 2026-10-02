@@ -44,7 +44,7 @@ type DailyLocal = { date: string; revenue: bigint; cost: bigint; saleCount: bigi
 type DailyExpense = { date: string; amount: bigint };
 type DailyDemand = { productId: string; date: string; sold: bigint };
 type MemberTotal = { customerId: string; lastDate: string; purchaseCount: bigint; spent: bigint };
-type LocalMarginRow = { productId: string; name: string; category: string; supplier: string; revenue: bigint; cost: bigint; quantityMilliunits: bigint; lineCount: bigint };
+type LocalMarginRow = { productId: string; name: string; category: string; commercialCategory: string; supplier: string; revenue: bigint; cost: bigint; quantityMilliunits: bigint; lineCount: bigint };
 type ImportedAvailabilityRow = { sourceSystem: string; productSourceId: string | null; date: Date; locationSourceId: string | null; quantityUnit: string | null; quantityMilliunits: bigint | null };
 type ImportedDemandRow = { sourceSystem: string; productSourceId: string | null; date: Date; quantityUnit: string; quantityMilliunits: bigint };
 type DeliveryDailyRow = { date: Date; netCents: bigint };
@@ -99,11 +99,13 @@ export async function decisionAnalysisPayload(asOfDate: string) {
       GROUP BY date ORDER BY date`,
     db.$queryRaw<LocalMarginRow[]>`
       SELECT i."productId", MIN(i.name) AS name, p.type AS category,
+        COALESCE(MIN(pc.name), 'Sin categoría comercial') AS "commercialCategory",
         COALESCE(NULLIF(MIN(su.name), ''), NULLIF(MIN(p.supplier), ''), 'Sin proveedor') AS supplier,
         SUM(i.revenue)::bigint AS revenue, SUM(i.cost)::bigint AS cost,
         SUM(i.quantity)::bigint AS "quantityMilliunits", COUNT(*)::bigint AS "lineCount"
       FROM "SaleItem" i JOIN "Sale" s ON s.id = i."saleId"
       JOIN "Product" p ON p.id = i."productId"
+      LEFT JOIN "ProductCategory" pc ON pc.id = p."categoryId"
       LEFT JOIN "Supplier" su ON su.id = p."supplierId"
       WHERE s.channel = 'local' AND s.date >= ${fromMonth} AND s.date <= ${asOfDate}
       GROUP BY i."productId", p.type ORDER BY SUM(i.revenue) DESC`,
@@ -467,7 +469,8 @@ export async function decisionAnalysisPayload(asOfDate: string) {
     memberId: row.customerId, lastPurchaseDate: row.lastDate,
     purchaseCount: Number(row.purchaseCount), spendCents: row.spent,
   })), segmentationAssumptions);
-  const summarizeMargin = (key: "category" | "supplier") => {
+  // The commercial category is each lot's current one: re-categorizing a lot moves its past sales too.
+  const summarizeMargin = (key: "category" | "commercialCategory" | "supplier") => {
     const groups = new Map<string, { revenueCents: bigint; historicalCogsCents: bigint; quantityMilliunits: bigint; lineCount: bigint }>();
     for (const row of marginRows) {
       const entry = groups.get(row[key]) ?? { revenueCents: 0n, historicalCogsCents: 0n, quantityMilliunits: 0n, lineCount: 0n };
@@ -478,7 +481,8 @@ export async function decisionAnalysisPayload(asOfDate: string) {
       groups.set(row[key], entry);
     }
     return [...groups].map(([name, entry]) => ({ name, ...entry,
-      grossMarginCents: entry.revenueCents - entry.historicalCogsCents }));
+      grossMarginCents: entry.revenueCents - entry.historicalCogsCents }))
+      .sort((a, b) => a.revenueCents === b.revenueCents ? a.name.localeCompare(b.name) : a.revenueCents > b.revenueCents ? -1 : 1);
   };
   return jsonSafe({
     asOfDate,
@@ -505,10 +509,11 @@ export async function decisionAnalysisPayload(asOfDate: string) {
     profitability: {
       localMonth: pnl,
       byProduct: marginRows.map((row) => ({ productId: row.productId, name: row.name,
-        category: row.category, supplier: row.supplier, revenueCents: row.revenue,
+        category: row.category, commercialCategory: row.commercialCategory, supplier: row.supplier, revenueCents: row.revenue,
         historicalCogsCents: row.cost, grossMarginCents: row.revenue - row.cost,
         quantityMilliunits: row.quantityMilliunits, lineCount: row.lineCount,
         evidence: process.env.DEMO_MODE === "true" ? "demo" : "observed_local" })),
+      byCommercialCategory: summarizeMargin("commercialCategory"),
       byCategory: summarizeMargin("category"),
       bySupplier: summarizeMargin("supplier"),
       byChannel: [

@@ -8,7 +8,14 @@
     "skipLibCheck": true,
     "outDir": "dist-server",
     "rootDir": ".",
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["server/**/*.ts", "prisma/seed.ts", "shared/**/*.ts"]
+  "include": [
+    "server/**/*.ts",
+    "prisma/seed.ts",
+    "shared/**/*.ts",
+    "api/**/*.ts"
+  ]
 }

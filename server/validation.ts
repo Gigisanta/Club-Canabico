@@ -18,6 +18,7 @@ export const productSchema = z.object({
   price: money,
   location: text,
   locationId: z.string().trim().min(1).max(100).nullable().default(null),
+  categoryId: z.string().trim().min(1).max(100).nullable().optional(),
   ownerId: text,
   expires: date.nullable().default(null),
 });
@@ -32,6 +33,10 @@ export const supplierSchema = z.object({
 export const locationSchema = z.object({
   name: text,
   isDefault: z.boolean().default(false),
+});
+export const categorySchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  minVarieties: z.number().int().min(0).max(500).default(0),
 });
 export const customerSchema = z.object({
   name: text,
@@ -60,7 +65,12 @@ export const cashPlanSchema = cashEntrySchema.pick({ date: true, account: true, 
 export const saleSchema = z
   .object({
     customerId: text,
-    payment: z.enum(["cash", "card", "transfer"]),
+    payment: z.enum(["cash", "card", "transfer", "mixed"]),
+    // Only for "mixed": the cash part in cents; the server charges the rest of the total to the other method.
+    split: z.object({
+      cash: z.number().int().min(1).max(1_000_000_000),
+      other: z.enum(["transfer", "card"]),
+    }).optional(),
     points: z.number().int().min(0).max(1000000).default(0),
     requestId: z.string().uuid(),
     items: z
@@ -76,7 +86,11 @@ export const saleSchema = z
   .refine(
     (v) => new Set(v.items.map((i) => i.productId)).size === v.items.length,
     "No se permiten productos repetidos",
-  );
+  )
+  .refine((v) => (v.payment === "mixed") === (v.split !== undefined), {
+    message: "Indicá la parte en efectivo solo cuando el pago es mixto",
+    path: ["split"],
+  });
 export const expenseSchema = z.object({
   name: text,
   amount: money.refine((v) => v > 0),
@@ -106,6 +120,7 @@ export const settingsSchema = z
     goldDiscount: z.number().min(0).max(50),
     inactiveDays: z.number().int().min(7).max(365),
     budget: money,
+    dailySalesGoal: money.default(0),
   })
   .refine((v) => v.goldAt > v.silverAt, "El umbral Oro debe superar Plata");
 export class HttpError extends Error {

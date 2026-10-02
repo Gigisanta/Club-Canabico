@@ -1,0 +1,12 @@
+CREATE TABLE "AuthRateBucket" ("key" TEXT PRIMARY KEY, "hits" INTEGER NOT NULL, "expiresAt" TIMESTAMP(3) NOT NULL);
+CREATE INDEX "AuthRateBucket_expiresAt_idx" ON "AuthRateBucket"("expiresAt");
+CREATE INDEX "LegacySourceRecord_snapshotId_sourceTable_sourceKey_idx" ON "LegacySourceRecord"("snapshotId","sourceTable","sourceKey");
+CREATE INDEX "DeliveryRoute_shiftDate_id_idx" ON "DeliveryRoute"("shiftDate","id");
+CREATE INDEX "DeliveryAssignment_orderId_idx" ON "DeliveryAssignment"("orderId");
+CREATE INDEX "DeliveryAssignment_routeId_status_id_idx" ON "DeliveryAssignment"("routeId","status","id");
+CREATE INDEX "LedgerLeg_accountId_id_idx" ON "LedgerLeg"("accountId","id");
+CREATE INDEX "OperationOrder_createdAt_id_idx" ON "OperationOrder"("createdAt","id");
+CREATE INDEX "OperationPayable_purchaseId_idx" ON "OperationPayable"("purchaseId");
+CREATE INDEX "AccountReconciliation_accountId_createdAt_id_idx" ON "AccountReconciliation"("accountId","createdAt","id");
+CREATE INDEX "StockBalance_locationId_custodianId_idx" ON "StockBalance"("locationId","custodianId");
+CREATE INDEX "PurchaseOrder_agreementDate_id_idx" ON "PurchaseOrder"("agreementDate","id");

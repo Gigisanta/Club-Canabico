@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useClub } from "./lib";
 import "./decision-analysis.css";
@@ -656,18 +656,20 @@ function ProfitabilityCard({ profitability, onDownloadDelivery }: { profitabilit
   </div>;
 }
 
-type BreakdownKind = "product" | "category" | "supplier" | "channel";
+type BreakdownKind = "product" | "commercial" | "category" | "supplier" | "channel";
 
 const breakdownDefinitions: Array<{ kind: BreakdownKind; field: string; title: string }> = [
   { kind: "product", field: "byProduct", title: "Por producto" },
-  { kind: "category", field: "byCategory", title: "Por categoría" },
+  { kind: "commercial", field: "byCommercialCategory", title: "Por categoría comercial" },
+  { kind: "category", field: "byCategory", title: "Por tipo de producto" },
   { kind: "supplier", field: "bySupplier", title: "Por proveedor" },
   { kind: "channel", field: "byChannel", title: "Por canal" },
 ];
 
 function breakdownName(row: DataRecord, kind: BreakdownKind, index: number): string {
   if (kind === "product") return displayText(row.name ?? row.productId, `Producto ${index + 1}`);
-  if (kind === "category") return displayText(row.name ?? row.category, `Categoría ${index + 1}`);
+  if (kind === "commercial") return displayText(row.name, `Categoría ${index + 1}`);
+  if (kind === "category") return displayText(row.name ?? row.category, `Tipo ${index + 1}`);
   if (kind === "supplier") return displayText(row.name ?? row.supplier, `Proveedor ${index + 1}`);
   if (row.channel === "local") return "Ventas locales";
   if (row.channel === "delivery_importado") return "Delivery importado";
@@ -684,6 +686,7 @@ function breakdownNoteLines(row: DataRecord, kind: BreakdownKind): string[] {
     }
     return [];
   });
+  if (kind === "commercial") notes.push("Agrupa por la categoría actual de cada lote.");
   if (row.evidence === "observed_local") notes.push("Fuente: ventas locales observadas.");
   if (row.evidence === "demo") notes.push("Fuente: datos de demostración.");
   if (kind === "channel" && row.channel === "delivery_importado" && (row.historicalCogsCents === null || row.grossMarginCents === null)) {
@@ -693,6 +696,15 @@ function breakdownNoteLines(row: DataRecord, kind: BreakdownKind): string[] {
     ? "Resumen de canal; revisar el alcance y la cobertura de la fuente."
     : "Resumen descriptivo; no equivale a un resultado operativo completo.");
   return [...new Set(notes)];
+}
+
+/** Gross margin over revenue, when both are known and there was revenue. */
+function marginShare(row: DataRecord): string | null {
+  if (row.grossMarginCents == null || row.revenueCents == null) return null;
+  const revenue = Number(row.revenueCents);
+  const margin = Number(row.grossMarginCents);
+  if (!Number.isFinite(revenue) || !Number.isFinite(margin) || revenue <= 0) return null;
+  return `${(margin / revenue * 100).toLocaleString("es-AR", { maximumFractionDigits: 1 })} % de los ingresos`;
 }
 
 function marginValue(value: unknown): ReactNode {
@@ -711,7 +723,7 @@ function CommercialBreakdowns({ profitability }: { profitability: DataRecord }) 
       <div><span className="da-kicker">Desglose descriptivo</span><h2 id="da-commercial-breakdowns-title">Ingresos y costo histórico</h2></div>
       <StatusPill tone="partial">No es resultado operativo completo</StatusPill>
     </div>
-    <p className="da-muted">Producto, categoría, proveedor y canal local: {localScope.toLocaleLowerCase("es-AR")}. El delivery importado muestra el acumulado disponible, sin corte mensual comparable y separado hasta conciliar líneas, lotes y costos.</p>
+    <p className="da-muted">Producto, categoría comercial, tipo de producto, proveedor y canal local: {localScope.toLocaleLowerCase("es-AR")}. El delivery importado muestra el acumulado disponible, sin corte mensual comparable y separado hasta conciliar líneas, lotes y costos.</p>
     <div className="da-breakdown-stack">
       {breakdownDefinitions.map(({ kind, field, title }) => {
         const supplied = profitability[field];
@@ -725,8 +737,10 @@ function CommercialBreakdowns({ profitability }: { profitability: DataRecord }) 
             <tbody>{rows.map((row, index) => {
               const countValue = row.lineCount ?? row.saleCount;
               const countLabel = row.lineCount != null ? "líneas" : row.saleCount != null ? "ventas" : "";
+              const share = marginShare(row);
               const details = kind === "product" ? [
-                row.category != null ? `Categoría: ${displayText(row.category)}` : "",
+                row.commercialCategory != null ? `Categoría comercial: ${displayText(row.commercialCategory)}` : "",
+                row.category != null ? `Tipo: ${displayText(row.category)}` : "",
                 row.supplier != null ? `Proveedor: ${displayText(row.supplier)}` : "",
                 row.productId != null && displayText(row.name, "") ? `Código: ${displayText(row.productId)}` : "",
               ].filter(Boolean).join(" · ") : "";
@@ -734,7 +748,7 @@ function CommercialBreakdowns({ profitability }: { profitability: DataRecord }) 
                 <th scope="row">{breakdownName(row, kind, index)}{details && <small>{details}</small>}</th>
                 <td>{formatCents(row.revenueCents)}</td>
                 <td>{marginValue(row.historicalCogsCents)}</td>
-                <td>{marginValue(row.grossMarginCents)}</td>
+                <td>{marginValue(row.grossMarginCents)}{share && <small>{share}</small>}</td>
                 <td>{formatMilliunits(row.quantityMilliunits)}</td>
                 <td>{countValue == null ? "Sin dato" : <>{formatCount(countValue)}{countLabel && <small>{countLabel}</small>}</>}</td>
                 <td>{breakdownNoteLines(row, kind).map((note, noteIndex) => <small className="da-breakdown-note" key={`${noteIndex}-${note}`}>{note}</small>)}</td>
@@ -1084,24 +1098,31 @@ export default function DecisionAnalysis({ section }: DecisionAnalysisProps) {
   const [data, setData] = useState<DataRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const activeRequest = useRef<AbortController | null>(null);
 
-  const load = useCallback(async (signal?: AbortSignal) => {
+  const load = useCallback(async () => {
+    activeRequest.current?.abort();
+    const controller = new AbortController();
+    activeRequest.current = controller;
+    setData(null);
     setLoading(true);
     setLoadError("");
     try {
-      const payload = await requestJson("/api/decision-analysis", { signal });
-      if (!signal?.aborted) setData(payload);
+      const payload = await requestJson("/api/decision-analysis", { signal: controller.signal });
+      if (activeRequest.current === controller && !controller.signal.aborted) setData(payload);
     } catch (reason) {
-      if (!signal?.aborted) setLoadError(reason instanceof Error ? reason.message : "No se pudo cargar el análisis.");
+      if (activeRequest.current === controller && !controller.signal.aborted) setLoadError(reason instanceof Error ? reason.message : "No se pudo cargar el análisis.");
     } finally {
-      if (!signal?.aborted) setLoading(false);
+      if (activeRequest.current === controller && !controller.signal.aborted) {
+        activeRequest.current = null;
+        setLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
-    const controller = new AbortController();
-    void load(controller.signal);
-    return () => controller.abort();
+    void load();
+    return () => activeRequest.current?.abort();
   }, [load]);
 
   const profitability = asRecord(data?.profitability);

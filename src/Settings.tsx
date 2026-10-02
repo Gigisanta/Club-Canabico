@@ -53,6 +53,7 @@ export default function Settings() {
       "silverAt",
       "goldAt",
       "budget",
+      "dailySalesGoal",
     ])
       v[k] = Math.round(Number(v[k]) * 100);
     for (const k of ["silverDiscount", "goldDiscount", "inactiveDays"])
@@ -206,6 +207,16 @@ export default function Settings() {
                       min="0"
                       step="0.01"
                       defaultValue={state.settings.budget / 100}
+                      required
+                    />
+                  </Field>
+                  <Field label="Meta diaria de ventas" hint="Ventas del local por día, en ARS. Con 0 no se muestra meta.">
+                    <input
+                      name="dailySalesGoal"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      defaultValue={state.settings.dailySalesGoal / 100}
                       required
                     />
                   </Field>

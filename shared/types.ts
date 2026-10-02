@@ -19,6 +19,8 @@ export interface Settings {
   goldDiscount: number;
   inactiveDays: number;
   budget: number;
+  /** Daily local sales goal in cents; 0 means no goal. */
+  dailySalesGoal: number;
 }
 export interface Product {
   id: string;
@@ -37,6 +39,9 @@ export interface Product {
   price: number;
   location: string;
   locationId: string | null;
+  categoryId: string | null;
+  /** Category name, present in the paged product list. */
+  category?: string | null;
   ownerId: string;
   expires: string | null;
   createdAt: string;
@@ -58,6 +63,24 @@ export interface Location {
   active: boolean;
   isDefault: boolean;
   lotCount: number;
+}
+/** Commercial category. Coverage fields are absent for a responsible. */
+export interface ProductCategory {
+  id: string;
+  name: string;
+  active: boolean;
+  minVarieties?: number;
+  lotCount?: number;
+  varieties?: number;
+  varietyNames?: string[];
+  /** Stock that can still be sold today, per unit, in milliunits. */
+  stock?: { unit: string; milliunits: number }[];
+}
+export interface CategoryAlert {
+  id: string;
+  name: string;
+  minVarieties: number;
+  varieties: number;
 }
 export interface Customer {
   id: string;
@@ -101,9 +124,15 @@ export interface Sale {
   pointsEarned: number;
   pointsUsed: number;
   payment: string;
+  /** Only for payment "mixed": the cash part first, then the transfer or card part, in cents. */
+  paymentSplit?: PaymentPart[] | null;
   channel: string;
   items: SaleItem[];
   customerName?: string;
+}
+export interface PaymentPart {
+  method: "cash" | "transfer" | "card";
+  amount: number;
 }
 export interface Expense {
   id: string;
@@ -146,6 +175,18 @@ export interface CashEntry {
   description: string;
   sourceSystem: string | null;
   sourceId: string | null;
+  /** Account balance right after this movement, by date and entry order; not reconciled. */
+  balanceAfter?: number;
+}
+export interface CashLedgerSummary {
+  pageCount: number;
+  inflow: number;
+  outflow: number;
+  net: number;
+  cashBalance: number;
+  cashCount: number;
+  bankBalance: number;
+  bankCount: number;
 }
 export interface CashPlan {
   id: string;
@@ -172,6 +213,7 @@ export interface ClubState {
   salesTodayCount: number;
   lowStockCount: number;
   lowStockAlerts: Pick<Product, "id" | "name" | "stock" | "minimum" | "unit">[];
+  categoryAlerts: CategoryAlert[];
   operationsEnabled: boolean;
   settings: Settings;
   today: string;

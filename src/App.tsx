@@ -21,6 +21,7 @@ import {
   ArrowRight,
   X,
   DotsThree,
+  Tag,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import {
@@ -61,6 +62,8 @@ const Finance = lazy(() => import("./Finance"));
 const ActivateAccess = lazy(() => import("./ActivateAccess"));
 const ShowcaseAdmin = lazy(() => import("./ShowcaseAdmin"));
 const InquiriesAdmin = lazy(() => import("./InquiriesAdmin"));
+const OperationsConsole = lazy(() => import("./OperationsConsole"));
+const DeliveryEntry = lazy(() => import("./DeliveryEntry"));
 function Login({
   onLogin,
   demo,
@@ -140,10 +143,68 @@ function Login({
 }
 export function App() {
   const location = useLocation();
+  const navigate = useNavigate();
   const [user, setUser] = useState<User | null>(null);
   const [checking, setChecking] = useState(true);
   const [demo, setDemo] = useState(false);
   const [bootError, setBootError] = useState("");
+  const [operationsRetry, setOperationsRetry] = useState(0);
+  const [operationsContext, setOperationsContext] = useState<{
+    userId: string;
+    status: "loading" | "ready" | "error";
+    profile: string;
+    active: boolean;
+    error: string;
+  } | null>(null);
+  useEffect(() => {
+    if (!user?.id) {
+      setOperationsContext(null);
+      return;
+    }
+    const userId = user.id;
+    const controller = new AbortController();
+    let active = true;
+    setOperationsContext({ userId, status: "loading", profile: "", active: false, error: "" });
+    void api<{ profile: string; authority: { mode: string } }>(
+      "/operations/context",
+      { signal: controller.signal },
+    )
+      .then((context) => {
+        if (!active || controller.signal.aborted) return;
+        setOperationsContext({
+          userId,
+          status: "ready",
+          profile: context.profile,
+          active: context.authority.mode === "active",
+          error: "",
+        });
+      })
+      .catch((error: unknown) => {
+        if (!active || controller.signal.aborted) return;
+        setOperationsContext({
+          userId,
+          status: "error",
+          profile: "",
+          active: false,
+          error: error instanceof Error ? error.message : "No se pudo validar el perfil operativo.",
+        });
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [user?.id, operationsRetry]);
+  useEffect(() => {
+    if (
+      !user?.id ||
+      operationsContext?.userId !== user.id ||
+      operationsContext.status !== "ready"
+    ) return;
+    if (operationsContext.profile === "driver" && !location.pathname.startsWith("/app/delivery"))
+      navigate("/app/delivery", { replace: true });
+    if (operationsContext.profile === "clinical" && !location.pathname.startsWith("/app/operations"))
+      navigate("/app/operations", { replace: true });
+  }, [user?.id, operationsContext, location.pathname, navigate]);
   useEffect(() => {
     let active = true;
     void (async () => {
@@ -167,6 +228,22 @@ export function App() {
       active = false;
     };
   }, []);
+  if (location.pathname.startsWith("/app/delivery"))
+    return (
+      <Suspense fallback={<div className="boot"><Brand />Abriendo turno…</div>}>
+        <DeliveryEntry
+          userId={user?.id}
+          onLogout={async () => {
+            try {
+              await send("/auth/logout", {});
+            } finally {
+              setUser(null);
+              navigate("/app");
+            }
+          }}
+        />
+      </Suspense>
+    );
   if (checking)
     return (
       <div className="boot">
@@ -186,8 +263,80 @@ export function App() {
         </button>
       </div>
     );
-  if (location.pathname === "/app/activar") return <Suspense fallback={<div className="boot"><Brand />Preparando acceso…</div>}><ActivateAccess onLogin={setUser} /></Suspense>;
+  if (location.pathname === "/app/activar")
+    return (
+      <Suspense fallback={<div className="boot"><Brand />Preparando acceso…</div>}>
+        <ActivateAccess onLogin={setUser} />
+      </Suspense>
+    );
   if (!user) return <Login onLogin={setUser} demo={demo} />;
+  const currentOperationsContext = operationsContext?.userId === user.id ? operationsContext : null;
+  async function revokeSession() {
+    try {
+      await send("/auth/logout", {});
+    } catch {
+      // The local session must close even when the server is unreachable.
+    }
+    setUser(null);
+    setOperationsContext(null);
+    navigate("/app");
+  }
+  if (!demo && (!currentOperationsContext || currentOperationsContext.status === "loading"))
+    return (
+      <div className="boot">
+        <Brand />
+        <CircleNotch className="spin" />
+        <p>Validando el perfil operativo…</p>
+      </div>
+    );
+  if (!demo && currentOperationsContext?.status === "error")
+    return (
+      <main className="boot" role="alert">
+        <Brand />
+        <h2>No pudimos validar el acceso operativo</h2>
+        <p>{currentOperationsContext.error}</p>
+        <div className="form-actions">
+          <button
+            className="button primary"
+            onClick={() => setOperationsRetry((attempt) => attempt + 1)}
+          >
+            Reintentar
+          </button>
+          <button className="button" onClick={() => void revokeSession()}>
+            Cerrar sesión
+          </button>
+        </div>
+      </main>
+    );
+  const operationProfile = currentOperationsContext?.profile ?? "";
+  const operationActive = currentOperationsContext?.active ?? false;
+  if (!demo && operationProfile === "driver" && !location.pathname.startsWith("/app/delivery"))
+    return (
+      <div className="boot">
+        <Brand />
+        <CircleNotch className="spin" />
+        <p>Abriendo el turno asignado…</p>
+      </div>
+    );
+  const mustOpenOperations =
+    location.pathname.startsWith("/app/operations") ||
+    operationActive ||
+    (!demo && currentOperationsContext?.status === "ready");
+  if (mustOpenOperations)
+    return (
+      <Suspense fallback={<div className="boot"><Brand />Abriendo operación…</div>}>
+        <OperationsConsole
+          profile={operationProfile}
+          onExit={() => {
+            if (!demo || operationProfile === "clinical" || operationActive) {
+              void revokeSession();
+            } else {
+              navigate("/app");
+            }
+          }}
+        />
+      </Suspense>
+    );
   return (
     <Workspace
       key={user.id}
@@ -329,7 +478,7 @@ function Workspace({
         )}
       </div>
     );
-  const alerts = state.lowStockCount;
+  const alerts = state.lowStockCount + state.categoryAlerts.length;
   const mobilePrimary = primaryHubs.filter((hub) => ["inicio", "ventas", "stock", isManager ? "finanzas" : "socios"].includes(hub.id));
   const mobileLabels: Record<string, string> = { inicio: "Inicio", ventas: "Ventas", finanzas: "Finanzas", stock: "Stock", socios: "Socios" };
   const moreActive = !mobilePrimary.some((hub) => hub.id === current?.hub.id);
@@ -361,6 +510,7 @@ function Workspace({
         }}>
           <Brand />
           <button type="button" className="sidebar-close icon-button" aria-label="Cerrar navegación" onClick={closeMenu}><X size={21} /></button>
+          <NavLink to="/app/operations" className="button" onClick={closeMenu}>Operación integrada</NavLink>
           <div className="club-switch club-identity" aria-label={state.settings.clubName}>
             <span className="club-avatar">
               <img src="/brand/bombo-symbol.png" alt="" />
@@ -613,8 +763,31 @@ function Workspace({
         open={notifications}
         onClose={() => setNotifications(false)}
       >
-        {state.lowStockAlerts.length ? (
-          state.lowStockAlerts.map((p) => (
+        {state.categoryAlerts.length || state.lowStockAlerts.length ? (<>
+          {state.categoryAlerts.map((c) => (
+            <div className="notification-row" key={`category-${c.id}`}>
+              <span className="alert-symbol">
+                <Tag />
+              </span>
+              <div>
+                <strong>{c.name}</strong>
+                <p>
+                  Pocas variedades: {c.varieties} de {c.minVarieties} con stock. Faltan {c.minVarieties - c.varieties}.
+                </p>
+              </div>
+              <button
+                className="icon-button"
+                aria-label={`Ver lotes de ${c.name}`}
+                onClick={() => {
+                  navigate("/app/inventario?category=" + encodeURIComponent(c.id));
+                  setNotifications(false);
+                }}
+              >
+                <ArrowRight />
+              </button>
+            </div>
+          ))}
+          {state.lowStockAlerts.map((p) => (
             <div className="notification-row" key={p.id}>
               <span className="alert-symbol">
                 <Package />
@@ -637,8 +810,8 @@ function Workspace({
                 <ArrowRight />
               </button>
             </div>
-          ))
-        ) : (
+          ))}
+        </>) : (
           <Empty
             title="Todo en orden"
             description="No hay alertas de stock bajo."
