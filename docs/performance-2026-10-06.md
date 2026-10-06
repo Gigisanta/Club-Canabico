@@ -1,5 +1,7 @@
 # Optimización de Bombo — 6 de octubre de 2026
 
+Este documento registra el ensayo local inicial. La corrección del informe, la migración, el CI completo y las mediciones posteriores del dominio están en [production-release-2026-10-06.md](production-release-2026-10-06.md).
+
 Trabajo local sobre el checkout `/Users/gigi/.codex/worktrees/bombo-ui-feedback/bombo`, basado en `a916ed9104a56314020e8c47bbe4ba2251c7396d`. Conserva las mejoras previas de interfaz y los flujos documentados para Tiziano. No publica una versión, habilita el sistema real ni modifica la base de producción.
 
 ## Evidencia del problema publicado
