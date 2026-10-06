@@ -67,8 +67,52 @@ const Finance = lazy(() => import("./Finance"));
 const ActivateAccess = lazy(() => import("./ActivateAccess"));
 const ShowcaseAdmin = lazy(() => import("./ShowcaseAdmin"));
 const InquiriesAdmin = lazy(() => import("./InquiriesAdmin"));
-const loadOperationsConsole = () => import("./OperationsConsole");
-const OperationsConsole = lazy(loadOperationsConsole);
+type OperationsConsoleModule = typeof import("./OperationsConsole");
+type OperationsConsoleProps = Parameters<OperationsConsoleModule["default"]>[0];
+let operationsConsoleModule: OperationsConsoleModule | undefined;
+let operationsConsolePromise: Promise<OperationsConsoleModule> | undefined;
+
+function loadOperationsConsole() {
+  if (operationsConsoleModule) return Promise.resolve(operationsConsoleModule);
+  if (!operationsConsolePromise) {
+    operationsConsolePromise = import("./OperationsConsole")
+      .then((module) => {
+        operationsConsoleModule = module;
+        return module;
+      })
+      .catch((error: unknown) => {
+        operationsConsolePromise = undefined;
+        throw error;
+      });
+  }
+  return operationsConsolePromise;
+}
+
+function OperationsConsole(props: OperationsConsoleProps) {
+  const [module, setModule] = useState(() => operationsConsoleModule);
+  const [failure, setFailure] = useState<{ cause: unknown } | null>(null);
+
+  useEffect(() => {
+    if (module) return;
+    let active = true;
+    void loadOperationsConsole().then(
+      (loaded) => {
+        if (active) setModule(loaded);
+      },
+      (cause: unknown) => {
+        if (active) setFailure({ cause });
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [module]);
+
+  if (failure) throw failure.cause;
+  if (!module) return <div className="boot"><Brand />Abriendo operación…</div>;
+  const LoadedConsole = module.default;
+  return <LoadedConsole {...props} />;
+}
 const DeliveryEntry = lazy(() => import("./DeliveryEntry"));
 function Login({
   onLogin,
