@@ -8,6 +8,8 @@ La consulta del resumen de contribución con fechas válidas devolvía `400 INVA
 
 Un `401` en cualquier lectura o comando de la consola invalida inmediatamente el contexto, cierra la acción y elimina los avisos anteriores. Un `403` de una acción concreta conserva la sesión, y un fallo de red o del servidor sigue siendo recuperable. El recorrido de navegador reprodujo el defecto antes del cambio: el GET de catálogo respondió `401` real y la consola anterior quedó visible.
 
+La resolución transitiva de compilación `source-map-js` pasa de 1.2.1 a 1.2.2 para corregir GHSA-68fv-2mgg-jv7q. El cambio afecta sólo su entrada del lockfile, dentro del rango compatible de PostCSS; no actualiza el framework ni la base. `npm audit` queda sin hallazgos.
+
 ## Base y recuperación de esta entrega
 
 El preflight autenticado encontró PostgreSQL 18.6, 31 migraciones completas y cero pedidos. Sólo estaba pendiente `202610060001_operation_order_confirmed_at_lookup`. Antes de aplicarla se creó un `pg_dump` cifrado con AES-256-GCM y clave independiente, se restauró en una base local aislada y se comparó el estado. La base de ensayo se eliminó tras la comprobación. El índice quedó presente, listo y válido, y la migración terminó correctamente.
