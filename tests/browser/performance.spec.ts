@@ -162,29 +162,26 @@ test("a revoked session's real 401 removes operational context", async ({ page }
   expect(logout.status()).toBe(200);
   expect((await logout.json()).ok).toBe(true);
 
-  let rejectedStatus = 403;
   const rejectOperations = (route: import("@playwright/test").Route) => route.fulfill({
-    status: rejectedStatus,
+    status: 403,
     contentType: "application/json",
-    body: JSON.stringify({ error: rejectedStatus === 403 ? "El alcance no permite consultar este recurso." : "Iniciá sesión para continuar." }),
+    body: JSON.stringify({ error: "El alcance no permite consultar este recurso." }),
   });
   await page.route("**/api/operations/**", rejectOperations);
-  const scopedCatalog = page.waitForResponse(response =>
-    new URL(response.url()).pathname === "/api/operations/catalog" && response.request().method() === "GET",
+  const scopedTasks = page.waitForResponse(response =>
+    new URL(response.url()).pathname === "/api/operations/tasks" && response.request().method() === "GET",
   );
-  await page.getByRole("button", { name: "Catálogo y stock", exact: true }).click();
-  expect((await scopedCatalog).status()).toBe(403);
+  await page.getByRole("button", { name: "Tareas", exact: true }).click();
+  expect((await scopedTasks).status()).toBe(403);
   await expect(page.locator(".ops-console")).toBeVisible();
   await expect(page.locator(".ops-page-body").getByRole("alert")).toContainText("El alcance no permite consultar este recurso.");
 
-  rejectedStatus = 401;
   await page.unroute("**/api/operations/**", rejectOperations);
-  const rejectedCatalog = page.waitForResponse(response =>
-    new URL(response.url()).pathname === "/api/operations/catalog" && response.request().method() === "GET",
+  const rejectedTasks = page.waitForResponse(response =>
+    new URL(response.url()).pathname === "/api/operations/tasks" && response.request().method() === "GET",
   );
   await page.locator(".ops-page-body").getByRole("button", { name: "Reintentar", exact: true }).click();
-  const rejected = await rejectedCatalog;
-  expect(rejected.status()).toBe(401);
+  expect((await rejectedTasks).status()).toBe(401);
   await expect(page.locator(".ops-console")).toHaveCount(0);
   await expect(page.getByRole("alert")).toContainText("Iniciá sesión para continuar");
   await expect(page.getByRole("button", { name: "Reintentar", exact: true })).toBeVisible();
