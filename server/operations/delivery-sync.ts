@@ -50,22 +50,24 @@ deliverySyncRoutes.get("/manifests/current",async(req,res)=>{
  if(!device||device.userId!==req.user.id||device.revokedAt)throw new OperationError(403,"DEVICE_SCOPE","Dispositivo no autorizado");
  if(!device.storageCertified||!device.storageCertifiedAt)throw new OperationError(423,"DEVICE_NOT_CERTIFIED","El dispositivo requiere prueba de almacenamiento y reinicio");
  const assignments=await db.deliveryAssignment.findMany({where:{driverId:req.user.id,status:{in:["assigned","dispatched","partially_delivered"]}},orderBy:[{routeId:"asc"},{stopSequence:"asc"}]});
- const now=new Date(),ids=assignments.map(a=>a.id),orderIds=[...new Set(assignments.map(a=>a.orderId))];
+ const now=new Date(),ids=assignments.map(a=>a.id),orderIds=[...new Set(assignments.map(a=>a.orderId))],routeIds=[...new Set(assignments.flatMap(a=>a.routeId?[a.routeId]:[]))];
  const orders=await db.operationOrder.findMany({where:{id:{in:orderIds}},include:{lines:true}});
  const orderById=new Map(orders.map(order=>[order.id,order]));
  if(orderById.size!==orderIds.length)throw new OperationError(409,"DELIVERY_ORDER_PENDING","Una entrega asignada no tiene un pedido disponible");
  const memberIds=[...new Set(orders.map(order=>order.memberId))];
  const skuIds=[...new Set(orders.flatMap(order=>order.lines.map(line=>line.skuId)))];
  const civilToday=new Intl.DateTimeFormat("en-CA",{timeZone:"America/Argentina/Buenos_Aires"}).format(now);
- const [versions,members,skus,documents,permissions]=await Promise.all([
+ const [versions,members,skus,documents,permissions,routes]=await Promise.all([
   db.operationObject.findMany({where:{id:{in:ids}}}),
   db.operationMember.findMany({where:{id:{in:memberIds}},select:{id:true,name:true,phone:true}}),
   db.catalogSku.findMany({where:{id:{in:skuIds}},select:{id:true,name:true}}),
   db.operationDocument.findMany({where:{deliveryId:{in:ids},sensitivity:{not:"clinical"},state:"available"},select:{id:true,deliveryId:true,kind:true,sensitivity:true,state:true,validUntil:true,checksum:true,objectVersion:true,mediaType:true,bytes:true}}),
   db.memberPermission.findMany({where:{memberId:{in:memberIds},kind:"operations",status:"verified",validFrom:{lte:civilToday},validUntil:{gte:civilToday}},select:{memberId:true,validUntil:true}}),
+  db.deliveryRoute.findMany({where:{id:{in:routeIds},driverId:req.user.id},select:{id:true,shiftDate:true}}),
  ]);
  const memberById=new Map(members.map(member=>[member.id,member]));
  const skuNameById=new Map(skus.map(sku=>[sku.id,sku.name]));
+ const routeById=new Map(routes.map(route=>[route.id,route]));
  const latestPermissionEndByMember=new Map<string,string>();
  for(const permission of permissions){
   if(!permission.validUntil)continue;
@@ -108,8 +110,9 @@ deliverySyncRoutes.get("/manifests/current",async(req,res)=>{
  }
  const payload=assignments.map(a=>{
   const order=orderById.get(a.orderId)!;const member=memberById.get(order.memberId)!;
+  const route=a.routeId?routeById.get(a.routeId):undefined;
   const lines=order.lines.map(line=>{const name=skuNameById.get(line.skuId);if(!name)throw new OperationError(409,"DELIVERY_CATALOG_PENDING","Un pedido asignado contiene un artículo sin nombre de catálogo");const remaining=line.prepared.sub(line.delivered);return {id:line.id,skuId:line.skuId,name,unit:line.unit,requested:line.requested.toString(),prepared:line.prepared.toString(),delivered:line.delivered.toString(),remaining:remaining.gt(0)?remaining.toString():"0",actualQuantity:line.prepared.toString()};});
-  return {id:a.id,orderId:order.id,version:versionById.get(a.id)??0,customerName:member.name,contact:member.phone,address:a.address,window:[a.windowStart,a.windowEnd].filter(Boolean).join(" – "),lines,documents:docsByAssignment.get(a.id)??[],totalMinor:order.totalMinor.toString(),verifiedMinor:order.verifiedMinor.toString(),currency:order.currency};
+  return {id:a.id,orderId:order.id,version:versionById.get(a.id)??0,customerName:member.name,contact:member.phone,address:a.address,window:[a.windowStart,a.windowEnd].filter(Boolean).join(" – "),...(route?{route:{date:route.shiftDate,stop:a.stopSequence+1,...(a.eta?{eta:a.eta}:{}),etaIsEstimate:a.etaIsEstimate}}:{}),lines,documents:docsByAssignment.get(a.id)??[],totalMinor:order.totalMinor.toString(),verifiedMinor:order.verifiedMinor.toString(),currency:order.currency};
  });
  const authority=await db.operationAuthority.findUnique({where:{id:"operations"}});
  const lease=await db.offlineLease.create({data:{userId:req.user.id,deviceId,sessionId:req.sessionId,authorizationEpoch:req.user.authorizationEpoch,authorityEpoch:authority?.epoch??1,assignments:json(ids),expiresAt}});

@@ -69,7 +69,10 @@ body { background: var(--canvas); color: var(--text); }
 ::selection { background: var(--brand-lime); color: var(--brand-olive); }
 button, input, select, textarea { font-family: inherit; }
 button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
-button:not(:disabled), a { transition: background-color var(--motion-fast) ease, color var(--motion-fast) ease, border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, transform var(--motion-fast) ease; }
+button:not(:disabled), a { transition: background-color 130ms ease, color 130ms ease, border-color 130ms ease; }
+@media (prefers-reduced-motion: reduce) {
+  button:not(:disabled), a { transition: none; }
+}
 button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 3px; }
 .sidebar :is(button, a):focus-visible { outline-color: var(--brand-lime); }
 
@@ -84,7 +87,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .sidebar-close { display: none; }
 .sidebar nav > a { min-height: 46px; border-radius: 10px; }
 .sidebar nav > a.active { box-shadow: 0 9px 22px #1e241d38; }
-.sidebar nav > a:hover:not(.active) { transform: translateX(3px); }
 .club-switch { border-radius: 14px; min-height: 74px; }
 .club-switch strong { line-height: 1.2; }
 .nav-label { letter-spacing: .19em; }
@@ -115,7 +117,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 /* Primitives are deliberately graphic without changing their behaviour. */
 .button { min-height: 44px; border-radius: 10px; font-size: 13px; font-weight: 600; }
 .button.primary { background: var(--brand-olive); color: var(--brand-cream); border-color: var(--brand-olive); box-shadow: 0 9px 20px #3e402e22; }
-.button.primary:hover { background: #575d36; border-color: #575d36; box-shadow: 0 14px 26px #3e402e2a; transform: translateY(-2px); }
+.button.primary:hover { background: #575d36; border-color: #575d36; }
 .icon-button { min-width: 42px; min-height: 42px; border-radius: 11px; }
 .search-field, input, select, textarea { border-radius: 10px; }
 .search-field:focus-within { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
@@ -164,7 +166,7 @@ tbody tr:hover td { background: #eff1df; }
 .segmented { border-radius: 10px; }
 .segmented button { min-height: 34px; }
 .segmented button.active { box-shadow: 0 3px 9px #3e402e16; }
-.modal-overlay { background: #26281cbb; backdrop-filter: blur(7px); }
+.modal-overlay { background: #26281cbb; }
 .modal { border-radius: 20px; box-shadow: 0 38px 90px #26281c55; }
 .modal-head { padding-bottom: 13px; border-bottom: 1px solid var(--border); }
 .form-actions { padding-top: 18px; }
@@ -194,7 +196,6 @@ tbody tr:hover td { background: #eff1df; }
     background: #f6efddef;
     border-top: 1px solid #3e402e36;
     box-shadow: 0 -13px 35px #3e402e1a;
-    backdrop-filter: blur(18px);
   }
   .mobile-tabbar a, .mobile-tabbar button {
     position: relative;
@@ -224,10 +225,6 @@ tbody tr:hover td { background: #eff1df; }
 @media (max-width: 360px) {
   .mobile-tabbar a, .mobile-tabbar button { font-size: 13px; }
   .mobile-tabbar svg { width: 21px; height: 21px; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
 
 @media print {

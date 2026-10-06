@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { hasCapability, recordValue, textValue } from "./api";
 import { formatMinor } from "./money";
-import { EmptyState, InfoBand, LoadingState, SectionHeading, StatusTag } from "./Primitives";
+import { EmptyState, ErrorState, InfoBand, LoadingState, SectionHeading, StatusTag } from "./Primitives";
 import { useRemote } from "./useRemote";
 import type { WorkspaceProps } from "./WorkspaceProps";
 
@@ -44,6 +45,12 @@ function moneyLabel(minor: bigint | null, currency: unknown): string {
 
 function todayInClub(): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires" }).format(new Date());
+}
+
+function sectionTarget(searchParams: URLSearchParams, section: string) {
+  const next = new URLSearchParams(searchParams);
+  next.set("section", section);
+  return { search: `?${next.toString()}` };
 }
 
 function shortDate(value: string): string {
@@ -142,17 +149,28 @@ function percentage(actual: bigint, target: bigint): { label: string; width: num
   return { label, width: Number(bounded) / 100 };
 }
 
-function BusinessCard({ title, subtitle, children, loading, error, retry }: {
+function BusinessCard({ title, subtitle, children, action, permitted, accessMessage, hasData, loading, error, retry }: {
   title: string;
   subtitle: string;
   children: ReactNode;
+  action?: ReactNode;
+  permitted: boolean;
+  accessMessage: string;
+  hasData: boolean;
   loading: boolean;
   error: string;
   retry: () => void;
 }) {
   return <section className="ops-sheet ops-home-card">
-    <div className="ops-sheet-head"><div><span className="ops-kicker">{subtitle}</span><h3>{title}</h3></div></div>
-    {loading ? <LoadingState label="Actualizando…" /> : error ? <div className="ops-home-unavailable"><span>No disponible con el alcance actual.</span><button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={retry}>Reintentar</button></div> : children}
+    <div className="ops-sheet-head"><div><span className="ops-kicker">{subtitle}</span><h3>{title}</h3></div>{action && <div className="ops-home-card-action">{action}</div>}</div>
+    {!permitted ? <p className="ops-home-muted">{accessMessage}</p>
+      : loading && !hasData ? <LoadingState label="Cargando esta sección…" />
+        : error && !hasData ? <ErrorState message={`No se pudo cargar esta sección. ${error}`} retry={retry} />
+          : <>
+            {loading && <p className="ops-home-muted" role="status">Actualizando. Se mantienen visibles los últimos datos recibidos.</p>}
+            {error && <ErrorState message={`${error} Se conservan los últimos datos recibidos; podrían no reflejar cambios posteriores.`} retry={retry} />}
+            {children}
+          </>}
   </section>;
 }
 
@@ -164,11 +182,24 @@ function methodLabel(value: unknown): string {
 }
 
 export function HomeWorkspace({ context, refreshKey, onRefresh }: WorkspaceProps) {
+  const [searchParams] = useSearchParams();
   const today = todayInClub();
   const monthStart = `${today.slice(0, 7)}-01`;
   const canFinance = hasCapability(context, "finance.read");
   const canStock = hasCapability(context, "stock.read");
-  const contribution = useRemote<Row>(canFinance && hasCapability(context, "reports.read")
+  const canReadContribution = canFinance && hasCapability(context, "reports.read");
+  const hasOverviewAccess = canFinance || canStock;
+  const taskShortcuts = [
+    ...(hasCapability(context, "members.read") ? [{ section: "members", title: "Socios", detail: "Consultar socios dentro del alcance del perfil." }] : []),
+    ...(["documents.read", "documents.write", "permissions.verify"].some(capability => hasCapability(context, capability))
+      ? [{ section: "permissions", title: "Permisos y documentos", detail: "Revisar la documentación y los permisos disponibles." }]
+      : []),
+    ...(["operations.read", "tasks.write"].some(capability => hasCapability(context, capability))
+      ? [{ section: "tasks", title: "Tareas", detail: "Consultar las tareas operativas habilitadas para el perfil." }]
+      : []),
+  ];
+  const businessCardCount = (canFinance ? 3 : 0) + (canStock ? 1 : 0);
+  const contribution = useRemote<Row>(canReadContribution
     ? `/api/reports/operations/summary?area=product-contribution&from=${monthStart}&to=${today}`
     : null, refreshKey);
   const configurations = useRemote<Row>(canFinance || canStock ? "/api/operations/configuration" : null, refreshKey);
@@ -244,33 +275,49 @@ export function HomeWorkspace({ context, refreshKey, onRefresh }: WorkspaceProps
   const stockRulesKnown = configurations.data !== null && configurationRows.some(row => row.kind === "stock_thresholds" && validToday(row, today));
 
   return <div className="ops-page-body ops-home-page">
-    <SectionHeading eyebrow="Inicio · hoy" title="El negocio, hoy" detail={`Mes a la fecha · ${shortDate(monthStart)} al ${shortDate(today)}`} action={<button type="button" className="ops-button ops-button-quiet" onClick={onRefresh}>Actualizar</button>} />
-    {context.rehearsal && <InfoBand tone="info" title="Ensayo habilitado · datos sintéticos"><p>Este recorrido se realiza con información de ensayo y no afecta la operación real.</p></InfoBand>}
-    {!context.rehearsal && context.authority.mode !== "active" && <InfoBand tone="warning" title="Operación en revisión"><p>El resumen está disponible para consulta mientras se prepara la habilitación de cambios.</p></InfoBand>}
-
-    <section className="ops-sheet ops-home-contribution">
+    <SectionHeading eyebrow="Inicio · hoy" title={canFinance ? "El negocio, hoy" : canStock ? "Stock disponible" : "Tus secciones disponibles"} detail={canFinance ? `Mes a la fecha · ${shortDate(monthStart)} al ${shortDate(today)}` : canStock ? "Revisá la disponibilidad y los mínimos vigentes." : "Abrí una sección habilitada para tu perfil."} action={hasOverviewAccess ? <button type="button" className="ops-button ops-button-quiet" onClick={onRefresh}>Actualizar</button> : undefined} />
+    {!hasOverviewAccess && <section className="ops-sheet ops-home-task-section">
+      <div className="ops-sheet-head"><div><span className="ops-kicker">Accesos disponibles</span><h3>Continuá con una tarea permitida</h3></div></div>
+      {taskShortcuts.length > 0 ? <div className="ops-home-task-grid">{taskShortcuts.map(shortcut => <Link className="ops-home-task-link" key={shortcut.section} to={sectionTarget(searchParams, shortcut.section)}><strong>{shortcut.title}</strong><span>{shortcut.detail}</span></Link>)}</div>
+        : <EmptyState title="Sin accesos directos disponibles" detail="Las secciones habilitadas para tu perfil aparecen en la navegación." />}
+    </section>}
+    {canReadContribution && <section className="ops-sheet ops-home-contribution">
       <div className="ops-home-contribution-head"><div><span className="ops-kicker">Resultado del mes · antes de costos fijos</span><h3>Contribución frente al objetivo</h3><p>Importes por moneda. El avance se muestra junto con la cobertura de ventas y costos por lote.</p></div>
-        {!canFinance || !hasCapability(context, "reports.read") ? <StatusTag tone="warn">Sin vista financiera</StatusTag> : contribution.loading ? <StatusTag>Actualizando</StatusTag> : contribution.error ? <StatusTag tone="warn">No disponible</StatusTag> : coverageReady ? <StatusTag tone="good">Período conciliado</StatusTag> : managementArithmeticComplete ? <StatusTag tone="warn">Observado · sin conciliar</StatusTag> : <StatusTag tone="warn">Contribución desconocida</StatusTag>}
+        <div className="ops-home-contribution-actions">
+          {contribution.loading ? <StatusTag>Actualizando</StatusTag> : contribution.error || configurations.error ? <StatusTag tone="warn">Actualización fallida</StatusTag> : coverageReady ? <StatusTag tone="good">Período conciliado</StatusTag> : managementArithmeticComplete ? <StatusTag tone="warn">Observado · sin conciliar</StatusTag> : <StatusTag tone="warn">Contribución desconocida</StatusTag>}
+          <Link className="ops-link ops-home-card-link" to={sectionTarget(searchParams, "reports")}>Ver informe</Link>
+        </div>
       </div>
-      {!canFinance || !hasCapability(context, "reports.read") ? <p className="ops-home-muted">La contribución y su objetivo no están visibles con el perfil actual.</p>
-        : contribution.loading ? <LoadingState label="Calculando contribución…" />
-          : contribution.error ? <p className="ops-home-muted">No se pudo obtener el resultado del mes con el alcance actual.</p>
-            : contributionBuckets.length === 0 ? <EmptyState title="Contribución desconocida" detail={pendingCostCount !== null && pendingCostCount > 0 ? `${pendingCostCount} obligaciones esperan verificación, período de devengamiento o clasificación de costo.` : "El período no aporta un importe de gestión con cobertura suficiente para mostrarlo."} />
-              : <div className="ops-home-goals">{contributionBuckets.map((bucket, index) => {
+      {configurations.error && <ErrorState message={configurations.data === null
+        ? `No se pudieron consultar los objetivos vigentes. ${configurations.error}`
+        : `${configurations.error} Se conservan los últimos objetivos recibidos; podrían no reflejar cambios posteriores.`} retry={configurations.retry} />}
+      {contribution.loading && contribution.data === null ? <LoadingState label="Calculando contribución…" />
+          : contribution.error && contribution.data === null ? <ErrorState message={`No se pudo obtener la contribución del período. ${contribution.error}`} retry={contribution.retry} />
+            : <>
+              {contribution.loading && <p className="ops-home-muted" role="status">Actualizando. Se mantienen visibles los últimos datos recibidos.</p>}
+              {contribution.error && <ErrorState message={`${contribution.error} Se conservan los últimos datos recibidos; podrían no reflejar cambios posteriores.`} retry={contribution.retry} />}
+              {contributionBuckets.length === 0
+                ? <EmptyState title="Contribución desconocida" detail={pendingCostCount !== null && pendingCostCount > 0 ? `${pendingCostCount} obligaciones esperan verificación, período de devengamiento o clasificación de costo.` : "El período no aporta un importe de gestión con cobertura suficiente para mostrarlo."} />
+                : <div className="ops-home-goals">{contributionBuckets.map((bucket, index) => {
                 const target = bucket.currency ? objectivesByCurrency.get(bucket.currency) : undefined;
                 const actual = bucket.minor;
                 const progress = target === undefined || actual === null ? null : percentage(actual, target);
                 const canShowProgress = coverageReady && progress !== null;
+                const targetLabel = target !== undefined ? moneyLabel(target, bucket.currency)
+                  : configurations.data === null && configurations.loading ? "Consultando objetivo…"
+                    : configurations.data === null && configurations.error ? "Objetivo no disponible"
+                      : "Sin objetivo aprobado";
                 return <article className="ops-home-goal" key={`${bucket.currency ?? "unknown"}-${index}`}>
-                  <div className="ops-home-goal-values"><div><span>{actual === null ? "Contribución" : "Contribución de gestión observada"}</span><strong>{actual === null ? "Contribución desconocida" : moneyLabel(actual, bucket.currency)}</strong></div><div><span>Objetivo mensual</span><strong>{target === undefined ? "Sin objetivo aprobado" : moneyLabel(target, bucket.currency)}</strong></div></div>
+                  <div className="ops-home-goal-values"><div><span>{actual === null ? "Contribución" : "Contribución de gestión observada"}</span><strong>{actual === null ? "Contribución desconocida" : moneyLabel(actual, bucket.currency)}</strong></div><div><span>Objetivo mensual</span><strong>{targetLabel}</strong></div></div>
                   {target !== undefined && <div className="ops-home-progress-wrap">
                     {canShowProgress && progress ? <><div className="ops-home-progress-label"><span>Avance observado</span><strong>{progress.label}</strong></div><div className="ops-home-progress" role="progressbar" aria-label={`Avance del objetivo ${bucket.currency}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.width}><span style={{ width: `${progress.width}%` }} /></div></>
                       : <p className="ops-home-muted">El objetivo no muestra avance mientras la contribución, los costos clasificados y la conciliación del período sigan incompletos.</p>}
                   </div>}
                 </article>;
               })}</div>}
+            </>}
       <div className="ops-home-coverage">
-        {soldLines !== null ? <span>{allocatedLines ?? 0} de {soldLines} líneas vendidas con costo por lote</span> : <span>Cobertura de líneas por lote sin dato</span>}
+        {soldLines !== null && allocatedLines !== null ? <span>{allocatedLines} de {soldLines} líneas vendidas con costo por lote</span> : soldLines !== null ? <span>{soldLines} líneas vendidas; cobertura de costo por lote sin dato</span> : <span>Cobertura de líneas por lote sin dato</span>}
         {missingAllocations !== null && missingAllocations > 0 && <StatusTag tone="warn">{missingAllocations} sin asignación</StatusTag>}
         {pendingCostCount !== null && pendingCostCount > 0 && <StatusTag tone="warn">{pendingCostCount} obligaciones sin clasificación completa</StatusTag>}
         {classifiedCostCount !== null && costQueryComplete && <span>{classifiedCostCount} costos clasificados por período</span>}
@@ -279,10 +326,11 @@ export function HomeWorkspace({ context, refreshKey, onRefresh }: WorkspaceProps
         {!sourcePeriodAttested && <span>Período de origen sin conciliación documental</span>}
         {reportCoverage.some(row => row.state === "unverified") && <span>Fuentes sin conciliación documental</span>}
       </div>
-    </section>
+    </section>}
 
-    <div className="ops-home-business-grid">
-      <BusinessCard title="Cobros por verificar" subtitle="Ingresos" loading={collections.loading} error={canFinance ? collections.error : "no-finance"} retry={collections.retry}>
+    {businessCardCount > 0 && <div className={`ops-home-business-grid${businessCardCount === 1 ? " ops-home-business-grid-single" : ""}`}>
+      {canFinance && <>
+      <BusinessCard title="Cobros por verificar" subtitle="Ingresos" action={canFinance && <Link className="ops-link ops-home-card-link" to={sectionTarget(searchParams, "collections")}>Ver cobros</Link>} permitted={canFinance} accessMessage="El perfil actual no tiene acceso de lectura financiera a esta información." hasData={collections.data !== null} loading={collections.loading} error={collections.error} retry={collections.retry}>
         {collectionRows.length === 0 ? <EmptyState title="Todo al día" detail="No hay cobros informados pendientes de verificación." /> : <>
           <div className="ops-home-card-total"><strong>{recordValue(collections.data,"hasMore") === true ? "Más de " : ""}{collectionRows.length}</strong><span>cobros informados</span></div>
           <div className="ops-home-currency-lines">{[...groupedCollections].map(([currency, minor]) => <span key={currency}>{moneyLabel(minor, currency)}</span>)}</div>
@@ -290,7 +338,7 @@ export function HomeWorkspace({ context, refreshKey, onRefresh }: WorkspaceProps
         </>}
       </BusinessCard>
 
-      <BusinessCard title="Próximos pagos" subtitle="Compromisos" loading={payables.loading} error={canFinance ? payables.error : "no-finance"} retry={payables.retry}>
+      <BusinessCard title="Próximos pagos" subtitle="Compromisos" action={canFinance && <Link className="ops-link ops-home-card-link" to={sectionTarget(searchParams, "payables")}>Ver obligaciones</Link>} permitted={canFinance} accessMessage="El perfil actual no tiene acceso de lectura financiera a esta información." hasData={payables.data !== null} loading={payables.loading} error={payables.error} retry={payables.retry}>
         {payableRows.length === 0 ? <EmptyState title="Sin pagos próximos visibles" detail="Las obligaciones verificadas y pendientes aparecerán acá." /> : <ul className="ops-home-list ops-home-payables">{payableRows.map(({ row, remaining }, index) => {
           const dueDate = textValue(row.dueDate, "");
           const overdue = dueDate < today;
@@ -299,21 +347,22 @@ export function HomeWorkspace({ context, refreshKey, onRefresh }: WorkspaceProps
         })}</ul>}
       </BusinessCard>
 
-      <BusinessCard title="Efectivo en custodia" subtitle="Rendición" loading={accounts.loading} error={canFinance ? accounts.error : "no-finance"} retry={accounts.retry}>
+      <BusinessCard title="Efectivo en custodia" subtitle="Rendición" action={canFinance && <Link className="ops-link ops-home-card-link" to={sectionTarget(searchParams, "accounts")}>Ver cuentas</Link>} permitted={canFinance} accessMessage="El perfil actual no tiene acceso de lectura financiera a esta información." hasData={accounts.data !== null} loading={accounts.loading} error={accounts.error} retry={accounts.retry}>
         {custodyRows.length === 0 ? <EmptyState title="Sin efectivo en custodia" detail="No hay cuentas de custodia visibles para este perfil." /> : <>
           <div className="ops-home-currency-lines">{[...custodyBalances].map(([currency, minor]) => <span key={currency}>{moneyLabel(minor, currency)}</span>)}</div>
           {unknownCustodyCount > 0 && <p className="ops-home-muted">{unknownCustodyCount} cuenta(s) sin saldo de apertura conciliado.</p>}
           <ul className="ops-home-list">{custodyRows.slice(0, 4).map((row, index) => <li key={textValue(row.id, String(index))}><div><strong>{textValue(row.name, "Cuenta de custodia")}</strong><span>{textValue(row.currency, "Moneda desconocida")}</span></div><b>{moneyLabel(rawMoney(row.balanceMinor), row.currency)}</b></li>)}</ul>
         </>}
       </BusinessCard>
+      </>}
 
-      <BusinessCard title="Faltantes" subtitle="Stock disponible" loading={catalog.loading || configurations.loading} error={canStock ? catalog.error || configurations.error : "no-stock"} retry={() => { catalog.retry(); configurations.retry(); }}>
+      {canStock && <BusinessCard title="Faltantes" subtitle="Stock disponible" action={<Link className="ops-link ops-home-card-link" to={sectionTarget(searchParams, "catalog")}>Abrir catálogo</Link>} permitted={canStock} accessMessage="El perfil actual no tiene acceso de lectura al catálogo y su disponibilidad." hasData={catalog.data !== null && configurations.data !== null} loading={catalog.loading || configurations.loading} error={catalog.error || configurations.error} retry={() => { catalog.retry(); configurations.retry(); }}>
         {!stockRulesKnown ? <EmptyState title="Sin mínimos aprobados" detail="No hay reglas vigentes para identificar faltantes por categoría." />
           : shortages === null ? <EmptyState title="Stock en revisión" detail="No se pudo determinar la cobertura de los mínimos visibles." />
             : shortages.length === 0 ? <EmptyState title="Sin faltantes por mínimo" detail="El stock visible y habilitado alcanza los mínimos vigentes por categoría." />
               : <ul className="ops-home-list ops-home-shortages">{shortages.slice(0, 5).map((shortage, index) => <li key={`${shortage.category}-${shortage.unit}-${index}`}><div><strong>{shortage.category}</strong><span>{shortage.detail}</span></div><StatusTag tone="warn">Reponer</StatusTag></li>)}</ul>}
-      </BusinessCard>
-    </div>
+      </BusinessCard>}
+    </div>}
   </div>;
 }
 

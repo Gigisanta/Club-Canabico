@@ -107,6 +107,7 @@ registerCommand("RouteCreated",{kind:"route",capability:"logistics.write",create
 registerCommand("DeliveryAssigned",{kind:"delivery",capability:"logistics.write",schema:z.strictObject({routeId:objectId,driverId:objectId,stopSequence:z.number().int().min(0),windowStart:z.string().max(80).optional(),windowEnd:z.string().max(80).optional(),eta:z.string().max(100).optional(),evidence}),execute:async ctx=>{
  const v=ctx.envelope.data as {routeId:string;driverId:string;stopSequence:number;windowStart?:string;windowEnd?:string;eta?:string};
  const d=await ctx.tx.deliveryAssignment.findUniqueOrThrow({where:{id:ctx.envelope.targetId}}),r=await ctx.tx.deliveryRoute.findUniqueOrThrow({where:{id:v.routeId}});
+ if(r.status!=="planned"||r.closedWithPending)throw new OperationError(409,"DELIVERY_ROUTE_STATE","Sólo se pueden asignar entregas a una ruta programada y abierta");
  if(r.driverId!==v.driverId||!["pending","assigned"].includes(d.status))throw new OperationError(409,"DELIVERY_ASSIGNMENT_STATE","La ruta o entrega no permite la asignación");
  await audit(ctx,"delivery.assignment_evidence",{evidence:ctx.envelope.data.evidence});
  return {delivery:await ctx.tx.deliveryAssignment.update({where:{id:d.id},data:{routeId:v.routeId,driverId:v.driverId,stopSequence:v.stopSequence,windowStart:v.windowStart,windowEnd:v.windowEnd,eta:v.eta,status:"assigned",etaIsEstimate:true}})};
@@ -142,6 +143,8 @@ registerCommand("DeliveryIncident",{kind:"delivery",capability:"delivery.report"
  return {delivery:await ctx.tx.deliveryAssignment.update({where:{id:d.id},data:{incidents:json([...incidents,{...ctx.envelope.data,requestId:ctx.envelope.requestId,actorId:ctx.actor.id,reportedAt:ctx.now.toISOString(),occurredAt:ctx.envelope.occurredAt}])}})};
 }});
 registerCommand("RouteReordered",{kind:"route",capability:"logistics.write",schema:z.strictObject({deliveryIds:z.array(objectId).min(1).max(500),evidence}),execute:async ctx=>{
+ const route=await ctx.tx.deliveryRoute.findUniqueOrThrow({where:{id:ctx.envelope.targetId}});
+ if(route.status!=="planned"||route.closedWithPending)throw new OperationError(409,"ROUTE_REORDER_STATE","Sólo se pueden reordenar las paradas de una ruta programada y abierta");
  const ids=ctx.envelope.data.deliveryIds as string[];if(new Set(ids).size!==ids.length)throw new OperationError(400,"ROUTE_DUPLICATES","Paradas repetidas");
  const assigned=await ctx.tx.deliveryAssignment.findMany({where:{routeId:ctx.envelope.targetId,status:{not:"cancelled"}}});
  if(assigned.length!==ids.length||assigned.some(d=>!ids.includes(d.id)))throw new OperationError(422,"ROUTE_SCOPE","Incluí todas las paradas asignadas");

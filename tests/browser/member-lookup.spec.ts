@@ -24,12 +24,12 @@ test("new order can select a long-tail member through paged lookup and search", 
   await page.getByRole("group", { name: "Pedidos: acciones", exact: true }).getByRole("button", { name: "＋ Nuevo pedido", exact: true }).click();
   const dialog = page.getByRole("dialog");
   const member = dialog.getByRole("combobox", { name: "Socio", exact: true });
-  await expect(dialog.getByRole("searchbox", { name: "Buscar socio", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("searchbox", { name: "Buscar socio por nombre", exact: true })).toBeVisible();
   await expect(member.locator("option")).toHaveCount(101);
   await expect(member.locator(`option[value="${tailId}"]`)).toHaveCount(0);
   await dialog.getByRole("button", { name: "Cargar más opciones", exact: true }).click();
   await expect(member.locator(`option[value="${tailId}"]`)).toHaveText(tailName);
-  await dialog.getByRole("searchbox", { name: "Buscar socio", exact: true }).fill(tailName);
+  await dialog.getByRole("searchbox", { name: "Buscar socio por nombre", exact: true }).fill(tailName);
   await expect(member.locator("option")).toHaveCount(2);
   await member.selectOption(tailId);
   await dialog.getByLabel("Modalidad", { exact: true }).selectOption("local");

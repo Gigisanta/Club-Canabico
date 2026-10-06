@@ -1,0 +1,24 @@
+.form-fields {
+  display: contents;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.form-fields:disabled {
+  opacity: 1;
+}
+
+.form-error[tabindex="-1"] {
+  scroll-margin-block: 1rem;
+}
+
+.form-error[tabindex="-1"]:focus {
+  outline: 3px solid #a84e0d;
+  outline-offset: 2px;
+}
+
+.sales-checkout-content > form > .form-fields > .form-error {
+  margin-top: 10px;
+}

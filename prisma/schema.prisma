@@ -1146,6 +1146,7 @@ model OperationOrder {
   lines OperationOrderLine[]
   @@unique([sourceSystem, sourceId])
   @@index([commercialState, createdAt])
+  @@index([commercialState, confirmedAt])
   @@index([createdAt, id])
   @@index([memberId, createdAt])
 }

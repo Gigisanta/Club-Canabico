@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Tray } from "@phosphor-icons/react";
 
 export function SectionHeading({ eyebrow, title, detail, action }: { eyebrow?: string; title: string; detail?: string; action?: ReactNode }) {
   return (
@@ -22,7 +23,7 @@ export function ErrorState({ message, retry }: { message: string; retry?: () => 
 }
 
 export function EmptyState({ title, detail, action }: { title: string; detail: string; action?: ReactNode }) {
-  return <div className="ops-empty"><span aria-hidden="true">—</span><h3>{title}</h3><p>{detail}</p>{action}</div>;
+  return <div className="ops-empty"><span aria-hidden="true"><Tray size={26} weight="duotone" /></span><h3>{title}</h3><p>{detail}</p>{action}</div>;
 }
 
 export function StatusTag({ children, tone = "neutral" }: { children: ReactNode; tone?: "neutral" | "good" | "warn" | "bad" | "olive" }) {
@@ -34,7 +35,7 @@ export function InfoBand({ children, tone = "info", title }: { children: ReactNo
 }
 
 export function DataTable({ children, label }: { children: ReactNode; label: string }) {
-  return <div className="ops-table-scroll"><table className="ops-table"><caption className="sr-only">{label}</caption>{children}</table></div>;
+  return <div className="ops-table-scroll" role="region" aria-label={`${label}: tabla con desplazamiento horizontal`} tabIndex={0}><table className="ops-table"><caption className="sr-only">{label}</caption>{children}</table></div>;
 }
 
 export function ActionButton({ children, onClick, quiet = false, disabled = false, title }: { children: ReactNode; onClick: () => void; quiet?: boolean; disabled?: boolean; title?: string }) {
