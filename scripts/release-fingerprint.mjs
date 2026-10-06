@@ -30,5 +30,7 @@ if (process.argv.includes("--source-only")) process.stdout.write(sourceHash+"\n"
 else {
   await mkdir(join(root,"dist"),{recursive:true});
   await writeFile(join(root,"dist/release.json"),JSON.stringify({schemaVersion:1,sourceHash,buildNode:process.version,files:records.length})+"\n");
+  // Content digests identify build-time source changes without exposing file contents.
+  await writeFile(join(root,"dist/release-sources.json"),JSON.stringify({schemaVersion:1,sourceHash,sources:records})+"\n");
   process.stdout.write(`Release source fingerprint: ${sourceHash}\n`);
 }
