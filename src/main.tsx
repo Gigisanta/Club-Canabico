@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { Toaster } from "sonner";
 import { App } from "./App";
+import { LazyImportBoundary } from "./lazyboundary";
 import "./styles.css";
 import "./inventory.css";
 import "./design.css";
@@ -16,7 +17,7 @@ const PublicPreview = import.meta.env.DEV && import.meta.env.VITE_PUBLIC_SITE_PR
   ? React.lazy(() => import("./PublicSite").then(module => ({ default: module.PublicSite })))
   : null;
 const preview = PublicPreview
-  ? <React.Suspense fallback={<main aria-busy="true">Abriendo el club…</main>}><PublicPreview /></React.Suspense>
+  ? <LazyImportBoundary><React.Suspense fallback={<main aria-busy="true">Abriendo el club…</main>}><PublicPreview /></React.Suspense></LazyImportBoundary>
   : null;
 function LegacyAppRedirect() {
   const location = useLocation();

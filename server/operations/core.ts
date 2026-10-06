@@ -1,8 +1,9 @@
 import { Prisma, type User } from "@prisma/client";
 import { z } from "zod";
 import { db } from "../db.js";
-import { profileCapabilities, type Capability, type CommandEnvelope, type CommandResult } from "../../shared/operations/contracts.js";
+import { type Capability, type CommandEnvelope, type CommandResult } from "../../shared/operations/contracts.js";
 import { canonicalCommandBodyHash } from "./canonical.js";
+import { capabilitiesFromGrant } from "./access-snapshot.js";
 export class OperationError extends Error {
   constructor(public status: number, public code: string, message: string, public details?: unknown) { super(message); }
 }
@@ -44,9 +45,7 @@ export function json(value: unknown): Prisma.InputJsonValue {
 export function wire<T>(value: T): T { return JSON.parse(JSON.stringify(value, (_k, v) => typeof v === "bigint" ? v.toString() : v)); }
 export async function capabilities(tx: Tx, user: Pick<User,"id"|"role">): Promise<Capability[]> {
   const grant = await tx.operationAccess.findUnique({where:{userId:user.id}});
-  if (grant) return grant.enabled && Array.isArray(grant.capabilities) ? grant.capabilities as Capability[] : [];
-  // Legacy admin alone never grants clinical access or financial approval in the new circuit.
-  return profileCapabilities[user.role === "owner" ? "owner" : user.role === "cashier" ? "cashier" : user.role === "admin" ? "commercial" : "viewer"];
+  return capabilitiesFromGrant(user, grant);
 }
 export async function requireCapability(tx: Tx, actor: User, capability: Capability) {
   const current = await tx.user.findUnique({where:{id:actor.id}});

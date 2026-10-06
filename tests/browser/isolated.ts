@@ -1,5 +1,12 @@
 import { expect, test as base } from "@playwright/test";
 
+export function getIsolatedE2EPassword() {
+  const password = process.env.BOMBO_E2E_PASSWORD;
+  if (!password || password.length < 32)
+    throw new Error("La contraseña efímera del runner E2E no está disponible.");
+  return password;
+}
+
 const allowedOrigin = process.env.E2E_BASE_URL
   ? new URL(process.env.E2E_BASE_URL).origin
   : undefined;

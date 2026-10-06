@@ -11,13 +11,16 @@ import "./orders.js";
 import { memberHistory } from "./member-history.js";
 import { productHistory } from "./product-history.js";
 import { resolveStockAvailability } from "./stock-availability.js";
+import { buildOperationAccessSnapshot } from "./access-snapshot.js";
 export const operationsRoutes=Router();
 const areas:Record<string,string[]>={members:["member"],policies:["pricePolicy","pack","promotion"],packs:["pack"],promotions:["promotion"],tasks:["task"],accounts:["account","accountBootstrap","fx"],collections:["collection"],settlements:["rendition"],payables:["payable"],purchases:["purchase"],receipts:["receipt"],stock:["sku","stock","stockCount","lot"],orders:["order"],deliveries:["delivery"],routes:["route"],access:["access","device"],authority:["authority","cutover"],documents:["document","template"]};
 operationsRoutes.get("/context",async(req,res)=>{
- const caps=await capabilities(db,req.user);
- const grant=await db.operationAccess.findUnique({where:{userId:req.user.id}});
- const authority=await db.operationAuthority.findUnique({where:{id:"operations"}});
- res.json({userId:req.user.id,profile:grant?.profile??req.user.role,isOwner:req.user.role==="owner",capabilities:caps,rehearsal:process.env.DEMO_MODE==="true"||process.env.NODE_ENV==="test"||process.env.OPERATIONAL_REHEARSAL==="true",authority:{mode:authority?.mode??"shadow",epoch:authority?.epoch??1,firstRealWriteAt:authority?.firstRealWriteAt??null},timeZone:"America/Argentina/Buenos_Aires",commands:[...commandSpecs].filter(([,s])=>!s.internal&&caps.includes(s.capability)).map(([command,s])=>({command,kind:s.kind,create:Boolean(s.create)}))});
+ const [grant,authority]=await Promise.all([
+  db.operationAccess.findUnique({where:{userId:req.user.id}}),
+  db.operationAuthority.findUnique({where:{id:"operations"}}),
+ ]);
+ const snapshot=buildOperationAccessSnapshot(req.user,grant),caps=snapshot.capabilities;
+ res.json({userId:req.user.id,profile:snapshot.profile,isOwner:snapshot.isOwner,capabilities:caps,rehearsal:process.env.DEMO_MODE==="true"||process.env.NODE_ENV==="test"||process.env.OPERATIONAL_REHEARSAL==="true",authority:{mode:authority?.mode??"shadow",epoch:authority?.epoch??1,firstRealWriteAt:authority?.firstRealWriteAt??null},timeZone:"America/Argentina/Buenos_Aires",commands:[...commandSpecs].filter(([,s])=>!s.internal&&caps.includes(s.capability)).map(([command,s])=>({command,kind:s.kind,create:Boolean(s.create)}))});
 });
 operationsRoutes.post("/commands",async(req,res)=>{
  const envelope=envelopeSchema.parse(req.body);
@@ -142,6 +145,10 @@ operationsRoutes.get("/policies",async(req,res)=>{await requireCapability(db,req
 operationsRoutes.get("/tasks",async(req,res)=>{await requireCapability(db,req.user,"operations.read");const items=await db.operationTask.findMany({orderBy:{dueDate:"asc"},take:200});res.json(wire({items,versions:await versions(items.map(r=>r.id))}));});
 operationsRoutes.get("/accounts",async(req,res)=>{
  await requireCapability(db,req.user,"finance.read");const scope=await objectScope(db,req.user);const accounts=await db.operationAccount.findMany({where:{active:true,...(scope.accountIds?{id:{in:scope.accountIds}}:{})},orderBy:[{currency:"asc"},{name:"asc"}]});
+ // Bootstrap needs a global empty ledger of club accounts, including inactive
+ // accounts. A scoped empty list cannot prove that prerequisite. The command
+ // repeats this check transactionally before creating anything.
+ const accountBootstrapEligible=(await capabilities(db,req.user)).includes("accounts.write")&&scope.accountIds===undefined&&await db.operationAccount.count({where:{kind:{not:"custody"}}})===0;
  const ids=accounts.map(a=>a.id);
  const [sums,reconciliations]=await Promise.all([
    db.ledgerLeg.groupBy({by:["accountId"],where:{accountId:{in:ids}},_sum:{amountMinor:true}}),
@@ -149,7 +156,7 @@ operationsRoutes.get("/accounts",async(req,res)=>{
  ]);
  const sumById=new Map(sums.map(s=>[s.accountId,s._sum.amountMinor??0n])),reconciliationById=new Map(reconciliations.map(r=>[r.accountId,r]));
  const items=accounts.map(a=>({...a,balanceMinor:a.verified&&a.openingApprovedBy?sumById.get(a.id)??0n:null,coverage:a.verified&&a.openingApprovedBy?"approved_opening_and_events":"opening_pending",reconciliation:reconciliationById.get(a.id)??null}));
- res.json(wire({items,versions:await versions(ids),currenciesCombined:false}));
+ res.json(wire({items,versions:await versions(ids),currenciesCombined:false,accountBootstrapEligible}));
 });
 operationsRoutes.get("/accounts/:id/ledger",async(req,res)=>{
  await requireCapability(db,req.user,"finance.read");const id=String(req.params.id);await requireAccountScope(db,req.user,[id]);

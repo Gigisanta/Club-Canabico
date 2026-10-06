@@ -125,9 +125,11 @@ const auth: RequestHandler = async (req, res, next) => {
       algorithms: ["HS256"],
     });
     if (typeof payload === "string" || !payload.sub) throw new Error();
-    const user = await db.user.findUnique({ where: { id: payload.sub } });
+    const [user, record] = await Promise.all([
+      db.user.findUnique({ where: { id: payload.sub } }),
+      payload.sid ? db.operationSession.findUnique({where:{id:String(payload.sid)}}) : Promise.resolve(null),
+    ]);
     if (!user?.active || !payload.sid || payload.epoch !== user.authorizationEpoch) throw new Error();
-    const record = await db.operationSession.findUnique({where:{id:String(payload.sid)}});
     if(!record || record.userId!==user.id || record.revokedAt || record.expiresAt<=new Date() || record.authorizationEpoch!==user.authorizationEpoch) throw new Error();
     req.user = user;
     req.sessionId = record.id;
@@ -139,8 +141,10 @@ const auth: RequestHandler = async (req, res, next) => {
       try{
         const historical=jwt.verify(req.cookies.session||"",secret!,{algorithms:["HS256"],ignoreExpiration:true});
         if(typeof historical==="string"||!historical.sub||!historical.sid)throw new Error();
-        const record=await db.operationSession.findUnique({where:{id:String(historical.sid)}});
-        const user=await db.user.findUnique({where:{id:historical.sub}});
+        const [record,user]=await Promise.all([
+          db.operationSession.findUnique({where:{id:String(historical.sid)}}),
+          db.user.findUnique({where:{id:historical.sub}}),
+        ]);
         if(!record||!user||record.userId!==user.id||historical.epoch!==record.authorizationEpoch)throw new Error();
         req.user=user;req.sessionId=record.id;req.offlineArchiveOnly=true;return next();
       }catch{/* An unverifiable identity cannot archive evidence. */}

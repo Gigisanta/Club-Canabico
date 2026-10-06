@@ -14,11 +14,15 @@ dotenv.config({ path: resolve(projectRoot, ".env") });
 
 const activeChildren = new Set();
 let requestedSignal;
+let ephemeralDemoPassword;
 
 function redact(value) {
-  return String(value)
+  const sanitized = String(value)
     .replace(/\bpostgres(?:ql)?:\/\/[^\s"'`]+/gi, "[PostgreSQL URL redacted]")
     .replace(/\b(password|passwd|pwd)(\s*[=:]\s*)[^\s,;]+/gi, "$1$2[redacted]");
+  return ephemeralDemoPassword
+    ? sanitized.split(ephemeralDemoPassword).join("[redacted]")
+    : sanitized;
 }
 
 function onSignal(signal) {
@@ -225,6 +229,7 @@ async function main() {
   let adminClient;
   let schema;
   let schemaCreated = false;
+  ephemeralDemoPassword = randomBytes(32).toString("base64url");
   try {
     if (process.argv.slice(2).some(file => !/^tests\/browser\/[a-zA-Z0-9_-]+\.spec\.ts$/.test(file) || !existsSync(resolve(projectRoot, file))))
       throw new Error("El runner aislado sólo acepta archivos tests/browser/*.spec.ts; no admite overrides de Playwright.");
@@ -243,6 +248,8 @@ async function main() {
     delete childEnv.TEST_DATABASE_URL;
     delete childEnv.E2E_DATABASE_URL;
     delete childEnv.E2E_URL;
+    delete childEnv.BOMBO_E2E_ISOLATED;
+    delete childEnv.BOMBO_E2E_PASSWORD;
     childEnv.DATABASE_URL = databaseURL;
     childEnv.NODE_ENV = "development";
     childEnv.DEMO_MODE = "true";
@@ -259,7 +266,12 @@ async function main() {
     await runCommand("migrate", process.execPath, [prismaCLI, "migrate", "deploy"], childEnv);
 
     console.log("[e2e] Sembrando datos demo en el esquema desechable.");
-    await runCommand("seed", process.execPath, ["--import", "tsx", "prisma/seed.ts"], childEnv);
+    const seedEnv = {
+      ...childEnv,
+      BOMBO_E2E_ISOLATED: "1",
+      BOMBO_E2E_PASSWORD: ephemeralDemoPassword,
+    };
+    await runCommand("seed", process.execPath, ["--import", "tsx", "prisma/seed.ts"], seedEnv);
     await runCommand("operations-seed", process.execPath, ["--import", "tsx", "scripts/seed-operations-rehearsal.ts"], childEnv);
 
     const [apiPort, vitePort] = await Promise.all([freeLoopbackPort(), freeLoopbackPort()]);
@@ -270,12 +282,15 @@ async function main() {
     appEnv.VITE_PORT = String(vitePort);
     appEnv.ALLOWED_ORIGIN = baseURL;
     appEnv.BOMBO_E2E_ISOLATED = "1";
+    appEnv.BOMBO_E2E_PASSWORD = ephemeralDemoPassword;
     appEnv.E2E_BASE_URL = baseURL;
 
     const api = startChild("api", process.execPath, ["--import", "tsx", "server/index.ts"], appEnv);
     const viteCLI = resolve(projectRoot, "node_modules/vite/bin/vite.js");
     if (!existsSync(viteCLI)) throw new Error("No se encontró Vite instalado en node_modules.");
-    const vite = startChild("vite", process.execPath, [viteCLI, "--host", "127.0.0.1", "--port", String(vitePort), "--strictPort"], appEnv);
+    const viteEnv = { ...appEnv };
+    delete viteEnv.BOMBO_E2E_PASSWORD;
+    const vite = startChild("vite", process.execPath, [viteCLI, "--host", "127.0.0.1", "--port", String(vitePort), "--strictPort"], viteEnv);
     console.log("[e2e] Esperando API y Vite en puertos loopback temporales.");
     await Promise.all([
       waitForHTTP(api, `http://127.0.0.1:${apiPort}/api/health`, "API aislada"),
