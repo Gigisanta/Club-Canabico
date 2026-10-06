@@ -22,6 +22,8 @@ import {
   X,
   DotsThree,
   Tag,
+  Eye,
+  EyeSlash,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import {
@@ -37,6 +39,9 @@ import {
 } from "./lib";
 import { Avatar, Brand, Modal, Field, Form, Empty } from "./ui";
 import { canVisit, currentDestination, hubsForRole, searchDestinations } from "./navigation";
+import type { OperationsContext } from "./operations-ui/types";
+import { LazyImportBoundary } from "./lazyboundary";
+import "./login-controls.css";
 const Today = lazy(() => import("./Today"));
 const Dashboard = lazy(() => import("./Dashboard").then((m) => ({ default: m.Dashboard })));
 const DecisionCenter = lazy(() => import("./DecisionCenter"));
@@ -62,7 +67,52 @@ const Finance = lazy(() => import("./Finance"));
 const ActivateAccess = lazy(() => import("./ActivateAccess"));
 const ShowcaseAdmin = lazy(() => import("./ShowcaseAdmin"));
 const InquiriesAdmin = lazy(() => import("./InquiriesAdmin"));
-const OperationsConsole = lazy(() => import("./OperationsConsole"));
+type OperationsConsoleModule = typeof import("./OperationsConsole");
+type OperationsConsoleProps = Parameters<OperationsConsoleModule["default"]>[0];
+let operationsConsoleModule: OperationsConsoleModule | undefined;
+let operationsConsolePromise: Promise<OperationsConsoleModule> | undefined;
+
+function loadOperationsConsole() {
+  if (operationsConsoleModule) return Promise.resolve(operationsConsoleModule);
+  if (!operationsConsolePromise) {
+    operationsConsolePromise = import("./OperationsConsole")
+      .then((module) => {
+        operationsConsoleModule = module;
+        return module;
+      })
+      .catch((error: unknown) => {
+        operationsConsolePromise = undefined;
+        throw error;
+      });
+  }
+  return operationsConsolePromise;
+}
+
+function OperationsConsole(props: OperationsConsoleProps) {
+  const [module, setModule] = useState(() => operationsConsoleModule);
+  const [failure, setFailure] = useState<{ cause: unknown } | null>(null);
+
+  useEffect(() => {
+    if (module) return;
+    let active = true;
+    void loadOperationsConsole().then(
+      (loaded) => {
+        if (active) setModule(loaded);
+      },
+      (cause: unknown) => {
+        if (active) setFailure({ cause });
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [module]);
+
+  if (failure) throw failure.cause;
+  if (!module) return <div className="boot"><Brand />Abriendo operación…</div>;
+  const LoadedConsole = module.default;
+  return <LoadedConsole {...props} />;
+}
 const DeliveryEntry = lazy(() => import("./DeliveryEntry"));
 function Login({
   onLogin,
@@ -71,6 +121,7 @@ function Login({
   onLogin: (u: User) => void;
   demo: boolean;
 }) {
+  const [passwordVisible, setPasswordVisible] = useState(false);
   return (
     <main className="login-page">
       <div className="login-story">
@@ -91,6 +142,7 @@ function Login({
         <p>Ingresá con tu nombre de usuario para continuar.</p>
         <Form
           submit="Iniciar sesión"
+          pendingLabel="Ingresando…"
           onSubmit={async (fd) =>
             onLogin(
               (
@@ -102,7 +154,7 @@ function Login({
             )
           }
         >
-          <Field label="Nombre de usuario">
+          <Field label="Nombre de usuario" hint="Usá el usuario asignado por el club.">
             <input
               type="text"
               name="username"
@@ -116,12 +168,16 @@ function Login({
           </Field>
           <Field label="Contraseña">
             <input
-              type="password"
+              type={passwordVisible ? "text" : "password"}
               name="password"
               autoComplete="current-password"
               required
               placeholder="Tu contraseña"
             />
+            <button type="button" className="login-password-toggle" aria-pressed={passwordVisible} onClick={() => setPasswordVisible(visible => !visible)}>
+              {passwordVisible ? <EyeSlash size={19} aria-hidden="true" /> : <Eye size={19} aria-hidden="true" />}
+              {passwordVisible ? "Ocultar contraseña" : "Mostrar contraseña"}
+            </button>
           </Field>
         </Form>
         {demo && (
@@ -152,11 +208,11 @@ export function App() {
   const [demo, setDemo] = useState(false);
   const [bootError, setBootError] = useState("");
   const [operationsRetry, setOperationsRetry] = useState(0);
+  const operationsModulePreload = useRef(false);
   const [operationsContext, setOperationsContext] = useState<{
     userId: string;
     status: "loading" | "ready" | "error";
-    profile: string;
-    active: boolean;
+    context: OperationsContext | null;
     error: string;
   } | null>(null);
   useEffect(() => {
@@ -167,8 +223,8 @@ export function App() {
     const userId = user.id;
     const controller = new AbortController();
     let active = true;
-    setOperationsContext({ userId, status: "loading", profile: "", active: false, error: "" });
-    void api<{ profile: string; authority: { mode: string } }>(
+    setOperationsContext({ userId, status: "loading", context: null, error: "" });
+    void api<OperationsContext>(
       "/operations/context",
       { signal: controller.signal },
     )
@@ -177,8 +233,7 @@ export function App() {
         setOperationsContext({
           userId,
           status: "ready",
-          profile: context.profile,
-          active: context.authority.mode === "active",
+          context,
           error: "",
         });
       })
@@ -187,8 +242,7 @@ export function App() {
         setOperationsContext({
           userId,
           status: "error",
-          profile: "",
-          active: false,
+          context: null,
           error: error instanceof Error ? error.message : "No se pudo validar el perfil operativo.",
         });
       });
@@ -197,30 +251,30 @@ export function App() {
       controller.abort();
     };
   }, [user?.id, operationsRetry]);
+
   useEffect(() => {
     if (
       !user?.id ||
       operationsContext?.userId !== user.id ||
-      operationsContext.status !== "ready"
+      operationsContext.status !== "ready" ||
+      !operationsContext.context
     ) return;
-    if (operationsContext.profile === "driver" && !location.pathname.startsWith("/app/delivery"))
+    if (operationsContext.context.profile === "driver" && !location.pathname.startsWith("/app/delivery"))
       navigate("/app/delivery", { replace: true });
-    if (operationsContext.profile === "clinical" && !location.pathname.startsWith("/app/operations"))
+    if (operationsContext.context.profile === "clinical" && !location.pathname.startsWith("/app/operations"))
       navigate("/app/operations", { replace: true });
   }, [user?.id, operationsContext, location.pathname, navigate]);
   useEffect(() => {
     let active = true;
     void (async () => {
       try {
-        const config = await api<{ demo: boolean }>("/config");
+        const [config, session] = await Promise.all([
+          api<{ demo: boolean }>("/config"),
+          api<{ user: User }>("/auth/me").catch(() => null),
+        ]);
         if (!active) return;
         setDemo(config.demo);
-        try {
-          const r = await api<{ user: User }>("/auth/me");
-          if (active) setUser(r.user);
-        } catch {
-          /* Unauthenticated users see the sign-in screen. */
-        }
+        if (session) setUser(session.user);
       } catch (e) {
         if (active) setBootError((e as Error).message);
       } finally {
@@ -231,21 +285,33 @@ export function App() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!user?.id || location.pathname === "/app/activar" || location.pathname.startsWith("/app/delivery")) return;
+    if (demo && !location.pathname.startsWith("/app/operations")) return;
+    if (operationsModulePreload.current) return;
+    operationsModulePreload.current = true;
+    void loadOperationsConsole().catch(() => {
+      operationsModulePreload.current = false;
+    });
+  }, [user?.id, demo, location.pathname]);
   if (location.pathname.startsWith("/app/delivery"))
     return (
-      <Suspense fallback={<div className="boot"><Brand />Abriendo turno…</div>}>
-        <DeliveryEntry
-          userId={user?.id}
-          onLogout={async () => {
-            try {
-              await send("/auth/logout", {});
-            } finally {
-              setUser(null);
-              navigate("/app");
-            }
-          }}
-        />
-      </Suspense>
+      <LazyImportBoundary key={location.pathname}>
+        <Suspense fallback={<div className="boot"><Brand />Abriendo turno…</div>}>
+          <DeliveryEntry
+            userId={user?.id}
+            onLogout={async () => {
+              try {
+                await send("/auth/logout", {});
+              } finally {
+                setUser(null);
+                navigate("/app");
+              }
+            }}
+          />
+        </Suspense>
+      </LazyImportBoundary>
     );
   if (checking)
     return (
@@ -268,9 +334,11 @@ export function App() {
     );
   if (location.pathname === "/app/activar")
     return (
-      <Suspense fallback={<div className="boot"><Brand />Preparando acceso…</div>}>
-        <ActivateAccess onLogin={setUser} />
-      </Suspense>
+      <LazyImportBoundary key={location.pathname}>
+        <Suspense fallback={<div className="boot"><Brand />Preparando acceso…</div>}>
+          <ActivateAccess onLogin={setUser} />
+        </Suspense>
+      </LazyImportBoundary>
     );
   if (!user) return <Login onLogin={setUser} demo={demo} />;
   const currentOperationsContext = operationsContext?.userId === user.id ? operationsContext : null;
@@ -284,7 +352,8 @@ export function App() {
     setOperationsContext(null);
     navigate("/app");
   }
-  if (!demo && (!currentOperationsContext || currentOperationsContext.status === "loading"))
+  const mustWaitForOperationsContext = !demo || location.pathname.startsWith("/app/operations");
+  if (mustWaitForOperationsContext && (!currentOperationsContext || currentOperationsContext.status === "loading"))
     return (
       <div className="boot">
         <Brand />
@@ -292,7 +361,7 @@ export function App() {
         <p>Validando el perfil operativo…</p>
       </div>
     );
-  if (!demo && currentOperationsContext?.status === "error")
+  if (mustWaitForOperationsContext && currentOperationsContext?.status === "error")
     return (
       <main className="boot" role="alert">
         <Brand />
@@ -311,8 +380,8 @@ export function App() {
         </div>
       </main>
     );
-  const operationProfile = currentOperationsContext?.profile ?? "";
-  const operationActive = currentOperationsContext?.active ?? false;
+  const operationProfile = currentOperationsContext?.context?.profile ?? "";
+  const operationActive = currentOperationsContext?.context?.authority.mode === "active";
   if (!demo && operationProfile === "driver" && !location.pathname.startsWith("/app/delivery"))
     return (
       <div className="boot">
@@ -327,18 +396,23 @@ export function App() {
     (!demo && currentOperationsContext?.status === "ready");
   if (mustOpenOperations)
     return (
-      <Suspense fallback={<div className="boot"><Brand />Abriendo operación…</div>}>
-        <OperationsConsole
-          profile={operationProfile}
-          onExit={() => {
-            if (!demo || operationProfile === "clinical" || operationActive) {
-              void revokeSession();
-            } else {
-              navigate("/app");
-            }
-          }}
-        />
-      </Suspense>
+      <LazyImportBoundary key={`operations:${user.id}`}>
+        <Suspense fallback={<div className="boot"><Brand />Abriendo operación…</div>}>
+          <OperationsConsole
+            key={user.id}
+            user={user}
+            initialContext={currentOperationsContext?.context ?? undefined}
+            exitLabel={!demo || operationProfile === "clinical" || operationActive ? "Cerrar sesión" : "Volver al panel"}
+            onExit={() => {
+              if (!demo || operationProfile === "clinical" || operationActive) {
+                void revokeSession();
+              } else {
+                navigate("/app");
+              }
+            }}
+          />
+        </Suspense>
+      </LazyImportBoundary>
     );
   return (
     <Workspace
@@ -394,6 +468,10 @@ function Workspace({
   const searchData = useResource<{ items: { name: string; type: string; path: string }[] }>(
     searchOpen && searchTerm ? `/search?q=${encodeURIComponent(searchTerm)}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}` : null,
   );
+  const searchResults = [
+    ...searchDestinations(user.role, query),
+    ...(query.trim() === searchTerm && !searchData.loading ? searchData.data?.items || [] : []),
+  ].slice(0, 12);
   const state = resource.data;
   const navigate = useNavigate();
   const isManager = ["owner", "admin"].includes(user.role);
@@ -644,14 +722,15 @@ function Workspace({
                 )}
               </div>
             )}
-            <Suspense
-              fallback={
-                <div className="page-loading">
-                  <CircleNotch className="spin" /> Cargando módulo…
-                </div>
-              }
-            >
-              <Routes key={location.pathname}>
+            <LazyImportBoundary key={location.pathname}>
+              <Suspense
+                fallback={
+                  <div className="page-loading">
+                    <CircleNotch className="spin" /> Cargando módulo…
+                  </div>
+                }
+              >
+                <Routes key={location.pathname}>
                 <Route index element={<Today onSale={openSale} />} />
                 <Route path="panorama" element={<Dashboard onSale={openSale} />} />
                 <Route path="decisiones" element={canVisit("/app/decisiones", user.role) ? <DecisionCenter /> : <Navigate to="/app" replace />} />
@@ -684,8 +763,9 @@ function Workspace({
                 <Route path="vidriera" element={canVisit("/app/vidriera", user.role) ? <ShowcaseAdmin /> : <Navigate to="/app" replace />} />
                 <Route path="consultas" element={canVisit("/app/consultas", user.role) ? <InquiriesAdmin /> : <Navigate to="/app" replace />} />
                 <Route path="*" element={<Navigate to="/app" replace />} />
-              </Routes>
-            </Suspense>
+                </Routes>
+              </Suspense>
+            </LazyImportBoundary>
             <footer className="app-footer">
               <span>Bombo cannabis club · Cada dato, una mejor decisión.</span>
               <span>
@@ -718,9 +798,11 @@ function Workspace({
           </button>
         </nav>
       </div>
-      <Suspense fallback={null}>
-        {saleLoaded && <SaleModal open={saleOpen} onClose={() => setSaleOpen(false)} />}
-      </Suspense>
+      <LazyImportBoundary active={saleOpen}>
+        <Suspense fallback={null}>
+          {saleLoaded && <SaleModal open={saleOpen} onClose={() => setSaleOpen(false)} />}
+        </Suspense>
+      </LazyImportBoundary>
       <Modal
         title="Buscar en el club"
         open={searchOpen}
@@ -730,18 +812,15 @@ function Workspace({
           <MagnifyingGlass />
           <input
             autoFocus
+            type="search"
+            aria-label="Buscar socio, producto o sección"
             placeholder="Buscar socio, producto o sección…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
         </div>
         <div className="search-results">
-          {[
-            ...searchDestinations(user.role, query),
-            ...(searchData.data?.items || []).filter((x) => x.name.toLocaleLowerCase("es-AR").includes(query.toLocaleLowerCase("es-AR"))),
-          ]
-            .slice(0, 12)
-            .map((x, i) => (
+          {searchResults.map((x, i) => (
               <button
                 key={i}
                 onClick={() => {
@@ -757,7 +836,8 @@ function Workspace({
               </button>
             ))}
           {searchData.loading && searchTerm && <p role="status" className="table-note">Buscando…</p>}
-          {searchData.error && <p role="alert">{searchData.error}</p>}
+          {query.trim() && query.trim() === searchTerm && !searchData.loading && !searchData.error && searchResults.length === 0 && <p role="status" className="table-note">No encontramos coincidencias. Probá con otro nombre o una sección del menú.</p>}
+          {searchData.error && <div><p role="alert">{searchData.error}</p><button type="button" className="button" onClick={() => void searchData.reload()}>Reintentar búsqueda</button></div>}
         </div>
       </Modal>
       <Modal

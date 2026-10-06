@@ -79,10 +79,9 @@
   font-size: 13px !important;
   font-weight: 700;
   line-height: 1.2;
-  transition: background-color 140ms ease, border-color 140ms ease, transform 140ms ease;
+  transition: background-color 130ms ease, border-color 130ms ease;
 }
 .da-button:hover:not(:disabled), .da-icon-button:hover:not(:disabled) { border-color: var(--da-olive-mid); background: var(--da-raised); }
-.da-button:active:not(:disabled), .da-icon-button:active:not(:disabled) { transform: translateY(1px); }
 .da-button:disabled, .da-icon-button:disabled { cursor: not-allowed; opacity: .55; }
 .da-button--primary { border-color: var(--da-olive); background: var(--da-olive); color: #fffaf0; }
 .da-button--primary:hover:not(:disabled) { border-color: #575d36; background: #575d36; }

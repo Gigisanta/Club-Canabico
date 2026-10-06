@@ -11,9 +11,9 @@ async function get(page: Page, path: string) {
   expect(response.status()).toBe(200);
   return response.json();
 }
-async function submit(page: Page, command: string) {
+async function submit(page: Page, command: string, retryConfirmation = false) {
   const response = page.waitForResponse(response => response.url().endsWith("/api/operations/commands") && response.request().method() === "POST" && response.request().postDataJSON().command === command);
-  await page.getByRole("dialog").getByRole("button", { name: "Revisar y registrar" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: retryConfirmation ? "Reintentar confirmación" : "Revisar y registrar", exact: true }).click();
   const result = await response;
   const body = await result.json();
   expect(result.status(), JSON.stringify(body)).toBe(200);
@@ -41,7 +41,7 @@ async function submitAfterLostAcknowledgement(page: Page, command: string, malfo
   await page.keyboard.press("Escape");
   await expect(dialog).toBeVisible();
   await page.unroute("**/api/operations/commands", loseAcknowledgement);
-  const replay = await submit(page, command);
+  const replay = await submit(page, command, true);
   expect(replay.replay).toBe(true);
   expect(replay.requestId).toBe(committed!.requestId);
   expect(replay.targetId).toBe(committed!.targetId);

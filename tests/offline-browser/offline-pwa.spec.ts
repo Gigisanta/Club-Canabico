@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import type { BrowserContext, Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 import { aadFor, decryptJson, unlockKeyring } from "../../src/offline/crypto";
-import type { EncryptedBackupPackageV1 } from "../../src/offline/contracts";
+import type { DeliveryAssignmentV1, EncryptedBackupPackageV1 } from "../../src/offline/contracts";
 
 const DRIVER_ID = "00000000-0000-4000-8000-000000000011";
 const DELIVERY_ID = "00000000-0000-4000-8000-000000000021";
@@ -34,6 +34,7 @@ interface MockDeliveryApi {
   documentRequests: string[];
   setManifestExpiry(value: string): void;
   setManifestDocument(document: OfflineDocumentFixture, body: Buffer, responseType?: string): void;
+  setManifestAssignment(assignment: DeliveryAssignmentV1): void;
 }
 
 function canonicalJsonForChecksumAssertion(value: unknown): string {
@@ -66,6 +67,19 @@ async function installMockDeliveryApi(
   onBackup?: (request: BackupRequest) => Promise<BackupReply> | BackupReply,
 ): Promise<MockDeliveryApi> {
   let manifestExpiresAt = new Date(Date.now() + 60 * 60_000).toISOString();
+  let manifestAssignment: DeliveryAssignmentV1 = {
+    id: DELIVERY_ID,
+    orderId: ORDER_ID,
+    version: 0,
+    customerName: "Cliente de prueba",
+    address: "Calle de prueba 123",
+    window: "14:00–15:00",
+    route: { date: "2026-10-05", stop: 3, eta: "14:30", etaIsEstimate: true },
+    lines: [{ id: LINE_ID, name: "Producto de prueba", requested: "5", prepared: "5", delivered: "2", remaining: "3", quantity: "5", unit: "g" }],
+    documents: [],
+    totalMinor: "100",
+    currency: "ARS",
+  };
   const state: MockDeliveryApi = {
     manifestDeviceIds: [],
     manifestRequests: 0,
@@ -78,6 +92,7 @@ async function installMockDeliveryApi(
       manifestDocumentBody = body;
       manifestDocumentResponseType = responseType;
     },
+    setManifestAssignment(assignment) { manifestAssignment = assignment; },
   };
   let manifestDocument: OfflineDocumentFixture | undefined;
   let manifestDocumentBody: Buffer | undefined;
@@ -105,18 +120,7 @@ async function installMockDeliveryApi(
         authorizationEpoch: 1,
         expiresAt: manifestExpiresAt,
         storageCertification: { persistent: true, requested: true, storageCertifiedAt: new Date().toISOString() },
-        assignments: [{
-          id: DELIVERY_ID,
-          orderId: ORDER_ID,
-          version: 0,
-          customerName: "Cliente de prueba",
-          address: "Calle de prueba 123",
-          window: "10:00–12:00",
-          lines: [{ id: LINE_ID, name: "Producto de prueba", requested: "1", quantity: "1", unit: "g" }],
-          documents: manifestDocument ? [manifestDocument] : [],
-          totalMinor: "100",
-          currency: "ARS",
-        }],
+        assignments: [{ ...manifestAssignment, documents: manifestDocument ? [manifestDocument] : [] }],
       } });
     } else if (requestUrl.pathname.startsWith("/api/operations/documents/") && requestUrl.pathname.endsWith("/content")) {
       const segments = requestUrl.pathname.split("/");
@@ -278,14 +282,43 @@ test("prepara el turno, conserva el shell y bloquea capturas al vencer el lease"
   });
 
   await prepareDevice(page, "clave local de prueba muy segura");
+  await expect(page.getByText("Remanente según manifiesto: 3 g", { exact: true })).toBeVisible();
+  await expect(page.getByText("Pedido: 5 g · Preparado: 5 g · Entregado: 2 g", { exact: true })).toBeVisible();
+  await expect(page.getByText("Ruta · 05/10/2026", { exact: true })).toBeVisible();
+  await expect(page.getByText("Parada 3", { exact: true })).toBeVisible();
+  await expect(page.getByText("ETA estimada · 14:30", { exact: true })).toBeVisible();
+  await expect(page.getByLabel(/^(?:remanente|eta|ruta|parada)\b/i)).toHaveCount(0);
+
+  api.setManifestAssignment({
+    id: DELIVERY_ID,
+    orderId: ORDER_ID,
+    version: 0,
+    customerName: "Cliente de prueba",
+    address: "Calle de prueba 123",
+    window: "14:00–15:00",
+    lines: [{ id: LINE_ID, name: "Producto de prueba", requested: "5", prepared: "5", delivered: "2", quantity: "5", unit: "g" }],
+    documents: [],
+    totalMinor: "100",
+    currency: "ARS",
+  });
+  await page.getByRole("button", { name: "Actualizar turno" }).click();
+  await expect(page.getByText("Remanente no informado en este manifiesto", { exact: true })).toBeVisible();
+  await expect(page.getByText("Pedido: 5 g · Preparado: 5 g · Entregado: 2 g", { exact: true })).toBeVisible();
+  await expect(page.getByText("Ruta · 05/10/2026", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Parada 3", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("ETA estimada · 14:30", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel(/^(?:remanente|eta|ruta|parada)\b/i)).toHaveCount(0);
+
   await recordOneDelivery(page, "Captura local de prueba");
+  await expect(page.getByText("El remanente corresponde al último manifiesto", { exact: false })).toBeVisible();
 
   api.setManifestExpiry(new Date(Date.now() - 60_000).toISOString());
   await page.getByRole("button", { name: "Actualizar turno" }).click();
   const quantity = page.getByLabel("Cantidad entregada");
   await page.getByLabel("Constancia / observación").fill("Intento con lease vencido");
   await page.getByRole("button", { name: "Guardar entrega" }).click();
-  await expect(page.getByRole("status")).toContainText("venció");
+  await expect(page.getByRole("alert")).toContainText("venció");
+  await expect(page.getByRole("alert")).toBeFocused();
   await expect(page.getByText("1 eventos en cola")).toBeVisible();
 
   api.setManifestExpiry(new Date(Date.now() + 60 * 60_000).toISOString());
@@ -337,7 +370,8 @@ test("prepara el turno, conserva el shell y bloquea capturas al vencer el lease"
   await quantity.fill("1");
   await page.getByLabel("Constancia / observación").fill("Segundo intento sin autorización vigente");
   await page.getByRole("button", { name: "Guardar entrega" }).click();
-  await expect(page.getByRole("status")).toContainText("almacenamiento persistente");
+  await expect(page.getByRole("alert")).toContainText("almacenamiento persistente");
+  await expect(page.getByRole("alert")).toBeFocused();
   await expect(page.getByText("1 eventos en cola")).toBeVisible();
   await expect.poll(() => serviceWorkerAssetResponses.length).toBeGreaterThan(0);
 });
@@ -351,13 +385,14 @@ test("rechaza una captura cuando el navegador deniega persist()", async ({ page 
   await page.getByRole("button", { name: "Obtener turno en línea" }).click();
   await page.getByLabel("Frase de acceso").fill("otra clave local de prueba segura");
   await page.getByRole("button", { name: "Preparar dispositivo" }).click();
-  await expect(page.getByRole("status")).toContainText("no confirmó almacenamiento persistente");
+  await expect(page.getByRole("status").filter({ hasText: "no confirmó almacenamiento persistente" })).toContainText("no confirmó almacenamiento persistente");
 
   await page.getByText("Registrar entrega", { exact: true }).click();
   await page.getByLabel("Cantidad entregada").fill("1");
   await page.getByLabel("Constancia / observación").fill("Intento sin persistencia");
   await page.getByRole("button", { name: "Guardar entrega" }).click();
-  await expect(page.getByRole("status")).toContainText("Este navegador no confirmó almacenamiento persistente");
+  await expect(page.getByRole("alert")).toContainText("Este navegador no confirmó almacenamiento persistente");
+  await expect(page.getByRole("alert")).toBeFocused();
   await expect(page.getByText("0 eventos en cola")).toBeVisible();
 });
 
@@ -370,7 +405,8 @@ test("exporta una copia íntegra y restaura el mismo UUID en otro dispositivo", 
   await recordOneDelivery(page, "Entrega pendiente para probar copia");
 
   await page.getByRole("button", { name: "Sincronizar ahora" }).click();
-  await expect(page.getByRole("status")).toContainText("503");
+  await expect(page.getByRole("alert")).toContainText("503");
+  await expect(page.getByRole("alert")).toBeFocused();
   const sourceRequestId = sourceApi.syncRequests[0]?.events?.[0]?.requestId;
   expect(sourceRequestId).toMatch(UUID_V4);
 
@@ -387,7 +423,7 @@ test("exporta una copia íntegra y restaura el mismo UUID en otro dispositivo", 
   expect(backupPackage.sourceDeviceId).toBe(sourceApi.manifestDeviceIds[0]);
 
   const sha256 = createHash("sha256").update(canonicalJsonForChecksumAssertion(backupPackage)).digest("hex");
-  await expect(page.getByRole("status")).toContainText(`SHA-256: ${sha256}`);
+  await expect(page.getByRole("status").filter({ hasText: `SHA-256: ${sha256}` })).toContainText(`SHA-256: ${sha256}`);
   expect(download.suggestedFilename()).toBe(`bombo-turno-${sha256.slice(0, 12)}.json`);
 
   const alteredCiphertext = Buffer.from(backupPackage.queuePayload.ciphertext, "base64");
@@ -420,8 +456,9 @@ test("exporta una copia íntegra y restaura el mismo UUID en otro dispositivo", 
       mimeType: "application/json",
       buffer: Buffer.from(JSON.stringify(tamperedPackage)),
     });
-    const restoreNotice = targetPage.getByRole("status");
-    await expect(restoreNotice).toContainText("verificación de integridad");
+    const restoreError = targetPage.getByRole("alert");
+    await expect(restoreError).toContainText("verificación de integridad");
+    await expect(restoreError).toBeFocused();
     await expect(targetPage.getByText("0 eventos en cola")).toBeVisible();
     await expect(backupInput).toBeEnabled();
 
@@ -430,7 +467,7 @@ test("exporta una copia íntegra y restaura el mismo UUID en otro dispositivo", 
       mimeType: "application/json",
       buffer: Buffer.from(JSON.stringify(backupPackage)),
     });
-    await expect(targetPage.getByRole("status")).toContainText("Copia cifrada validada y restaurada");
+    await expect(targetPage.getByRole("status").filter({ hasText: "Copia cifrada validada y restaurada" })).toContainText("Copia cifrada validada y restaurada");
     await expect(targetPage.getByText("1 eventos en cola")).toBeVisible();
     await expect(targetPage.getByText("Revisión requerida: 1")).toBeVisible();
     await expect.poll(() => readQueueEntryState(targetPage, sourceRequestId!)).toMatchObject({
@@ -530,7 +567,7 @@ test("el acuse durable de la copia al reconectar no pisa una captura concurrente
     releaseBackup();
   }
 
-  await expect(page.getByRole("status")).toContainText("Ciclo al reconectar completo");
+  await expect(page.getByRole("status").filter({ hasText: "Ciclo al reconectar completo" })).toContainText("Ciclo al reconectar completo");
   await expect.poll(() => api.syncRequests.length).toBeGreaterThan(0);
   await expect.poll(() => api.backupRequests.length).toBe(2);
   const captured = await readQueueEntryStates(page);
@@ -660,8 +697,8 @@ test("serializa dos pestañas durante una sincronización pendiente", async ({ p
     releaseFirstSync();
   }
 
-  await expect(page.getByRole("status")).toContainText("Sincronización:");
-  await expect(secondPage.getByRole("status")).toContainText("Sincronización:");
+  await expect(page.getByRole("status").filter({ hasText: "Sincronización:" })).toContainText("Sincronización:");
+  await expect(secondPage.getByRole("status").filter({ hasText: "Sincronización:" })).toContainText("Sincronización:");
   expect(api.syncRequests).toHaveLength(1);
   expect(api.syncRequests[0]?.events?.[0]?.requestId).toMatch(UUID_V4);
   await expect.poll(() => readQueueEntryState(page, api.syncRequests[0]!.events![0]!.requestId!)).toMatchObject({
@@ -684,19 +721,21 @@ test("exige validación en línea después de cinco frases incorrectas", async (
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     await page.getByLabel("Frase de acceso").fill(`frase incorrecta de prueba ${attempt}`);
     await page.getByRole("button", { name: "Desbloquear" }).click();
-    await expect(page.getByRole("status")).toContainText(attempt === 5 ? "Se agotaron cinco intentos" : "no coincide");
+    await expect(page.getByRole("alert")).toContainText(attempt === 5 ? "Se agotaron cinco intentos" : "no coincide");
+    await expect(page.getByRole("alert")).toBeFocused();
   }
 
   await page.getByLabel("Frase de acceso").fill(passphrase);
   await page.getByRole("button", { name: "Desbloquear" }).click();
-  await expect(page.getByRole("status")).toContainText("Se agotaron cinco intentos");
+  await expect(page.getByRole("alert")).toContainText("Se agotaron cinco intentos");
+  await expect(page.getByRole("alert")).toBeFocused();
   await expect(page.getByRole("heading", { name: "Desbloqueá tu turno" })).toBeVisible();
   expect(api.manifestRequests).toBe(manifestRequestsBeforeOffline);
 
   await context.setOffline(false);
   await expect(page.getByText("En línea", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Obtener turno en línea" }).click();
-  await expect(page.getByRole("status")).toContainText("Turno obtenido");
+  await expect(page.getByRole("status").filter({ hasText: "Turno obtenido" })).toContainText("Turno obtenido");
   await page.getByLabel("Frase de acceso").fill(passphrase);
   await page.getByRole("button", { name: "Desbloquear" }).click();
   await expect(page.getByText("Dispositivo listo.", { exact: false })).toBeVisible();
@@ -721,7 +760,8 @@ test("mantiene el UUID pendiente ante un ACK parcial y acepta el mismo evento al
   const deviceId = api.manifestDeviceIds[0];
   expect(deviceId).toMatch(UUID_V4);
   await page.getByRole("button", { name: "Sincronizar ahora" }).click();
-  await expect(page.getByRole("status")).toContainText("no confirmó el UUID enviado");
+  await expect(page.getByRole("alert")).toContainText("no confirmó el UUID enviado");
+  await expect(page.getByRole("alert")).toBeFocused();
   expect(api.syncRequests).toHaveLength(1);
   const requestId = api.syncRequests[0]?.events?.[0]?.requestId;
   expect(requestId).toMatch(UUID_V4);
@@ -730,7 +770,7 @@ test("mantiene el UUID pendiente ante un ACK parcial y acepta el mismo evento al
   expect(pendingState).toEqual({ requestId, status: "pending", attempted: true });
 
   await page.getByRole("button", { name: "Sincronizar ahora" }).click();
-  await expect(page.getByRole("status")).toContainText("1 aceptados");
+  await expect(page.getByRole("status").filter({ hasText: "1 aceptados" })).toContainText("1 aceptados");
   await expect(page.getByText("Sincronizado: 1")).toBeVisible();
   expect(api.syncRequests).toHaveLength(2);
   expect(api.syncRequests.map((request) => request.events?.[0]?.requestId)).toEqual([requestId, requestId]);
@@ -757,8 +797,10 @@ test("un conflicto bloquea las capturas que dependen de esa versión", async ({ 
   await expect(page.getByText("2 eventos en cola")).toBeVisible();
 
   await page.getByRole("button", { name: "Sincronizar ahora" }).click();
-  await expect(page.getByRole("status")).toContainText("1 conflictos");
+  await expect(page.getByRole("status").filter({ hasText: "1 conflictos" })).toContainText("1 conflictos");
   await expect(page.getByText("Conflicto: 1")).toBeVisible();
+  await expect(page.getByText("Hay una entrega de esta parada que puede no estar reflejada", { exact: false })).toBeVisible();
+  await expect(page.getByText("Remanente del último manifiesto: 3 g", { exact: true })).toBeVisible();
   await expect(page.getByText("En espera: 1")).toBeVisible();
   expect(api.syncRequests).toHaveLength(1);
 

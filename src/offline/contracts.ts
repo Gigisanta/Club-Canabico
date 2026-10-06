@@ -13,7 +13,9 @@ export interface DeliveryLineV1 {
   unit?: string;
   quantity?: DecimalString | string;
   requested?: DecimalString | string;
+  prepared?: DecimalString | string;
   delivered?: DecimalString | string;
+  remaining?: DecimalString | string;
   unitPriceMinor?: MinorUnitString | string;
   totalMinor?: MinorUnitString | string;
   [key: string]: unknown;
@@ -27,6 +29,14 @@ export interface DeliveryAssignmentV1 {
   customerName: string;
   address: string | Record<string, unknown>;
   window: string;
+  /** Route details are included only when the assigned route belongs to this driver. */
+  route?: {
+    date: string;
+    /** One-based stop number for display. */
+    stop: number;
+    eta?: string;
+    etaIsEstimate: boolean;
+  };
   lines: DeliveryLineV1[];
   documents: DeliveryDocumentV1[];
   totalMinor: MinorUnitString | string;
@@ -196,6 +206,12 @@ export function assertManifest(value: DeliveryManifestV1): void {
     }
     if (seen.has(assignment.id)) throw new TypeError("El manifiesto repite una identidad de entrega.");
     seen.add(assignment.id);
+    if (assignment.route !== undefined && (!assignment.route || typeof assignment.route.date !== "string" || !assignment.route.date ||
+      !Number.isSafeInteger(assignment.route.stop) || assignment.route.stop < 1 ||
+      (assignment.route.eta !== undefined && typeof assignment.route.eta !== "string") ||
+      typeof assignment.route.etaIsEstimate !== "boolean")) {
+      throw new TypeError("El contexto de ruta del manifiesto no es válido.");
+    }
     if (!Array.isArray(assignment.lines) || !Array.isArray(assignment.documents)) {
       throw new TypeError("Una entrega no incluye líneas o documentos en formato de lista.");
     }
@@ -219,7 +235,7 @@ export function assertManifest(value: DeliveryManifestV1): void {
         if (/(?:Minor|minor)$/.test(key) && !isMinorUnitString(field)) {
           throw new TypeError(`El campo ${key} debe expresarse en unidades menores como texto entero.`);
         }
-        if (/(?:quantity|requested|delivered|returned|prepared)$/i.test(key) && field != null && !isDecimalString(field)) {
+        if (/(?:quantity|requested|prepared|delivered|remaining|returned)$/i.test(key) && field != null && !isDecimalString(field)) {
           throw new TypeError(`El campo ${key} debe expresarse como decimal exacto en texto.`);
         }
       }
@@ -236,7 +252,7 @@ export function assertExactCommandData(value: unknown, path = "data"): asserts v
       if (/(?:Minor|minor)$/.test(key) && !isMinorUnitString(child)) {
         throw new TypeError(`${fieldPath} debe ser un texto entero de unidades menores.`);
       }
-      if (/(?:quantity|requested|delivered|returned|prepared)$/i.test(key) && child != null && !isDecimalString(child)) {
+      if (/(?:quantity|requested|prepared|delivered|remaining|returned)$/i.test(key) && child != null && !isDecimalString(child)) {
         throw new TypeError(`${fieldPath} debe ser un decimal exacto en texto.`);
       }
       if (typeof child === "number" && /(?:amount|monto|importe|price|precio|total|quantity|cantidad|minor|decimal)/i.test(key)) {

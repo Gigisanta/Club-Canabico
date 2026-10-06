@@ -4,6 +4,19 @@ import bcrypt from "bcryptjs";
 import { defaults, businessDate, nextDate } from "../shared/domain.js";
 import { profileCapabilities } from "../shared/operations/contracts.js";
 const db = new PrismaClient();
+
+function demoPassword() {
+  const isolated = process.env.BOMBO_E2E_ISOLATED === "1";
+  if (process.env.NODE_ENV === "production" || (isolated && process.env.DEMO_MODE !== "true"))
+    throw new Error("El seed demo sólo está permitido fuera de producción.");
+  const password = isolated ? process.env.BOMBO_E2E_PASSWORD : process.env.BOMBO_DEMO_PASSWORD;
+  if (!password || password.length < (isolated ? 32 : 8))
+    throw new Error(isolated
+      ? "El seed aislado requiere una contraseña efímera de al menos 32 caracteres."
+      : "Configurá BOMBO_DEMO_PASSWORD en el entorno privado local con al menos 8 caracteres.");
+  return password;
+}
+
 async function seed() {
   const demo = process.env.DEMO_MODE === "true";
   if (!demo) {
@@ -25,7 +38,7 @@ async function seed() {
   if (await db.user.count()) {
     if (process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "production" &&
         await db.user.findUnique({ where: { email: "owner@demo.bombo.local" }, select: { id: true } })) {
-      const password = await bcrypt.hash("Demo-Bombo-2026!", 12);
+      const password = await bcrypt.hash(demoPassword(), 12);
       await db.$transaction(async (tx) => {
         await tx.user.updateMany({ where: { id: "admin", email: "admin@demo.bombo.local", name: "Ana Martínez" },
           data: { name: "Camila" } });
@@ -53,7 +66,7 @@ async function seed() {
   }
   if (process.env.NODE_ENV === "production")
     throw new Error("Seed demo deshabilitado en producción");
-  const password = await bcrypt.hash("Demo-Bombo-2026!", 12);
+  const password = await bcrypt.hash(demoPassword(), 12);
   const people: [string, string, Role, string][] = [
     ["owner", "Tiziano", "owner", "#9b78e6"],
     ["r1", "Lucía Fernández", "responsible", "#b39cc9"],

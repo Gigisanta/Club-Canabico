@@ -48,7 +48,7 @@ npm run db:migrate
 
 Elegir uno de los dos modos antes de ejecutar el seed:
 
-- **Demo:** `DEMO_MODE=true` y `NODE_ENV=development`. El seed crea 8 usuarios (incluye Tiziano, Camila y Gio), 24 socios, 12 lotes, 90 días de ventas y movimientos de ejemplo. El login muestra «Explorar club de demostración» y permite probar los roles. Todo cambio se persiste en la base de demostración.
+- **Demo:** `DEMO_MODE=true`, `NODE_ENV=development` y `BOMBO_DEMO_PASSWORD` de al menos 8 caracteres en el entorno privado local (no versionarla). El seed crea 8 usuarios (incluye Tiziano, Camila y Gio), 24 socios, 12 lotes, 90 días de ventas y movimientos de ejemplo. El login muestra «Explorar club de demostración» y permite probar los roles. Todo cambio se persiste en la base de demostración.
 - **Club real:** `DEMO_MODE=false` con una base vacía distinta de la demo. El seed crea la configuración de Bombo y reserva los accesos de Tiziano (dueño), Camila y Gio (gerentes), sin crear contraseñas ni usuarios activos hasta su activación. `ADMIN_EMAIL`, `ADMIN_NAME` y `ADMIN_PASSWORD` son opcionales solo para un administrador inicial de recuperación. Cambiar el flag no elimina registros ni usuarios de ejemplo; el arranque rechaza la base demo.
 
 ```sh

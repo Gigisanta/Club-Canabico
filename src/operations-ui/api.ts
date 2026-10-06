@@ -7,6 +7,24 @@ export class OperationsApiError extends Error {
   }
 }
 
+type OperationsSessionExpiryListener = (error: OperationsApiError) => void;
+const operationsSessionExpiryListeners = new Set<OperationsSessionExpiryListener>();
+
+export function onOperationsSessionExpired(listener: OperationsSessionExpiryListener) {
+  operationsSessionExpiryListeners.add(listener);
+  return () => { operationsSessionExpiryListeners.delete(listener); };
+}
+
+function notifyOperationsSessionExpired(error: OperationsApiError) {
+  for (const listener of operationsSessionExpiryListeners) {
+    try {
+      listener(error);
+    } catch {
+      // A UI observer must not replace the API's original authentication error.
+    }
+  }
+}
+
 export function isUncertainCommandOutcome(error: unknown) {
   return error instanceof OperationsApiError && (error.status === 0 || error.status >= 500 || error.code === "INVALID_RESPONSE");
 }
@@ -49,7 +67,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
     const detail = safeMessage(payload, response.status);
-    throw new OperationsApiError(detail.message, response.status, detail.code);
+    const error = new OperationsApiError(detail.message, response.status, detail.code);
+    if (response.status === 401) notifyOperationsSessionExpired(error);
+    throw error;
   }
   if (!payload || typeof payload !== "object") {
     throw new OperationsApiError("La respuesta no permite confirmar el registro. Reintentá la misma acción para recuperar su comprobante.", response.status, "INVALID_RESPONSE");
