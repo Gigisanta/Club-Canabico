@@ -7,6 +7,7 @@ import { OperationError, objectScope, requireCapability, type Tx } from "./core.
 import { reportPeriodDateBounds } from "./report-queries.js";
 import { signCursor, verifyCursor } from "./signed-cursor.js";
 import { stockFactScopeWhere } from "./stock-scope.js";
+import { isAppSheetInvoiceTotalPending } from "../../shared/operations/appsheet.js";
 
 const feeds = ["sales-lines", "ledger", "stock", "history"] as const;
 type Feed = typeof feeds[number];
@@ -33,8 +34,11 @@ async function page(tx: Tx, feed: Feed, range: { from?: string; to?: string }, s
     const where: Prisma.OperationOrderLineWhereInput = { order: { commercialState: "confirmed", confirmedAt: { not: null, ...date }, ...(scope.memberIds ? { memberId: { in: scope.memberIds } } : {}) } };
     const count = await tx.operationOrderLine.count({ where });
     const last = await tx.commandReceipt.findFirst({ orderBy: [{ committedAt: "desc" }, { requestId: "desc" }], select: { requestId: true } });
-    const items = await tx.operationOrderLine.findMany({ where: { AND: [where, ...(cursor ? [{ id: { gt: cursor } }] : [])] }, orderBy: { id: "asc" }, take: limit + 1, select: { id: true, skuId: true, revenueMinor: true, requested: true, unit: true, order: { select: { id: true, currency: true, confirmedAt: true } } } });
-    return { marker: { count, last: last?.requestId }, items: items.map(row => ({ id: row.id, population: "operations", kind: "sale-line", occurredOn: row.order.confirmedAt?.toISOString() ?? null, dateState: row.order.confirmedAt ? "known" : "absent", currency: row.order.currency, currencyState: "known", amountMinor: row.revenueMinor.toString(), amountState: "known", quantity: row.requested.toString(), quantityState: "known", unit: row.unit, unitState: "known", objectId: row.order.id, skuId: row.skuId } as ExportRow)) };
+    const items = await tx.operationOrderLine.findMany({ where: { AND: [where, ...(cursor ? [{ id: { gt: cursor } }] : [])] }, orderBy: { id: "asc" }, take: limit + 1, select: { id: true, skuId: true, revenueMinor: true, requested: true, unit: true, order: { select: { id: true, currency: true, confirmedAt: true, quote: true } } } });
+    return { marker: { count, last: last?.requestId }, items: items.map(row => {
+      const pending = isAppSheetInvoiceTotalPending(row.order.quote);
+      return { id: row.id, population: "operations", kind: pending ? "captured-product-line" : "sale-line", occurredOn: row.order.confirmedAt?.toISOString() ?? null, dateState: row.order.confirmedAt ? "known" : "absent", currency: row.order.currency, currencyState: "known", amountMinor: row.revenueMinor.toString(), amountState: pending ? "captured-invoice-total-pending" : "known", quantity: row.requested.toString(), quantityState: "known", unit: row.unit, unitState: "known", objectId: row.order.id, skuId: row.skuId } as ExportRow;
+    }) };
   }
   if (feed === "ledger") {
     const where: Prisma.LedgerLegWhereInput = { ...(scope.accountIds ? { accountId: { in: scope.accountIds } } : {}), event: { occurredAt: date } };
@@ -67,7 +71,7 @@ operationsExports.get("/:feed", async (req, res) => {
     if (feed === "stock") await requireCapability(tx, req.user, "stock.read");
     if (feed === "history") await requireCapability(tx, req.user, "imports.review");
     const scope = await objectScope(tx, req.user); authorizeScope(feed, scope);
-    const identity = digest({ actor: req.user.id, feed, from: params.from, to: params.to, scope, queryVersion: "canonical-csv-v1" });
+    const identity = digest({ actor: req.user.id, feed, from: params.from, to: params.to, scope, queryVersion: "canonical-csv-v2" });
     let current: { id: string; fingerprint: string; identity: string } | undefined;
     if (params.cursor) {
       try { current = z.strictObject({ id: z.string().max(200), fingerprint: z.string().length(64), identity: z.string().length(64) }).parse(verifyCursor("canonical-export", params.cursor)); }
@@ -81,7 +85,7 @@ operationsExports.get("/:feed", async (req, res) => {
     do { csv = "\uFEFF" + columns.map(key => csvCell(key)).join(",") + "\r\n" + found.items.slice(0,count).map(row => columns.map(key => csvCell(row[key], ["amountMinor", "quantity", "sourceRow"].includes(key))).join(",")).join("\r\n") + "\r\n"; if (Buffer.byteLength(csv, "utf8") <= 400*1024) break; count = Math.floor(count/2); } while (count);
     if (!count && found.items.length) throw new OperationError(422, "EXPORT_ROW_TOO_LARGE", "Un registro excede el tamaño permitido y requiere revisión.");
     const hasMore = found.items.length > count;
-    return { csv, rows: count, nextCursor: hasMore ? signCursor("canonical-export", { id: found.items[count-1]!.id, fingerprint, identity }) : null, fingerprint, coverage: { population: feed === "history" ? "approved-selected-history" : "canonical-operations", historyAndOperationsCombined: false, queryCompleteForPage: true, totalRows: String(found.marker.count), dateUnknownIncluded: !params.from && !params.to, money: "exact-minor-unit-strings", unknownValues: "empty-with-explicit-state", unit: "per-fact", queryVersion: "canonical-csv-v1" } };
+    return { csv, rows: count, nextCursor: hasMore ? signCursor("canonical-export", { id: found.items[count-1]!.id, fingerprint, identity }) : null, fingerprint, coverage: { population: feed === "history" ? "approved-selected-history" : "canonical-operations", historyAndOperationsCombined: false, queryCompleteForPage: true, totalRows: String(found.marker.count), dateUnknownIncluded: !params.from && !params.to, money: "exact-minor-unit-strings", unknownValues: "empty-with-explicit-state", unit: "per-fact", queryVersion: "canonical-csv-v2" } };
   }, { isolationLevel: "RepeatableRead", timeout: 15000 });
   res.setHeader("Cache-Control", "private, no-store"); res.json(result);
 });

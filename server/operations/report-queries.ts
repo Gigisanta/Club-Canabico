@@ -561,6 +561,7 @@ async function salesRevenue(range: ReportDateRange, scope: ReportScope) {
     Prisma.sql`o."commercialState" = 'confirmed'`,
     Prisma.sql`o."fulfillmentState" <> 'cancelled'`,
     Prisma.sql`o."confirmedAt" IS NOT NULL`,
+    Prisma.sql`NOT (COALESCE(o."quote"->>'source', '') = 'appsheet-invoice' AND COALESCE(o."quote"->>'totalCalculationState', '') <> 'defined')`,
   ];
   const timeRange = timestampFilter(range);
   if (timeRange.gte) orderPredicates.push(Prisma.sql`o."confirmedAt" >= ${rawSqlUtcTimestamp(timeRange.gte)}`);
@@ -570,6 +571,7 @@ async function salesRevenue(range: ReportDateRange, scope: ReportScope) {
       ? Prisma.sql`o."memberId" IN (${Prisma.join(scope.memberIds)})`
       : Prisma.sql`FALSE`);
   }
+  const pendingInvoiceCaptures = await pendingAppSheetInvoiceCaptures(range, scope);
   const historyPredicates: Prisma.Sql[] = [];
   if (dateRange.gte) historyPredicates.push(Prisma.sql`s."saleDate" >= ${rawSqlUtcTimestamp(dateRange.gte)}`);
   if (dateRange.lt) historyPredicates.push(Prisma.sql`s."saleDate" < ${rawSqlUtcTimestamp(dateRange.lt)}`);
@@ -695,6 +697,7 @@ async function salesRevenue(range: ReportDateRange, scope: ReportScope) {
       netProductRevenueByCurrency: asMoneyBuckets(operationalRevenue),
       orderTotalByCurrency: asMoneyBuckets(operationalTotals),
     },
+    pendingAppSheetInvoices: pendingAppSheetInvoiceProjection(pendingInvoiceCaptures),
     historicalDelivery: scope.memberIds === undefined ? {
       state: "observed-unlinked-historical-source",
       saleCount: Number(history.saleCount),
@@ -710,20 +713,128 @@ async function salesRevenue(range: ReportDateRange, scope: ReportScope) {
       reason: "historical-delivery-sales-have-no-member-link",
       createsOperationalOrders: false,
     },
-  }, [coverage("operation-orders", orderCount, orderCount), returnCoverage.invalidCount ? partialCoverage("customer-return-allocations", returnCoverage.knownCount, returnCoverage.expectedCount, "invalid-billed-return-ratio") : coverage("customer-return-allocations", returnCoverage.knownCount, returnCoverage.expectedCount), ...(scope.memberIds === undefined ? [coverage("historical-delivery-sales", Number(history.saleCount), Number(history.saleCount))] : [excludedCoverage("historical-delivery-sales", "historical-delivery-sales-have-no-member-link")])]);
+  }, [coverage("operation-orders", orderCount, orderCount), ...(hasPendingAppSheetInvoices(pendingInvoiceCaptures) ? [pendingInvoiceCaptureCoverage(pendingInvoiceCaptures)] : []), returnCoverage.invalidCount ? partialCoverage("customer-return-allocations", returnCoverage.knownCount, returnCoverage.expectedCount, "invalid-billed-return-ratio") : coverage("customer-return-allocations", returnCoverage.knownCount, returnCoverage.expectedCount), ...(scope.memberIds === undefined ? [coverage("historical-delivery-sales", Number(history.saleCount), Number(history.saleCount))] : [excludedCoverage("historical-delivery-sales", "historical-delivery-sales-have-no-member-link")])]);
+}
+
+type PendingAppSheetInvoiceCaptureRow = {
+  currency: string;
+  invoiceCount: bigint;
+  invalidCapturedBaseCount: bigint;
+  capturedBaseMinor: string;
+  capturedProductMinor: string;
+  capturedProductLineCount: bigint;
+  capturedClientTariffMinor: string;
+};
+
+/** Pending AppSheet captures remain visible for reconciliation, never as invoice totals or revenue. */
+async function pendingAppSheetInvoiceCaptures(range: ReportDateRange, scope: ReportScope): Promise<PendingAppSheetInvoiceCaptureRow[]> {
+  const predicates: Prisma.Sql[] = [
+    Prisma.sql`o."commercialState" = 'confirmed'`,
+    Prisma.sql`o."fulfillmentState" <> 'cancelled'`,
+    Prisma.sql`o."confirmedAt" IS NOT NULL`,
+    Prisma.sql`COALESCE(o."quote"->>'source', '') = 'appsheet-invoice' AND COALESCE(o."quote"->>'totalCalculationState', '') <> 'defined'`,
+  ];
+  const timeRange = timestampFilter(range);
+  if (timeRange.gte) predicates.push(Prisma.sql`o."confirmedAt" >= ${rawSqlUtcTimestamp(timeRange.gte)}`);
+  if (timeRange.lt) predicates.push(Prisma.sql`o."confirmedAt" < ${rawSqlUtcTimestamp(timeRange.lt)}`);
+  if (scope.memberIds !== undefined) predicates.push(scope.memberIds.length
+    ? Prisma.sql`o."memberId" IN (${Prisma.join(scope.memberIds)})`
+    : Prisma.sql`FALSE`);
+  return reportDb().$queryRaw<PendingAppSheetInvoiceCaptureRow[]>(Prisma.sql`
+    WITH pending_orders AS (
+      SELECT o."id", o."currency", o."quote", o."deliveryMinor"
+      FROM "OperationOrder" AS o
+      WHERE ${Prisma.join(predicates, " AND ")}
+    ), explicit_products AS (
+      SELECT l."orderId", COUNT(*)::bigint AS line_count, COALESCE(SUM(l."revenueMinor"), 0)::numeric AS captured_minor
+      FROM "OperationOrderLine" AS l
+      JOIN pending_orders AS o ON o."id" = l."orderId"
+      GROUP BY l."orderId"
+    )
+    SELECT o."currency", COUNT(*)::bigint AS "invoiceCount",
+      COUNT(*) FILTER (WHERE COALESCE(o."quote"->>'capturedBaseMinor', '') !~ '^(0|[1-9][0-9]*)$')::bigint AS "invalidCapturedBaseCount",
+      COALESCE(SUM(CASE WHEN COALESCE(o."quote"->>'capturedBaseMinor', '') ~ '^(0|[1-9][0-9]*)$'
+        THEN (o."quote"->>'capturedBaseMinor')::numeric ELSE 0::numeric END), 0)::text AS "capturedBaseMinor",
+      COALESCE(SUM(p.captured_minor), 0)::text AS "capturedProductMinor",
+      COALESCE(SUM(p.line_count), 0)::bigint AS "capturedProductLineCount",
+      COALESCE(SUM(o."deliveryMinor"), 0)::text AS "capturedClientTariffMinor"
+    FROM pending_orders AS o
+    LEFT JOIN explicit_products AS p ON p."orderId" = o."id"
+    GROUP BY o."currency"
+    ORDER BY o."currency"
+  `);
+}
+
+function pendingAppSheetInvoiceProjection(rows: PendingAppSheetInvoiceCaptureRow[]) {
+  const capturedBase = moneyTotals();
+  const capturedProducts = moneyTotals();
+  const capturedClientTariffs = moneyTotals();
+  let invoiceCount = 0;
+  let invalidCapturedBaseCount = 0;
+  let productLineCount = 0;
+  for (const row of rows) {
+    invoiceCount += Number(row.invoiceCount);
+    invalidCapturedBaseCount += Number(row.invalidCapturedBaseCount);
+    productLineCount += Number(row.capturedProductLineCount);
+    addMoney(capturedBase, row.currency, BigInt(row.capturedBaseMinor));
+    addMoney(capturedProducts, row.currency, BigInt(row.capturedProductMinor));
+    addMoney(capturedClientTariffs, row.currency, BigInt(row.capturedClientTariffMinor));
+  }
+  return {
+    count: invoiceCount,
+    capturedBaseMinorByCurrency: asMoneyBuckets(capturedBase),
+    capturedProductLineMinorByCurrency: asMoneyBuckets(capturedProducts),
+    capturedProductLineCount: productLineCount,
+    capturedClientTariffMinorByCurrency: asMoneyBuckets(capturedClientTariffs),
+    totalMinorByCurrency: null,
+    totalCalculationState: "pending_definition",
+    recognizedAsSalesRevenue: false,
+    amountBasis: "captured-components-not-a-calculated-invoice-total",
+  };
+}
+
+function pendingInvoiceCaptureCoverage(rows: PendingAppSheetInvoiceCaptureRow[]): Coverage {
+  const total = rows.reduce((sum, row) => sum + Number(row.invoiceCount), 0);
+  const invalid = rows.reduce((sum, row) => sum + Number(row.invalidCapturedBaseCount), 0);
+  return invalid ? partialCoverage("pending-appsheet-invoice-captures", total - invalid, total, "captured-base-is-invalid-or-missing")
+    : coverage("pending-appsheet-invoice-captures", total, total);
+}
+
+function hasPendingAppSheetInvoices(rows: PendingAppSheetInvoiceCaptureRow[]): boolean {
+  return rows.some(row => row.invoiceCount > 0n);
 }
 
 async function productContribution(range: ReportDateRange, scope: ReportScope) {
-  const orderWhere = { commercialState: "confirmed", confirmedAt: { not: null, ...timestampFilter(range) }, ...(scope.memberIds !== undefined ? { memberId: { in: scope.memberIds } } : {}) };
-  const [lineCount, lines] = await Promise.all([
-    reportDb().operationOrderLine.count({ where: { order: orderWhere, delivered: { gt: "0" } } }),
-    reportDb().operationOrderLine.findMany({
-      where: { order: orderWhere, delivered: { gt: "0" } },
-      select: { id: true, orderId: true, skuId: true, unit: true, requested: true, delivered: true, revenueMinor: true, order: { select: { channel: true, currency: true } } },
-      orderBy: [{ orderId: "asc" }, { id: "asc" }],
-      take: REPORT_ROW_LIMIT,
-    }),
+  const productPredicates: Prisma.Sql[] = [
+    Prisma.sql`o."commercialState" = 'confirmed'`,
+    Prisma.sql`o."confirmedAt" IS NOT NULL`,
+    Prisma.sql`l."delivered" > 0`,
+    Prisma.sql`NOT (COALESCE(o."quote"->>'source', '') = 'appsheet-invoice' AND COALESCE(o."quote"->>'totalCalculationState', '') <> 'defined')`,
+  ];
+  const timeRange = timestampFilter(range);
+  if (timeRange.gte) productPredicates.push(Prisma.sql`o."confirmedAt" >= ${rawSqlUtcTimestamp(timeRange.gte)}`);
+  if (timeRange.lt) productPredicates.push(Prisma.sql`o."confirmedAt" < ${rawSqlUtcTimestamp(timeRange.lt)}`);
+  if (scope.memberIds !== undefined) productPredicates.push(scope.memberIds.length
+    ? Prisma.sql`o."memberId" IN (${Prisma.join(scope.memberIds)})`
+    : Prisma.sql`FALSE`);
+  type ProductLineRow = { id: string; orderId: string; skuId: string; unit: string; requested: string; delivered: string; revenueMinor: bigint; channel: string; currency: string };
+  const [lineCountRows, productLineRows, pendingInvoiceCaptures] = await Promise.all([
+    reportDb().$queryRaw<Array<{ rowCount: bigint }>>(Prisma.sql`
+      SELECT COUNT(*)::bigint AS "rowCount"
+      FROM "OperationOrderLine" AS l JOIN "OperationOrder" AS o ON o."id" = l."orderId"
+      WHERE ${Prisma.join(productPredicates, " AND ")}
+    `),
+    reportDb().$queryRaw<ProductLineRow[]>(Prisma.sql`
+      SELECT l."id", l."orderId", l."skuId", l."unit", l."requested"::text AS "requested",
+        l."delivered"::text AS "delivered", l."revenueMinor", o."channel", o."currency"
+      FROM "OperationOrderLine" AS l JOIN "OperationOrder" AS o ON o."id" = l."orderId"
+      WHERE ${Prisma.join(productPredicates, " AND ")}
+      ORDER BY l."orderId" ASC, l."id" ASC LIMIT ${REPORT_ROW_LIMIT}
+    `),
+    pendingAppSheetInvoiceCaptures(range, scope),
   ]);
+  const lineCount = Number(lineCountRows[0]?.rowCount ?? 0n);
+  const lines = productLineRows.map(({ channel, currency, ...line }) => ({ ...line, order: { channel, currency } }));
   const orderIds = [...new Set(lines.map(line => line.orderId))];
   const lineInputs = new Map(lines.map(line => [line.id, {
     currency: line.order.currency,
@@ -823,7 +934,7 @@ async function productContribution(range: ReportDateRange, scope: ReportScope) {
     ? null
     : [...revenueAmounts.entries()].map(([currency, revenue]) => ({ currency: currency === "\u0000unknown-currency" ? null : currency, minor: (revenue - (matchedCostByCurrency.get(currency) ?? 0n)).toString() }));
   const fixedCosts = await approvedFixedCosts(range, scope);
-  const management = await managementContribution(range, scope, grossMarginByCurrency);
+  const management = await managementContribution(range, scope, grossMarginByCurrency, pendingInvoiceCaptures);
   const contributionAfterFixedCostsByCurrency = subtractFixedCostsByCurrency(
     toCurrencyTotals(management.managementContributionBeforeFixedCostsByCurrency),
     toCurrencyTotals(fixedCosts.amountByCurrency),
@@ -835,6 +946,7 @@ async function productContribution(range: ReportDateRange, scope: ReportScope) {
     actualAllocatedCostSoldByCurrency: productPopulationComplete ? asMoneyBuckets(costByCurrency) : null,
     productSourceRowsComplete: productPopulationComplete,
     grossContributionBeforeFixedCostsByCurrency: grossMarginByCurrency,
+    pendingAppSheetInvoices: pendingAppSheetInvoiceProjection(pendingInvoiceCaptures),
     ...management,
     fixedCosts,
     contributionAfterFixedCostsByCurrency,
@@ -847,18 +959,19 @@ async function productContribution(range: ReportDateRange, scope: ReportScope) {
       method: "billed-delivery-revenue; customer-returns-at-frozen-preparation-ratio; actual-delivered-net-lot-cost",
       quotedReplacementCostUsed: false,
     },
-  }, [coverage("delivered-operation-order-lines", lines.length, lineCount), coverage("preparation-allocations", allocations.length, allocationCount), fixedCostCoverage(fixedCosts)]);
+  }, [coverage("delivered-operation-order-lines", lines.length, lineCount), coverage("preparation-allocations", allocations.length, allocationCount), ...(hasPendingAppSheetInvoices(pendingInvoiceCaptures) ? [pendingInvoiceCaptureCoverage(pendingInvoiceCaptures), excludedCoverage("pending-appsheet-captured-product-lines", "captured-product-lines-are-exposed-separately-until-invoice-total-is-defined")] : []), fixedCostCoverage(fixedCosts)]);
 }
 
 /** Management contribution adds frozen charges and accrued, verified variable obligations.
  * Cash payments and renditions never recognize these costs a second time.
  */
-async function managementContribution(range: ReportDateRange, scope: ReportScope, productMargin: MoneyBucket[] | null) {
+async function managementContribution(range: ReportDateRange, scope: ReportScope, productMargin: MoneyBucket[] | null, pendingInvoiceCaptures: PendingAppSheetInvoiceCaptureRow[]) {
   type ChargeAggregate = { currency: string; recognizedMinor: string; unresolvedCount: bigint };
   const chargePredicates: Prisma.Sql[] = [
     Prisma.sql`o."commercialState" = 'confirmed'`,
     Prisma.sql`o."confirmedAt" IS NOT NULL`,
     Prisma.sql`EXISTS (SELECT 1 FROM "OperationOrderLine" AS l WHERE l."orderId" = o."id" AND l."delivered" > 0)`,
+    Prisma.sql`NOT (COALESCE(o."quote"->>'source', '') = 'appsheet-invoice' AND COALESCE(o."quote"->>'totalCalculationState', '') <> 'defined')`,
   ];
   const chargeRange = timestampFilter(range);
   if (chargeRange.gte) chargePredicates.push(Prisma.sql`o."confirmedAt" >= ${rawSqlUtcTimestamp(chargeRange.gte)}`);
@@ -881,7 +994,13 @@ async function managementContribution(range: ReportDateRange, scope: ReportScope
     ORDER BY o."currency"
   `);
   const charges = moneyTotals();
+  const pendingDeliveryTariffs = moneyTotals();
   let unresolvedChargeOrderCount = 0;
+  let pendingInvoiceCount = 0;
+  for (const pending of pendingInvoiceCaptures) {
+    pendingInvoiceCount += Number(pending.invoiceCount);
+    addMoney(pendingDeliveryTariffs, pending.currency, BigInt(pending.capturedClientTariffMinor));
+  }
   for (const charge of chargeGroups) {
     unresolvedChargeOrderCount += Number(charge.unresolvedCount);
     addMoney(charges, charge.currency, BigInt(charge.recognizedMinor));
@@ -921,6 +1040,8 @@ async function managementContribution(range: ReportDateRange, scope: ReportScope
   }
   return {
     recognizedDeliveryAndSurchargeByCurrency: asMoneyBuckets(charges),
+    pendingAppSheetDeliveryTariffByCurrency: asMoneyBuckets(pendingDeliveryTariffs),
+    pendingAppSheetDeliveryTariffRecognized: false,
     approvedAccruedVariableCostsByCurrency: scope.memberIds === undefined ? asMoneyBuckets(variableCosts) : null,
     managementContributionBeforeFixedCostsByCurrency: ready ? asMoneyBuckets(totals) : null,
     managementCoverage: {
@@ -929,6 +1050,8 @@ async function managementContribution(range: ReportDateRange, scope: ReportScope
       sourcePeriodCompletenessAttested: attestation?.sourcePeriodCompletenessAttested === true,
       sourcePeriodAttestation: attestation,
       unresolvedChargeOrderCount,
+      pendingAppSheetInvoiceCount: pendingInvoiceCount,
+      pendingAppSheetDeliveryTariffRecognized: false,
       pendingCostCount: scope.memberIds === undefined ? pendingCostCount : null,
       classifiedCostCount: scope.memberIds === undefined ? classifiedCostCount : null,
       costQueryComplete: scope.memberIds === undefined ? true : null,
@@ -1864,30 +1987,50 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
   const dateRange = dateOnlyFilter(range);
   const memberWhere = scope.memberIds !== undefined ? { id: { in: scope.memberIds } } : {};
   const segmentationQuery = customerSegmentationQueryContract(range, scope);
-  const { asOfDate: throughDate, where: orderWhere } = segmentationQuery;
+  const { asOfDate: throughDate } = segmentationQuery;
   const memberScopePredicate = scope.memberIds === undefined ? Prisma.sql`TRUE`
     : scope.memberIds.length ? Prisma.sql`m."id" IN (${Prisma.join(scope.memberIds)})` : Prisma.sql`FALSE`;
-  const orderPredicates: Prisma.Sql[] = [
+  const orderPopulationPredicates: Prisma.Sql[] = [
     Prisma.sql`o."commercialState" = 'confirmed'`,
     Prisma.sql`o."fulfillmentState" <> 'cancelled'`,
     Prisma.sql`o."confirmedAt" IS NOT NULL`,
     Prisma.sql`o."confirmedAt" < ${rawSqlUtcTimestamp(reportCivilDateStartUtc(addDays(throughDate, 1)))}`,
   ];
   if (scope.memberIds !== undefined) {
-    orderPredicates.push(scope.memberIds.length
+    orderPopulationPredicates.push(scope.memberIds.length
       ? Prisma.sql`o."memberId" IN (${Prisma.join(scope.memberIds)})`
       : Prisma.sql`FALSE`);
   }
-  const [memberCount, members, orderCount, orders, summaryRows, unlinkedHistoryCount] = await Promise.all([
+  const orderPredicates = [
+    ...orderPopulationPredicates,
+    Prisma.sql`NOT (COALESCE(o."quote"->>'source', '') = 'appsheet-invoice' AND COALESCE(o."quote"->>'totalCalculationState', '') <> 'defined')`,
+  ];
+  const pendingOrderPredicates = [
+    ...orderPopulationPredicates,
+    Prisma.sql`COALESCE(o."quote"->>'source', '') = 'appsheet-invoice' AND COALESCE(o."quote"->>'totalCalculationState', '') <> 'defined'`,
+  ];
+  const [memberCount, members, orderCountRows, orders, summaryRows, unlinkedHistoryCount] = await Promise.all([
     reportDb().operationMember.count({ where: memberWhere }),
     reportDb().operationMember.findMany({ where: memberWhere, select: { id: true }, orderBy: { id: "asc" }, take: REPORT_ROW_LIMIT }),
-    reportDb().operationOrder.count({ where: orderWhere }),
-    reportDb().operationOrder.findMany({ where: orderWhere, select: { id: true }, orderBy: [{ confirmedAt: "asc" }, { id: "asc" }], take: REPORT_ROW_LIMIT }),
+    reportDb().$queryRaw<Array<{ orderCount: bigint }>>(Prisma.sql`
+      SELECT COUNT(*)::bigint AS "orderCount"
+      FROM "OperationOrder" AS o
+      WHERE ${Prisma.join(orderPredicates, " AND ")}
+    `),
+    reportDb().$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      SELECT o."id"
+      FROM "OperationOrder" AS o
+      WHERE ${Prisma.join(orderPredicates, " AND ")}
+      ORDER BY o."confirmedAt" ASC, o."id" ASC
+      LIMIT ${REPORT_ROW_LIMIT}
+    `),
     reportDb().$queryRaw<Array<{
       segment: LegacyCustomerSegment;
       memberCount: bigint;
       sourceMemberCount: bigint;
       sourceOrderCount: bigint;
+      pendingInvoiceMemberCount: bigint;
+      pendingInvoiceOrderCount: bigint;
       returnAllocationCount: bigint;
       invalidReturnAllocationCount: bigint;
       invalidReturnLineCount: bigint;
@@ -1896,6 +2039,14 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
         SELECT m."id"
         FROM "OperationMember" AS m
         WHERE ${memberScopePredicate}
+      ), pending_orders AS (
+        SELECT o."id", o."memberId"
+        FROM "OperationOrder" AS o
+        WHERE ${Prisma.join(pendingOrderPredicates, " AND ")}
+      ), pending_members AS (
+        SELECT DISTINCT o."memberId"
+        FROM pending_orders AS o
+        JOIN selected_members AS m ON m."id" = o."memberId"
       ), selected_orders AS (
         SELECT o."id", o."memberId", o."currency", o."confirmedAt"
         FROM "OperationOrder" AS o
@@ -1961,6 +2112,7 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
       ), classified_members AS (
         SELECT m."id",
           CASE
+            WHEN pending."memberId" IS NOT NULL THEN 'insufficient-data'
             WHEN p."memberId" IS NULL THEN 'no-purchase-history'
             WHEN p.spend_ars_minor IS NULL OR p.max_grams_scaled IS NULL THEN 'insufficient-data'
             WHEN (${throughDate}::date - p.last_purchase_day) >= 105 THEN 'recency-priority'
@@ -1970,6 +2122,7 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
             ELSE 'occasional'
           END AS segment
         FROM selected_members AS m
+        LEFT JOIN pending_members AS pending ON pending."memberId" = m."id"
         LEFT JOIN member_profiles AS p ON p."memberId" = m."id"
       ), segment_counts AS (
         SELECT segment, COUNT(*)::bigint AS member_count
@@ -1978,6 +2131,8 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
       ), totals AS (
         SELECT (SELECT COUNT(*)::bigint FROM selected_members) AS member_count,
           (SELECT COUNT(*)::bigint FROM selected_orders) AS order_count,
+          (SELECT COUNT(*)::bigint FROM pending_members) AS pending_invoice_member_count,
+          (SELECT COUNT(*)::bigint FROM pending_orders) AS pending_invoice_order_count,
           (SELECT COUNT(*)::bigint FROM return_allocations) AS return_allocation_count,
           (SELECT COUNT(*) FILTER (WHERE invalid)::bigint FROM return_allocations) AS invalid_return_allocation_count,
           (SELECT COUNT(*) FILTER (WHERE invalid_line)::bigint FROM line_values) AS invalid_return_line_count
@@ -1987,6 +2142,8 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
       )
       SELECT s.segment AS "segment", COALESCE(c.member_count, 0)::bigint AS "memberCount",
         t.member_count AS "sourceMemberCount", t.order_count AS "sourceOrderCount",
+        t.pending_invoice_member_count AS "pendingInvoiceMemberCount",
+        t.pending_invoice_order_count AS "pendingInvoiceOrderCount",
         t.return_allocation_count AS "returnAllocationCount",
         t.invalid_return_allocation_count AS "invalidReturnAllocationCount",
         t.invalid_return_line_count AS "invalidReturnLineCount"
@@ -1997,14 +2154,18 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
     `),
     scope.memberIds === undefined ? reportDb().historicalDeliverySale.count({ where: Object.keys(dateRange).length ? { saleDate: dateRange } : {} }) : Promise.resolve(0),
   ]);
+  const orderCount = Number(orderCountRows[0]?.orderCount ?? 0n);
   const summary = summaryRows[0];
   const sourceMemberCount = Number(summary?.sourceMemberCount ?? 0n);
   const sourceOrderCount = Number(summary?.sourceOrderCount ?? 0n);
+  const pendingInvoiceMemberCount = Number(summary?.pendingInvoiceMemberCount ?? 0n);
+  const pendingInvoiceOrderCount = Number(summary?.pendingInvoiceOrderCount ?? 0n);
   const returnAllocationCount = Number(summary?.returnAllocationCount ?? 0n);
   const invalidReturnAllocationCount = Number(summary?.invalidReturnAllocationCount ?? 0n);
   const invalidReturnLineCount = Number(summary?.invalidReturnLineCount ?? 0n);
   const sourceRowsComplete = summary !== undefined && sourceMemberCount === memberCount && sourceOrderCount === orderCount
     && invalidReturnAllocationCount === 0 && invalidReturnLineCount === 0;
+  const segmentationDataComplete = sourceRowsComplete && pendingInvoiceOrderCount === 0;
   const segmentCounts = new Map<LegacyCustomerSegment, number>();
   if (sourceRowsComplete) {
     for (const row of summaryRows) {
@@ -2024,6 +2185,9 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
     currentOperationOrderCount: orderCount,
     visibleOperationOrderRows: orders.length,
     operationOrderRowsComplete: orders.length === orderCount,
+    pendingAppSheetInvoiceMemberCount: pendingInvoiceMemberCount,
+    pendingAppSheetInvoiceOrderCount: pendingInvoiceOrderCount,
+    segmentationDataComplete,
     segmentationAsOfDate: throughDate,
     memberHistoryBasis: "retained-confirmed-operation-orders-through-as-of-date; cancelled-demand-and-customer-returns-excluded; fromDate-does-not-truncate-lifetime-measures",
     spendBasis: "frozen-line-revenue-prorated-by-retained-billed-quantity; cash-refunds-do-not-subtract-the-same-cancellation-twice",
@@ -2037,7 +2201,7 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
     customerReturnAllocationCount: returnAllocationCount,
     invalidCustomerReturnAllocationCount: invalidReturnAllocationCount,
     invalidCustomerReturnLineCount: invalidReturnLineCount,
-  }, [coverage("operation-members", members.length, memberCount), coverage("confirmed-orders-for-segmentation", orders.length, orderCount), returnCoverage, sourceRowsComplete
+  }, [coverage("operation-members", members.length, memberCount), coverage("confirmed-orders-for-segmentation", orders.length, orderCount), returnCoverage, ...(pendingInvoiceOrderCount > 0 ? [partialCoverage("pending-appsheet-invoice-segmentation-inputs", 0, pendingInvoiceOrderCount, "pending-invoice-total-definition-prevents-complete-spend-classification")] : []), sourceRowsComplete
     ? coverage("customer-segmentation-full-population", memberCount, memberCount)
     : partialCoverage("customer-segmentation-full-population", 0, memberCount, "invalid-retained-order-or-return-data-or-source-count-mismatch"), ...(scope.memberIds === undefined ? [coverage("unlinked-historical-delivery-sales", 0, unlinkedHistoryCount)] : [excludedCoverage("unlinked-historical-delivery-sales", "historical-delivery-sales-have-no-member-link")])]);
 }

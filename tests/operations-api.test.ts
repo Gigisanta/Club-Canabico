@@ -261,7 +261,13 @@ test("canonical financial commands preserve cash custody, debt and global replay
    const restricted=await call(path,"finance");assert.equal(restricted.status,200);const filtered=await restricted.json();assert.deepEqual(filtered.historicalItems,[]);assert.equal(filtered.coverage.historical,"location-custody-mapping-pending");
    await db.operationAccess.update({where:{userId:"finance"},data:{capabilities:prior.capabilities,scope:prior.scope}});
   });
-  await t.test("customer segmentation preserves the strict 20 g boundary through the reports API",async()=>{
+  await t.test("customer segmentation preserves the strict 20 g boundary through the reports API",async t=>{
+   t.after(async()=>{
+    const orderIds=["order-threshold-20","order-threshold-20-001"];
+    await db.operationOrderLine.deleteMany({where:{orderId:{in:orderIds}}});
+    await db.operationOrder.deleteMany({where:{id:{in:orderIds}}});
+    await db.operationMember.deleteMany({where:{id:{in:["member-threshold-20","member-threshold-20-001"]}}});
+   });
    for(const [memberId,orderId,grams] of [["member-threshold-20","order-threshold-20","20"],["member-threshold-20-001","order-threshold-20-001","20.001"]] as const){
     await db.operationMember.create({data:{id:memberId,name:"Synthetic threshold fixture",address:{},preferences:{}}});
     await db.operationOrder.create({data:{
@@ -347,7 +353,27 @@ test("canonical financial commands preserve cash custody, debt and global replay
    const denied=await call("/operations/commands","scoped-finance",e(hidden.targetId,"CollectionReportRejected",{reason:"Outside scope",evidence:{reference:"review"}},1));assert.equal(denied.status,403);
    const before=await db.ledgerLeg.count();await cmd(decision,"scoped-finance");assert.equal(await db.ledgerLeg.count(),before);assert.equal((await db.collectionReport.findUniqueOrThrow({where:{id:pending.targetId}})).status,"rejected");
   });
-  await t.test("canonical exports preserve exact values, unknowns, pages and current scopes",async()=>{
+  await t.test("canonical exports preserve exact values, unknowns, pages and current scopes",async t=>{
+   const exportDate=new Date(),genericSale="sales-export-generic",pendingInvoice="sales-export-pending";
+   t.after(async()=>{
+    await db.operationOrderLine.deleteMany({where:{id:{in:["sales-export-generic-line","sales-export-pending-line"]}}});
+    await db.operationOrder.deleteMany({where:{id:{in:[genericSale,pendingInvoice]}}});
+   });
+   await db.operationOrder.createMany({data:[
+    {id:genericSale,memberId:member,channel:"local",currency:"ARS",commercialState:"confirmed",confirmedAt:exportDate,quote:{},subtotalMinor:1200n,totalMinor:1200n,address:{},createdBy:"owner"},
+    {id:pendingInvoice,memberId:member,channel:"local",currency:"ARS",commercialState:"confirmed",confirmedAt:exportDate,quote:{source:"appsheet-invoice",capturedBaseMinor:"950",capturedProductMinor:"900",subtotalMinor:null,totalMinor:null,subtotalCalculationState:"pending_definition",totalCalculationState:"pending_definition"},subtotalMinor:900n,totalMinor:950n,address:{},createdBy:"owner"},
+   ]});
+   await db.operationOrderLine.createMany({data:[
+    {id:"sales-export-generic-line",orderId:genericSale,skuId:"sales-generic-sku",unit:"g",requested:"1",unitPrice:"1",referenceMinor:1200n,revenueMinor:1200n},
+    {id:"sales-export-pending-line",orderId:pendingInvoice,skuId:"sales-pending-sku",unit:"g",requested:"1",unitPrice:"1",referenceMinor:900n,revenueMinor:900n},
+   ]});
+   const salesBlockResponse=await call("/reports/operations/exports/sales-lines");assert.equal(salesBlockResponse.status,200,await salesBlockResponse.clone().text());
+   const salesBlock=await salesBlockResponse.json();assert.equal(salesBlock.rows,2);
+   const salesRows=parseCsv(salesBlock.csv,{bom:true,columns:true,skip_empty_lines:true}) as Array<{id:string;kind:string;amountMinor:string;amountState:string}>;
+   assert.deepEqual(salesRows.map(row=>({id:row.id,kind:row.kind,amountMinor:row.amountMinor,amountState:row.amountState})).sort((a,b)=>a.id.localeCompare(b.id)),[
+    {id:"sales-export-generic-line",kind:"sale-line",amountMinor:"1200",amountState:"known"},
+    {id:"sales-export-pending-line",kind:"captured-product-line",amountMinor:"900",amountState:"captured-invoice-total-pending"},
+   ]);
    const sourceSystem=`export-${randomUUID()}`,snapshotId=`export-${randomUUID()}`;
    await db.legacyImportSnapshot.create({data:{id:snapshotId,sourceSystem,filename:"synthetic.csv",fileHash:"4".repeat(64),importerVersion:"export-fixture",createdBy:"importer",reviewedBy:"finance",status:"reviewed",coverage:[],controls:{}}});
    await db.legacyHistoryPublication.create({data:{sourceSystem,snapshotId,fileHash:"4".repeat(64),mappingId:"export-mapping",fingerprint:"5".repeat(64),publishedBy:"owner",evidence:{reference:"fixture-independent-review"}}});

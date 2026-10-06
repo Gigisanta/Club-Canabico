@@ -143,11 +143,23 @@ test("customer segmentation uses all confirmed history through the inclusive Bue
   assert.deepEqual(query.where.fulfillmentState, { not: "cancelled" });
 });
 
-test("sales SQL includes a 00:30Z order in the prior Buenos Aires civil day", { skip: !reportTestSchema }, async () => {
+test("pending AppSheet captures stay outside official reports while generic orders remain included", { skip: !reportTestSchema }, async t => {
+  t.after(async () => {
+    await reportTestSchema!.db.operationOrderLine.deleteMany({ where: { id: { in: ["utc-boundary-generic-line", "pending-appsheet-line"] } } });
+    await reportTestSchema!.db.operationOrder.deleteMany({ where: { id: { in: ["utc-boundary-order", "pending-appsheet-order", "pending-only-appsheet-order"] } } });
+    await reportTestSchema!.db.operationMember.deleteMany({ where: { id: { in: ["utc-boundary-member", "pending-only-member"] } } });
+    await reportTestSchema!.db.historicalDeliverySale.deleteMany({ where: { sourceSystem: "report-contract-boundary" } });
+  });
   const fixture = new Date("2026-10-02T00:30:00.000Z");
   const civilDate = reportQueries.reportTodayCivilDate(fixture);
   assert.equal(civilDate, "2026-10-01");
 
+  await reportTestSchema!.db.operationMember.create({
+    data: { id: "utc-boundary-member", name: "Report fixture member", address: {}, preferences: {} },
+  });
+  await reportTestSchema!.db.operationMember.create({
+    data: { id: "pending-only-member", name: "Pending invoice fixture", address: {}, preferences: {} },
+  });
   await reportTestSchema!.db.operationOrder.create({
     data: {
       id: "utc-boundary-order",
@@ -158,10 +170,72 @@ test("sales SQL includes a 00:30Z order in the prior Buenos Aires civil day", { 
       quote: {},
       subtotalMinor: 5_500_000n,
       totalMinor: 5_500_000n,
+      fulfillmentState: "delivered",
       address: {},
       createdBy: "report-contract-fixture",
       confirmedAt: fixture,
     },
+  });
+  await reportTestSchema!.db.operationOrder.create({
+    data: {
+      id: "pending-appsheet-order",
+      memberId: "utc-boundary-member",
+      channel: "local",
+      currency: "ARS",
+      commercialState: "confirmed",
+      fulfillmentState: "delivered",
+      quote: {
+        source: "appsheet-invoice",
+        capturedBaseMinor: "190000700",
+        capturedProductMinor: "190000000",
+        subtotalMinor: null,
+        totalMinor: null,
+        subtotalCalculationState: "pending_definition",
+        totalCalculationState: "pending_definition",
+      },
+      subtotalMinor: 190_000_000n,
+      deliveryMinor: 700n,
+      totalMinor: 190_000_700n,
+      address: {},
+      createdBy: "report-contract-fixture",
+      confirmedAt: fixture,
+    },
+  });
+  await reportTestSchema!.db.operationOrder.create({
+    data: {
+      id: "pending-only-appsheet-order",
+      memberId: "pending-only-member",
+      channel: "local",
+      currency: "ARS",
+      commercialState: "confirmed",
+      fulfillmentState: "delivered",
+      quote: {
+        source: "appsheet-invoice",
+        capturedBaseMinor: "490",
+        capturedProductMinor: "490",
+        subtotalMinor: null,
+        totalMinor: null,
+        subtotalCalculationState: "pending_definition",
+        totalCalculationState: "pending_definition",
+      },
+      subtotalMinor: 490n,
+      totalMinor: 490n,
+      address: {},
+      createdBy: "report-contract-fixture",
+      confirmedAt: new Date("2026-09-30T15:00:00.000Z"),
+    },
+  });
+  await reportTestSchema!.db.operationOrderLine.createMany({
+    data: [
+      {
+        id: "utc-boundary-generic-line", orderId: "utc-boundary-order", skuId: "generic-sku", unit: "g",
+        requested: "1", delivered: "1", unitPrice: "1", referenceMinor: 5_500_000n, revenueMinor: 5_500_000n,
+      },
+      {
+        id: "pending-appsheet-line", orderId: "pending-appsheet-order", skuId: "pending-sku", unit: "g",
+        requested: "1", delivered: "1", unitPrice: "1", referenceMinor: 190_000_000n, revenueMinor: 190_000_000n,
+      },
+    ],
   });
   await reportTestSchema!.db.historicalDeliverySale.createMany({
     data: [
@@ -190,7 +264,45 @@ test("sales SQL includes a 00:30Z order in the prior Buenos Aires civil day", { 
   );
   assert.equal(report.metrics.operational.confirmedOrderCount, 1);
   assert.deepEqual(report.metrics.operational.orderTotalByCurrency, [{ currency: "ARS", minor: "5500000" }]);
+  assert.deepEqual(report.metrics.pendingAppSheetInvoices.capturedBaseMinorByCurrency, [{ currency: "ARS", minor: "190000700" }]);
+  assert.deepEqual(report.metrics.pendingAppSheetInvoices.capturedProductLineMinorByCurrency, [{ currency: "ARS", minor: "190000000" }]);
+  assert.deepEqual(report.metrics.pendingAppSheetInvoices.capturedClientTariffMinorByCurrency, [{ currency: "ARS", minor: "700" }]);
+  assert.equal(report.metrics.pendingAppSheetInvoices.totalMinorByCurrency, null);
+  assert.equal(report.metrics.pendingAppSheetInvoices.recognizedAsSalesRevenue, false);
   assert.equal(report.metrics.historicalDelivery.saleCount, 1);
+
+  const products = await reportTestSchema!.queries.queryOperationsReport("product-contribution", { from: civilDate, to: civilDate });
+  assert.equal(products.metrics.deliveredLineCount, 1);
+  assert.deepEqual(products.metrics.pendingAppSheetInvoices.capturedProductLineMinorByCurrency, [{ currency: "ARS", minor: "190000000" }]);
+  assert.deepEqual(products.metrics.recognizedDeliveryAndSurchargeByCurrency, [{ currency: "ARS", minor: "0" }]);
+  assert.deepEqual(products.metrics.pendingAppSheetDeliveryTariffByCurrency, [{ currency: "ARS", minor: "700" }]);
+  assert.equal(products.metrics.pendingAppSheetDeliveryTariffRecognized, false);
+
+  const segmentation = await reportTestSchema!.queries.queryOperationsReport("customer-segmentation", { from: civilDate, to: civilDate });
+  assert.equal(segmentation.metrics.currentOperationOrderCount, 1);
+  assert.equal(segmentation.metrics.sourceRowsComplete, true);
+  assert.equal(segmentation.metrics.segmentationSummaryComplete, true);
+  assert.equal(segmentation.metrics.segmentationDataComplete, false);
+  assert.equal(segmentation.metrics.pendingAppSheetInvoiceMemberCount, 2);
+  assert.equal(segmentation.metrics.pendingAppSheetInvoiceOrderCount, 2);
+  assert.deepEqual(segmentation.metrics.segmentCounts, [{ segment: "insufficient-data", memberCount: null, suppressed: true }]);
+  assert.ok(segmentation.coverage.some(row => row.source === "pending-appsheet-invoice-segmentation-inputs"
+    && row.state === "partial" && row.knownCount === 0 && row.expectedCount === 2));
+
+  const { memberHistory } = await import("../server/operations/member-history.js");
+  const history = await memberHistory("utc-boundary-member", 10);
+  const genericHistoryOrder = history.orders.find(order => order.id === "utc-boundary-order")!;
+  assert.equal(genericHistoryOrder.totalMinor, 5_500_000n);
+  assert.equal(genericHistoryOrder.subtotalMinor, 5_500_000n);
+  assert.equal(genericHistoryOrder.productMinor, 5_500_000n);
+  const pendingHistoryOrder = history.orders.find(order => order.id === "pending-appsheet-order")!;
+  assert.equal(pendingHistoryOrder.totalMinor, null);
+  assert.equal(pendingHistoryOrder.subtotalMinor, null);
+  assert.equal(pendingHistoryOrder.productMinor, null);
+  assert.equal(pendingHistoryOrder.capturedBaseMinor, "190000700");
+  assert.equal(pendingHistoryOrder.capturedProductMinor, "190000000");
+  assert.equal(pendingHistoryOrder.totalCalculationState, "pending_definition");
+  assert.equal("quote" in pendingHistoryOrder, false);
 });
 
 test("cancelled demand and customer returns do not inflate spend, months or recency", () => {

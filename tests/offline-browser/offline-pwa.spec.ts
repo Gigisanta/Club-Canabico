@@ -11,7 +11,7 @@ const ORDER_ID = "00000000-0000-4000-8000-000000000031";
 const LINE_ID = "00000000-0000-4000-8000-000000000041";
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-interface SyncEvent { requestId?: string; targetId?: string }
+interface SyncEvent { requestId?: string; targetId?: string; command?: string; data?: Record<string, unknown> }
 interface SyncRequest { leaseId?: string; deviceId?: string; events?: SyncEvent[] }
 interface SyncReply { status: number; body: unknown }
 interface BackupRequest { leaseId?: string; deviceId?: string; package?: { packageId?: string }; sha256?: string }
@@ -208,6 +208,26 @@ async function readQueueEntryState(page: Page, requestId: string): Promise<{ req
   return row && { requestId: row.requestId, status: row.status, attempted: row.attempted };
 }
 
+async function readEncryptedQueueRows(page: Page): Promise<Array<{ requestId: string; algorithm: string; iv: string; ciphertext: string }>> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const open = indexedDB.open("bombo-delivery-offline-v1", 1);
+      open.onsuccess = () => resolve(open.result);
+      open.onerror = () => reject(open.error);
+    });
+    const rows = await new Promise<Array<{ requestId: string; encrypted: { algorithm: string; iv: string; ciphertext: string } }>>((resolve, reject) => {
+      const transaction = database.transaction("outbox", "readonly");
+      const request = transaction.objectStore("outbox").getAll();
+      request.onsuccess = () => resolve(request.result as Array<{ requestId: string; encrypted: { algorithm: string; iv: string; ciphertext: string } }>);
+      request.onerror = () => reject(request.error);
+      transaction.onabort = () => reject(transaction.error);
+      transaction.onerror = () => reject(transaction.error);
+    });
+    database.close();
+    return rows.map(({ requestId, encrypted }) => ({ requestId, ...encrypted }));
+  });
+}
+
 async function readStoredDocumentMetadata(page: Page): Promise<Array<{ id: string; sha256?: string; version?: string; mimeType: string; byteLength: number }>> {
   return page.evaluate(async () => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -374,6 +394,81 @@ test("prepara el turno, conserva el shell y bloquea capturas al vencer el lease"
   await expect(page.getByRole("alert")).toBeFocused();
   await expect(page.getByText("1 eventos en cola")).toBeVisible();
   await expect.poll(() => serviceWorkerAssetResponses.length).toBeGreaterThan(0);
+});
+
+test("conserva Mercado Pago cifrado al bloquear y recargar, y sincroniza el medio sin convertirlo en tarjeta", async ({ page, context }) => {
+  const passphrase = "frase local segura para Mercado Pago";
+  const captureApi = await installMockDeliveryApi(page, "driver-mercado-pago");
+  await mockPersistentStorage(page, true);
+  await prepareDevice(page, passphrase);
+  await context.setOffline(true);
+
+  await page.getByText("Informar un cobro", { exact: true }).click();
+  await page.getByLabel("Medio").selectOption("mercado_pago");
+  await page.getByLabel("Importe").fill("1250,75");
+  await page.getByLabel("Comprobante / constancia").fill("Comprobante Mercado Pago de fixture");
+  await page.getByRole("button", { name: "Informar cobro" }).click();
+
+  await expect(page.getByText("1 eventos en cola")).toBeVisible();
+  await expect(page.getByText("Cobro informado", { exact: true })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Cobro declarado" })).toContainText("pendiente de revisión");
+  expect(captureApi.syncRequests).toHaveLength(0);
+
+  const beforeReload = await readEncryptedQueueRows(page);
+  expect(beforeReload).toHaveLength(1);
+  expect(beforeReload[0]?.algorithm).toBe("AES-256-GCM");
+  expect(beforeReload[0]?.ciphertext).toMatch(/^[A-Za-z0-9+/]+=*$/);
+  expect(JSON.stringify(beforeReload[0])).not.toContain("mercado_pago");
+  expect(JSON.stringify(beforeReload[0])).not.toContain("Comprobante Mercado Pago de fixture");
+
+  await page.getByRole("button", { name: "Bloquear" }).click();
+  await expect(page.getByRole("heading", { name: "Desbloqueá tu turno" })).toBeVisible();
+  await page.getByLabel("Frase de acceso").fill(passphrase);
+  await page.getByRole("button", { name: "Desbloquear" }).click();
+  await expect(page.getByText("1 eventos en cola")).toBeVisible();
+  await expect(page.getByText("Cobro informado", { exact: true })).toBeVisible();
+
+  await context.unroute("**/api/**");
+  await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller?.scriptURL.endsWith("/bombo-sw.js")));
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Desbloqueá tu turno" })).toBeVisible();
+  await page.getByLabel("Frase de acceso").fill(passphrase);
+  await page.getByRole("button", { name: "Desbloquear" }).click();
+  await expect(page.getByText("1 eventos en cola")).toBeVisible();
+  await expect(page.getByText("Cobro informado", { exact: true })).toBeVisible();
+  const afterReload = await readEncryptedQueueRows(page);
+  expect(afterReload).toEqual(beforeReload);
+
+  const syncApi = await installMockDeliveryApi(page, "driver-mercado-pago", (request) => ({
+    status: 200,
+    body: { results: (request.events ?? []).map((event) => ({
+      requestId: event.requestId,
+      targetId: event.targetId,
+      version: 1,
+      result: {},
+      replay: false,
+      status: "accepted",
+    })) },
+  }));
+  await context.setOffline(false);
+  await expect.poll(() => syncApi.syncRequests.length).toBe(1);
+  await expect(page.getByText("Sincronizado: 1")).toBeVisible();
+
+  const sent = syncApi.syncRequests[0]?.events;
+  expect(sent).toHaveLength(1);
+  expect(sent?.[0]).toMatchObject({
+    command: "CollectionReported",
+    data: {
+      orderId: ORDER_ID,
+      deliveryId: DELIVERY_ID,
+      method: "mercado_pago",
+      currency: "ARS",
+      amountMinor: "125075",
+      evidence: { note: "Comprobante Mercado Pago de fixture" },
+    },
+  });
+  expect(sent?.[0]?.data?.method).not.toBe("card");
+  expect(await readQueueEntryState(page, sent![0]!.requestId!)).toMatchObject({ status: "accepted", attempted: true });
 });
 
 test("rechaza una captura cuando el navegador deniega persist()", async ({ page }) => {

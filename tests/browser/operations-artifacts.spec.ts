@@ -98,7 +98,7 @@ test("new order validation preserves its draft and closing restores focus", asyn
   await page.getByRole("button", { name: "Explorar club de demostración" }).click();
   await expect(page.getByRole("heading", { name: "Pedidos", exact: true })).toBeVisible();
 
-  const trigger = page.getByRole("button", { name: "＋ Nuevo pedido", exact: true });
+  const trigger = page.getByRole("button", { name: "＋ Pedido avanzado", exact: true });
   await trigger.click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();

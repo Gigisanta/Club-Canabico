@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { db } from "../db.js";
 import { OperationError, type Tx } from "./core.js";
+import { projectInvoiceAmount } from "./invoice-projection.js";
 import { signCursor, verifyCursor } from "./signed-cursor.js";
 
 const historicalCursorSchema = z.strictObject({ memberId: z.string(), fingerprint: z.string().regex(/^[a-f0-9]{64}$/), snapshotId: z.string(), row: z.number().int().positive(), id: z.string() });
@@ -18,7 +19,7 @@ async function readMemberHistory(tx: Tx, memberId: string, limit: number, cursor
     throw new OperationError(400, "HISTORY_CURSOR_INVALID", "El cursor no corresponde al historial del socio.");
   const [orders, identities] = await Promise.all([
     tx.operationOrder.findMany({ where: { memberId }, select: {
-      id: true, currency: true, totalMinor: true, subtotalMinor: true, confirmedAt: true, createdAt: true,
+      id: true, currency: true, totalMinor: true, subtotalMinor: true, quote: true, confirmedAt: true, createdAt: true,
       channel: true, commercialState: true, fulfillmentState: true, verifiedMinor: true,
     }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: limit + 1, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}) }),
     tx.legacyIdentity.findMany({ where: { destinationType: "member", destinationId: memberId, approvedBy: { not: null }, sourceTable: "C_Cliente" } }),
@@ -75,7 +76,12 @@ async function readMemberHistory(tx: Tx, memberId: string, limit: number, cursor
   const historicalNextCursor = historicalHasMore && last ? signCursor("member-history", { memberId, fingerprint, snapshotId: last.snapshotId, row: last.sourceRow, id: last.id }) : null;
   const hasMore = orders.length > limit;
   return {
-    orders: orders.slice(0, limit).map(o => ({ ...o, productMinor: o.subtotalMinor })), nextCursor: hasMore ? orders[limit - 1]!.id : null, hasMore,
+    orders: orders.slice(0, limit).map(o => {
+      const projected = projectInvoiceAmount(o);
+      const { quote, ...publicOrder } = projected;
+      void quote;
+      return { ...publicOrder, productMinor: projected.subtotalMinor };
+    }), nextCursor: hasMore ? orders[limit - 1]!.id : null, hasMore,
     legacyInvoices, historicalHasMore, historicalNextCursor,
     coverage: { historical: populations.length ? "approved-identity-reviewed-snapshot" : "approved-historical-correspondence-pending", snapshotIds: [...new Set(populations.map(p => p.snapshotId))], fingerprint, historyCreatesBalances: false },
   };

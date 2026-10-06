@@ -2,6 +2,7 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { registerCommand, OperationError, json, objectId, currency, minor, positiveMinor, decimal, civilDate, evidence, requireDelivery, capabilities, requireAccountScope, requireMemberScope, touchAggregate, type CommandContext, type Tx } from "./core.js";
 import { parseDecimal, roundHalfUp } from "../../shared/operations/exact.js";
+import { isAppSheetInvoiceTotalPending } from "../../shared/operations/appsheet.js";
 import "./period-coverage.js";
 const signedMinor=z.string().regex(/^(0|-?[1-9]\d{0,18})$/).refine(v=>BigInt(v)>=-9223372036854775808n&&BigInt(v)<=9223372036854775807n);
 function equivalentMinor(amount:bigint,fromCurrency:string,toCurrency:string,rate?:string){
@@ -113,13 +114,13 @@ registerCommand("ForeignExchangeRecorded",{kind:"fx",capability:"accounts.write"
  for(const [accountId,change] of accountChanges)if(change<0n&&await accountBalance(ctx.tx,accountId)<-change)throw new OperationError(422,"ACCOUNT_FUNDS","Saldo insuficiente para cambio y comisión");
  return {event:await postLedger(ctx,"fx",ctx.envelope.targetId,legs,{rate:v.rate,differenceMinor:difference.toString(),evidence:v.evidence,commissionMinor:v.commissionMinor})};
 }});
-const reportSchema=z.strictObject({orderId:objectId,deliveryId:objectId.optional(),method:z.enum(["cash","transfer","card"]),currency,amountMinor:positiveMinor,accountId:objectId.optional(),custodianId:objectId.optional(),evidence});
+const reportSchema=z.strictObject({orderId:objectId,deliveryId:objectId.optional(),method:z.enum(["cash","transfer","mercado_pago","card"]),currency,amountMinor:positiveMinor,accountId:objectId.optional(),custodianId:objectId.optional(),evidence});
 async function authorizeCollection(ctx:CommandContext){const caps=await capabilities(ctx.tx,ctx.actor);const deliveryId=ctx.envelope.data.deliveryId as string|undefined;if(deliveryId){const d=await ctx.tx.deliveryAssignment.findUnique({where:{id:deliveryId}});if(!d||d.orderId!==ctx.envelope.data.orderId)throw new OperationError(403,"COLLECTION_SCOPE","La entrega pertenece a otro pedido");if(!caps.includes("finance.read")&&!caps.includes("orders.write"))await requireDelivery(ctx,deliveryId);}else if(!caps.includes("finance.read")&&!caps.includes("orders.write"))throw new OperationError(403,"COLLECTION_SCOPE","El repartidor debe indicar su entrega asignada");}
 registerCommand("CollectionReported",{kind:"collection",capability:"collections.report",create:true,schema:reportSchema,authorize:authorizeCollection,execute:async ctx=>{
- const v=ctx.envelope.data as z.infer<typeof reportSchema>;
- const order=await ctx.tx.operationOrder.findUnique({where:{id:v.orderId}});
- if(!order||order.commercialState!=="confirmed")throw new OperationError(422,"COLLECTION_ORDER","El pedido no está confirmado");
- if(v.method==="cash"&&v.deliveryId&&v.custodianId!==ctx.actor.id)throw new OperationError(422,"CASH_CUSTODY","El efectivo debe indicar la custodia real del repartidor");
+  const v=ctx.envelope.data as z.infer<typeof reportSchema>;
+  const order=await ctx.tx.operationOrder.findUnique({where:{id:v.orderId}});
+  if(!order||order.commercialState!=="confirmed")throw new OperationError(422,"COLLECTION_ORDER","El pedido no está confirmado");
+  if(v.method==="cash"&&v.deliveryId&&v.custodianId!==ctx.actor.id)throw new OperationError(422,"CASH_CUSTODY","El efectivo debe indicar la custodia real del repartidor");
  if(v.method!=="cash"&&v.custodianId)throw new OperationError(422,"CASH_CUSTODY","Una transferencia declarada no se encuentra bajo custodia física del repartidor");
  const report=await ctx.tx.collectionReport.create({data:{id:ctx.envelope.targetId,...v,amountMinor:BigInt(v.amountMinor),evidence:json(v.evidence),reporterId:ctx.actor.id}});
  return {report,effect:"reported_only"};
@@ -128,6 +129,7 @@ registerCommand("CollectionVerified",{kind:"collection",capability:"collections.
  const c=await ctx.tx.collectionReport.findUniqueOrThrow({where:{id:ctx.envelope.targetId}});
  if(c.status!=="reported")throw new OperationError(409,"COLLECTION_ALREADY_RESOLVED","El cobro ya fue resuelto");
  const order=await ctx.tx.operationOrder.findUniqueOrThrow({where:{id:c.orderId}});
+ if(isAppSheetInvoiceTotalPending(order.quote))throw new OperationError(423,"INVOICE_TOTAL_DEFINITION_PENDING","Falta cotejar el total facturado antes de informar un cobro");
  const a=await ctx.tx.operationAccount.findUniqueOrThrow({where:{id:ctx.envelope.data.accountId as string}});
  if(a.currency!==c.currency)throw new OperationError(422,"COLLECTION_CURRENCY","La cuenta debe tener la moneda realmente recibida");
  if(c.custodianId&&(a.kind!=="custody"||a.custodianId!==c.custodianId))throw new OperationError(422,"CUSTODY_ACCOUNT_REQUIRED","El efectivo en custodia no es caja disponible del club");
@@ -236,6 +238,7 @@ registerCommand("AccountReconciled",{kind:"account",capability:"accounts.write",
 async function creditScope(ctx:CommandContext){const c=await ctx.tx.memberCredit.findUniqueOrThrow({where:{id:ctx.envelope.targetId}});await requireMemberScope(ctx.tx,ctx.actor,c.memberId);}
 registerCommand("MemberCreditApplied",{kind:"credit",capability:"collections.verify",schema:z.strictObject({orderId:objectId,amountMinor:positiveMinor,evidence}),authorize:creditScope,execute:async ctx=>{
  const c=await ctx.tx.memberCredit.findUniqueOrThrow({where:{id:ctx.envelope.targetId}}),o=await ctx.tx.operationOrder.findUniqueOrThrow({where:{id:ctx.envelope.data.orderId as string}}),amount=BigInt(ctx.envelope.data.amountMinor as string);
+ if(isAppSheetInvoiceTotalPending(o.quote))throw new OperationError(423,"INVOICE_TOTAL_DEFINITION_PENDING","No se puede aplicar un crédito hasta cotejar el total facturado de AppSheet");
  if(c.treatment!=="member_credit"||o.memberId!==c.memberId||o.currency!==c.currency||o.commercialState!=="confirmed")throw new OperationError(422,"CREDIT_APPLICATION_SCOPE","Aplicá el crédito al mismo socio, moneda y pedido confirmado");
  if(amount>c.amountMinor-c.resolvedMinor||amount>o.totalMinor-o.verifiedMinor)throw new OperationError(422,"CREDIT_APPLICATION_LIMIT","La aplicación supera el crédito o la deuda pendientes");
  await ctx.tx.memberCredit.update({where:{id:c.id},data:{resolvedMinor:{increment:amount}}});

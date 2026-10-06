@@ -5,6 +5,7 @@ import { db } from "../db.js";
 import { executeCommand, envelopeSchema, commandSpecs, OperationError, requireCapability, json, wire, type Tx } from "./core.js";
 import { canonicalCommandBodyHash } from "./canonical.js";
 import { canonicalJson } from "../../shared/operations/exact.js";
+import { isAppSheetInvoiceTotalPending } from "../../shared/operations/appsheet.js";
 export const deliverySyncRoutes=Router();
 const allowed=new Set(["DeliveryRecorded","DeliveryIncident","CollectionReported"]);
 const eventSchema=envelopeSchema.extend({sequence:z.number().int().min(1).optional(),dependsOn:z.uuid().nullable().optional()});
@@ -49,11 +50,15 @@ deliverySyncRoutes.get("/manifests/current",async(req,res)=>{
  const device=await db.operationDevice.findUnique({where:{id:deviceId}});
  if(!device||device.userId!==req.user.id||device.revokedAt)throw new OperationError(403,"DEVICE_SCOPE","Dispositivo no autorizado");
  if(!device.storageCertified||!device.storageCertifiedAt)throw new OperationError(423,"DEVICE_NOT_CERTIFIED","El dispositivo requiere prueba de almacenamiento y reinicio");
- const assignments=await db.deliveryAssignment.findMany({where:{driverId:req.user.id,status:{in:["assigned","dispatched","partially_delivered"]}},orderBy:[{routeId:"asc"},{stopSequence:"asc"}]});
- const now=new Date(),ids=assignments.map(a=>a.id),orderIds=[...new Set(assignments.map(a=>a.orderId))],routeIds=[...new Set(assignments.flatMap(a=>a.routeId?[a.routeId]:[]))];
- const orders=await db.operationOrder.findMany({where:{id:{in:orderIds}},include:{lines:true}});
+ const foundAssignments=await db.deliveryAssignment.findMany({where:{driverId:req.user.id,status:{in:["assigned","dispatched","partially_delivered"]}},orderBy:[{routeId:"asc"},{stopSequence:"asc"}]});
+ const now=new Date(),orderIds=[...new Set(foundAssignments.map(a=>a.orderId))];
+ const foundOrders=await db.operationOrder.findMany({where:{id:{in:orderIds}},include:{lines:true}});
+ if(foundOrders.length!==orderIds.length)throw new OperationError(409,"DELIVERY_ORDER_PENDING","Una entrega asignada no tiene un pedido disponible");
+ const pendingTotalIds=new Set(foundOrders.filter(order=>isAppSheetInvoiceTotalPending(order.quote)).map(order=>order.id));
+ const assignments=foundAssignments.filter(assignment=>!pendingTotalIds.has(assignment.orderId));
+ const orders=foundOrders.filter(order=>!pendingTotalIds.has(order.id));
+ const ids=assignments.map(a=>a.id),routeIds=[...new Set(assignments.flatMap(a=>a.routeId?[a.routeId]:[]))];
  const orderById=new Map(orders.map(order=>[order.id,order]));
- if(orderById.size!==orderIds.length)throw new OperationError(409,"DELIVERY_ORDER_PENDING","Una entrega asignada no tiene un pedido disponible");
  const memberIds=[...new Set(orders.map(order=>order.memberId))];
  const skuIds=[...new Set(orders.flatMap(order=>order.lines.map(line=>line.skuId)))];
  const civilToday=new Intl.DateTimeFormat("en-CA",{timeZone:"America/Argentina/Buenos_Aires"}).format(now);
@@ -130,6 +135,12 @@ deliverySyncRoutes.post("/sync",async(req,res)=>{
   let quarantineReason=reason;
   const delivery=deliveryId?await db.deliveryAssignment.findUnique({where:{id:deliveryId}}):null;
   if(!quarantineReason&&(!assigned.includes(deliveryId)||delivery?.driverId!==req.user.id))quarantineReason="ASSIGNMENT_CHANGED";
+  if(!quarantineReason&&envelope.command==="CollectionReported"&&delivery){
+   const order=await db.operationOrder.findUnique({where:{id:delivery.orderId},select:{quote:true}});
+   if(order&&isAppSheetInvoiceTotalPending(order.quote)){
+    results.push({requestId:event.requestId,status:"rejected",code:"INVOICE_TOTAL_DEFINITION_PENDING"});statuses.set(event.requestId,"rejected");continue;
+   }
+  }
   if(quarantineReason){
    let alreadyCommitted=false;
    try{

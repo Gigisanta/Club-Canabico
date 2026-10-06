@@ -10,6 +10,8 @@ import { RemoteSelect } from "./RemoteSelect";
 import { ProductInspector } from "./ProductInspector";
 import { CanonicalExportPanel } from "./CanonicalExportPanel";
 import { AccountSetup } from "./AccountSetup";
+import { AppSheetCatalogue } from "./AppSheetCatalogue";
+import { AppSheetInvoiceForm } from "./AppSheetInvoiceForm";
 import { ReplacementReadiness } from "./ReplacementReadiness";
 import { useRemote } from "./useRemote";
 import type { ActionField, CommandAction, JsonRecord, OperationsContext, RunCommand } from "./types";
@@ -664,8 +666,10 @@ export function OperationalWorkspace(props: Props) {
   const [reconciliationAccountId, setReconciliationAccountId] = useState("");
   const [selectedMemberId, setSelectedMemberId] = useState("");
   const [selectedProductId, setSelectedProductId] = useState("");
+  const [invoiceEditor, setInvoiceEditor] = useState<{ mode: "invoice" | "preorder" | "edit-preorder" | "confirm-preorder"; order?: Row; expectedVersion?: number; memberName?: string } | null>(null);
   const [memberSearch, setMemberSearch] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => { if (pageId !== "orders") setInvoiceEditor(null); }, [pageId]);
   const listSearchKey = `q-${pageId}`;
   const tableSearch = pageId === "members" ? "" : searchParams.get(listSearchKey) ?? "";
   const updateTableSearch = (value: string) => {
@@ -825,12 +829,21 @@ export function OperationalWorkspace(props: Props) {
       const sku = catalogRows.find(candidate => idOf(candidate) === String(line.skuId ?? ""));
       return { ...line, ...(sku ? { skuLabel: textValue(sku.name) } : {}) };
     }) : row[key];
+    const orderQuote = recordValue(row, "quote");
+    const appSheetInvoice = pageId === "orders" && recordValue(orderQuote, "source") === "appsheet-invoice";
+    const memberLabel = textValue(memberRows.find(item => idOf(item) === String(row.memberId ?? ""))?.name, row.memberId ? `Socio #${shortReference(String(row.memberId))}` : "—");
     return {
       ...row,
       ...(rawId ? { idLabel: `${entityName[pageId] ?? "Registro"} #${reference}`, referenceKey: `${pageId}-${reference.toLowerCase()}` } : {}),
       ...(row.lines ? { lines: labelledLines("lines") } : {}),
       ...(row.items ? { items: labelledLines("items") } : {}),
       ...(pageId === "orders" && row.memberId ? { memberIdLabel: textValue(memberRows.find(item => idOf(item) === String(row.memberId))?.name, `Socio #${shortReference(String(row.memberId))}`) } : {}),
+      ...(pageId === "orders" ? {
+        invoiceOrOrderLabel: appSheetInvoice ? textValue(recordValue(orderQuote, "invoiceNumber"), rawId ? `Factura #${reference}` : "Factura sin número") : textValue(row.idLabel, rawId ? `Pedido #${reference}` : "Pedido"),
+        invoiceMemberLabel: memberLabel,
+        invoiceTotalLabel: appSheetInvoice ? "Pendiente de definición" : formatMinor(row.totalMinor, textValue(row.currency, "ARS")),
+        capturedBaseLabel: appSheetInvoice ? formatMinor(recordValue(orderQuote, "capturedBaseMinor"), textValue(recordValue(orderQuote, "currency"), "ARS")) : "—",
+      } : {}),
       ...(row.driverId ? { driverIdLabel: textValue(driver?.name, "Persona asignada") } : {}),
       ...(row.reporterId ? { reporterIdLabel: textValue(reporter?.name, "Persona reportante") } : {}),
       ...(row.beneficiaryId ? { beneficiaryIdLabel: textValue(beneficiaryMember?.name, textValue(beneficiaryPerson?.name, textValue(beneficiarySupplier?.name, "Beneficiario registrado"))) } : {}),
@@ -944,7 +957,7 @@ export function OperationalWorkspace(props: Props) {
   const createButtons = () => {
     const buttons: Array<{ label: string; onClick: () => void }> = [];
     if (pageId === "members" && hasCommand(context, "MemberCreated")) buttons.push({ label: "＋ Nuevo socio", onClick: () => runAction("MemberCreated", "Crear socio", fields(field("name", "Nombre completo", "text", { required: true }), field("email", "Correo electrónico", "email"), field("phone", "Teléfono", "tel")), v => ({ name: str(v, "name"), email: str(v, "email"), phone: str(v, "phone"), address: {}, preferences: {} }), undefined, "", true) });
-    if (pageId === "orders" && hasCommand(context, "OrderCreated")) buttons.push({ label: "＋ Nuevo pedido", onClick: () => runAction("OrderCreated", "Iniciar pedido", fields({ ...select("memberId", "Socio", optionsOf(memberRows), true), lookupPath: "/api/operations/members" }, select("channel", "Modalidad", [{ value: "local", label: "Retiro" }, { value: "delivery", label: "Reparto" }]), currencyField(), field("address", "Domicilio de reparto (opcional)", "textarea"), field("preorder", "Crear como preventa", "checkbox")), v => ({ memberId: str(v, "memberId"), channel: str(v, "channel"), currency: str(v, "currency"), address: str(v, "address") ? { address: str(v, "address") } : {}, preorder: v.preorder === true }), undefined, "", true) });
+    if (pageId === "orders" && hasCommand(context, "OrderCreated")) buttons.push({ label: "＋ Pedido avanzado", onClick: () => runAction("OrderCreated", "Iniciar pedido", fields({ ...select("memberId", "Socio", optionsOf(memberRows), true), lookupPath: "/api/operations/members" }, select("channel", "Modalidad", [{ value: "local", label: "Retiro" }, { value: "delivery", label: "Reparto" }]), currencyField(), field("address", "Domicilio de reparto (opcional)", "textarea"), field("preorder", "Crear como preventa", "checkbox")), v => ({ memberId: str(v, "memberId"), channel: str(v, "channel"), currency: str(v, "currency"), address: str(v, "address") ? { address: str(v, "address") } : {}, preorder: v.preorder === true }), undefined, "", true) });
     const purchaseSupplierOptions = supplierRows.flatMap(row => idOf(row) && typeof row.name === "string" && row.name.trim() ? [{ value: idOf(row), label: row.name }] : []);
     const purchaseSkuOptions = catalogRows.flatMap(row => {
       const value = idOf(row), label = textValue(row.name, textValue(row.code, ""));
@@ -983,7 +996,7 @@ export function OperationalWorkspace(props: Props) {
     if (pageId === "routes" && hasCapability(context, "logistics.write") && hasCommand(context, "RouteCreated") && deliveryPeople.length > 0) buttons.push({ label: "＋ Nueva ruta", onClick: () => runAction("RouteCreated", "Programar ruta", fields(select("driverId", "Repartidor autorizado", optionsOf(deliveryPeople, ["name"])), field("shiftDate", "Fecha del turno", "date", { required: true, defaultValue: localDate() }), select("custodianAccountId", "Cuenta de custodia (opcional)", [{ value: "", label: "Sin asignar" }, ...optionsOf(accountRows.filter(a => a.kind === "custody"))], false)), v => ({ driverId: str(v, "driverId"), shiftDate: str(v, "shiftDate"), ...(str(v, "custodianAccountId") ? { custodianAccountId: str(v, "custodianAccountId") } : {}) }), undefined, "", true) });
     if (pageId === "collections" && hasCommand(context, "CollectionReported")) buttons.push({ label: "＋ Reportar cobro", onClick: () => runAction("CollectionReported", "Reportar un cobro", fields(
       select("orderId", "Pedido confirmado", orderRows.filter(order => order.commercialState === "confirmed").map(order => ({ value: idOf(order), label: `${labelOf(memberRows.find(member => member.id === order.memberId) ?? order, ["name", "id"])} · ${order.channel === "local" ? "Retiro" : "Reparto"} · ${formatMinor(order.totalMinor, order.currency)} · ${idOf(order)}` }))),
-      select("method", "Medio recibido", [{ value: "cash", label: "Efectivo" }, { value: "transfer", label: "Transferencia" }, { value: "card", label: "Tarjeta" }]), currencyField(), field("amount", "Importe recibido", "amount", { required: true }),
+      select("method", "Medio recibido", [{ value: "cash", label: "Efectivo" }, { value: "transfer", label: "Transferencia" }, { value: "mercado_pago", label: "Mercado Pago" }, { value: "card", label: "Tarjeta" }]), currencyField(), field("amount", "Importe recibido", "amount", { required: true }),
       select("custodianId", "Custodia del efectivo (opcional)", accountRows.filter(account => account.kind === "custody" && account.custodianId).map(account => ({ value: String(account.custodianId), label: `${labelOf(account)} · ${textValue(account.currency)}` })), false, "Vacío significa recepción directa por el club. La verificación determina la cuenta real."), evidenceField("Nota del reporte"),
     ), v => ({ orderId: str(v, "orderId"), method: str(v, "method"), currency: str(v, "currency"), amountMinor: amountFormToMinor(str(v, "amount")), ...(str(v, "custodianId") ? { custodianId: str(v, "custodianId") } : {}), evidence: note(v) }), undefined, "", true, "El reporte conserva un aviso; la deuda y las cuentas cambian sólo con la verificación.") });
     if (pageId === "settlements" && hasCommand(context, "RenditionAccepted")) buttons.push({ label: "＋ Aceptar rendición", onClick: () => runAction("RenditionAccepted", "Aceptar rendición del repartidor", fields(
@@ -1047,7 +1060,7 @@ export function OperationalWorkspace(props: Props) {
     if (pageId === "commercial" && hasCommand(context, "PricePolicyProposed")) buttons.push({ label: "＋ Proponer política", onClick: () => runAction("PricePolicyProposed", "Proponer una versión de precios", fields(
       field("name", "Nombre", "text", { required: true }), field("version", "Versión", "integer", { required: true, defaultValue: "1" }), currencyField(), field("validFrom", "Vigente desde", "date", { required: true, defaultValue: localDate() }), field("validUntil", "Vigente hasta (opcional)", "date"),
       field("tiers", "Escalas", "repeat", { initialRows: 1, maxRows: 1000, addLabel: "Agregar escala", fields: [select("skuId", "Producto", optionsOf(catalogRows, ["name"])), field("minQuantity", "Cantidad mínima", "decimal", { required: true }), field("unitPrice", "Precio por unidad", "decimal", { required: true }), field("scale", "Nombre de la escala", "text", { required: true })] }),
-      select("payment", "Medio de pago habilitado", [{ value: "cash", label: "Efectivo" }, { value: "transfer", label: "Transferencia" }, { value: "card", label: "Tarjeta" }]), field("productPercent", "Recargo de producto (%)", "decimal", { defaultValue: "0" }), field("deliveryPercent", "Recargo de entrega (%)", "decimal", { defaultValue: "0" }),
+      select("payment", "Medio de pago habilitado", [{ value: "cash", label: "Efectivo" }, { value: "transfer", label: "Transferencia" }, { value: "mercado_pago", label: "Mercado Pago" }, { value: "card", label: "Tarjeta" }]), field("productPercent", "Recargo de producto (%)", "decimal", { defaultValue: "0" }), field("deliveryPercent", "Recargo de entrega (%)", "decimal", { defaultValue: "0" }),
       field("benefits", "Beneficios por segmento", "repeat", { addLabel: "Agregar beneficio", fields: [field("segment", "Segmento", "text", { required: true }), field("amount", "Descuento en la moneda de la política", "amount", { required: true })] }), evidenceField(),
     ), v => {
       const tiers = repeatedValues(v, "tiers").map(tier => {
@@ -1119,7 +1132,7 @@ export function OperationalWorkspace(props: Props) {
   const columnsByPage: Record<string, Array<[string, string]>> = {
     members: [["name", "Socio"], ["email", "Correo"], ["phone", "Teléfono"], ["active", "Activo"]],
     catalog: [["name", "Producto"], ["category", "Categoría"], ["unit", "Unidad"], ["active", "Activo"]],
-    orders: [["id", "Pedido"], ["memberId", "Socio"], ["lines", "Productos del pedido"], ["commercialState", "Estado comercial"], ["fulfillmentState", "Preparación"], ["financialState", "Cobro"], ["totalMinor", "Total"], ["currency", "Moneda"]],
+    orders: [["invoiceOrOrderLabel", "Factura / pedido"], ["invoiceMemberLabel", "Cliente"], ["lines", "Productos"], ["commercialState", "Estado comercial"], ["fulfillmentState", "Preparación"], ["financialState", "Cobro"], ["invoiceTotalLabel", "Total facturado"], ["capturedBaseLabel", "Importe capturado"]],
     purchases: [["id", "Compra"], ["supplierId", "Proveedor"], ["agreementDate", "Acuerdo"], ["expectedDate", "Prevista"], ["items", "Artículos"], ["totalMinor", "Total"], ["currency", "Moneda"], ["status", "Estado"]],
     routes: [["shiftDate", "Turno"], ["driverId", "Repartidor"], ["status", "Estado"], ["closedWithPending", "Cierre con pendientes"]],
     tasks: [["title", "Tarea"], ["dueDate", "Vence"], ["status", "Estado"], ["responsibleId", "Responsable"]],
@@ -1135,6 +1148,8 @@ export function OperationalWorkspace(props: Props) {
   const actionButtonsFor = (row: Row) => {
     const id = idOf(row);
     const buttons: Array<{ label: string; onClick: () => void }> = [];
+    const quote = recordValue(row, "quote");
+    const isAppSheetInvoice = recordValue(quote, "source") === "appsheet-invoice";
     if (pageId === "catalog" && hasCapability(context, "stock.read")) buttons.push({ label: "Historia del producto", onClick: () => setSelectedProductId(id) });
     if (pageId === "purchases" && row.status === "draft" && hasCommand(context, "PurchaseOrderApproved")) buttons.push({ label: "Aprobar compra", onClick: () => runAction("PurchaseOrderApproved", "Revisar y aprobar la compra", fields(evidenceField("Motivo de aprobación")), v => ({ evidence: note(v) }), row, "La persona que aprobó debe ser distinta de quien creó el acuerdo.") });
     if (pageId === "purchases" && ["approved", "partially_received"].includes(String(row.status)) && hasCommand(context, "GoodsReceived")) {
@@ -1173,10 +1188,22 @@ export function OperationalWorkspace(props: Props) {
     }
     if (pageId === "members" && hasCommand(context, "MemberUpdated")) buttons.push({ label: "Editar", onClick: () => runAction("MemberUpdated", "Actualizar socio", fields(field("name", "Nombre completo", "text", { required: true, defaultValue: String(row.name ?? "") }), field("email", "Correo", "email", { defaultValue: String(row.email ?? "") }), field("phone", "Teléfono", "tel", { defaultValue: String(row.phone ?? "") })), v => ({ name: str(v, "name"), email: str(v, "email"), phone: str(v, "phone"), address: typeof row.address === "object" && row.address ? row.address as JsonRecord : {}, preferences: typeof row.preferences === "object" && row.preferences ? row.preferences as JsonRecord : {} }), row) });
     if (pageId === "members" && hasCommand(context, "PermissionVerified")) buttons.push({ label: "Verificar permiso", onClick: () => runAction("PermissionVerified", "Verificar permiso operativo", fields(field("kind", "Tipo de permiso", "text", { required: true, defaultValue: "operations" }), field("validFrom", "Válido desde", "date", { required: true, defaultValue: localDate() }), field("validUntil", "Válido hasta", "date", { required: true }), select("evidenceDocumentId", "Documento disponible vinculado al socio", documentOptions(documentRows.filter(doc => doc.memberId === id && doc.state === "available")), true, "Elegí el tipo y vigencia del documento cargado para este socio.")), v => ({ kind: str(v, "kind"), validFrom: str(v, "validFrom"), validUntil: str(v, "validUntil"), evidenceDocumentId: str(v, "evidenceDocumentId") }), row) });
-    if (pageId === "orders" && ["draft", "preorder"].includes(String(row.commercialState)) && hasCommand(context, "OrderQuoted")) buttons.push({ label: "Cotizar", onClick: () => runAction("OrderQuoted", "Preparar cotización", fields(
-      field("paymentMethod", "Medio de pago general", "select", { required: true, defaultValue: "cash", options: [{ value: "cash", label: "Efectivo" }, { value: "transfer", label: "Transferencia" }, { value: "card", label: "Tarjeta" }], help: "Se usa en productos y entrega cuando no elegís un medio específico." }),
-      field("productPaymentMethod", "Medio de pago de productos (opcional)", "select", { required: false, help: "Dejalo sin elegir para heredar el medio general.", options: [{ value: "", label: "Usar medio general" }, { value: "cash", label: "Efectivo" }, { value: "transfer", label: "Transferencia" }, { value: "card", label: "Tarjeta" }] }),
-      field("deliveryPaymentMethod", "Medio de pago de entrega (opcional)", "select", { required: false, help: "Dejalo sin elegir para heredar el medio general.", options: [{ value: "", label: "Usar medio general" }, { value: "cash", label: "Efectivo" }, { value: "transfer", label: "Transferencia" }, { value: "card", label: "Tarjeta" }] }),
+    if (pageId === "orders" && isAppSheetInvoice && row.commercialState === "preorder" && hasCommand(context, "InvoiceUpdated")) buttons.push({ label: "Formulario de venta", onClick: () => {
+      const expectedVersion = versionFor(query.data, row, Number.NaN);
+      if (!Number.isSafeInteger(expectedVersion)) { onNotice("No se pudo confirmar la versión de la preventa. Actualizá Pedidos antes de editarla."); return; }
+      const memberName = textValue(memberRows.find(member => idOf(member) === String(row.memberId ?? ""))?.name, "");
+      setInvoiceEditor({ mode: "edit-preorder", order: row, expectedVersion, memberName });
+    } });
+    const invoiceLines = Array.isArray(recordValue(quote, "lines")) ? recordValue(quote, "lines") as unknown[] : [];
+    if (pageId === "orders" && isAppSheetInvoice && row.commercialState === "preorder" && invoiceLines.length > 0 && hasCommand(context, "InvoiceConfirmed")) buttons.push({ label: "Confirmar preventa", onClick: () => {
+      const expectedVersion = versionFor(query.data, row, Number.NaN);
+      if (!Number.isSafeInteger(expectedVersion)) { onNotice("No se pudo confirmar la versión de la preventa. Actualizá Pedidos antes de confirmarla."); return; }
+      setInvoiceEditor({ mode: "confirm-preorder", order: row, expectedVersion });
+    } });
+    if (pageId === "orders" && !isAppSheetInvoice && ["draft", "preorder"].includes(String(row.commercialState)) && hasCommand(context, "OrderQuoted")) buttons.push({ label: "Cotizar", onClick: () => runAction("OrderQuoted", "Preparar cotización", fields(
+      field("paymentMethod", "Medio de pago general", "select", { required: true, defaultValue: "cash", options: [{ value: "cash", label: "Efectivo" }, { value: "transfer", label: "Transferencia" }, { value: "mercado_pago", label: "Mercado Pago" }, { value: "card", label: "Tarjeta" }], help: "Se usa en productos y entrega cuando no elegís un medio específico." }),
+      field("productPaymentMethod", "Medio de pago de productos (opcional)", "select", { required: false, help: "Dejalo sin elegir para heredar el medio general.", options: [{ value: "", label: "Usar medio general" }, { value: "cash", label: "Efectivo" }, { value: "transfer", label: "Transferencia" }, { value: "mercado_pago", label: "Mercado Pago" }, { value: "card", label: "Tarjeta" }] }),
+      field("deliveryPaymentMethod", "Medio de pago de entrega (opcional)", "select", { required: false, help: "Dejalo sin elegir para heredar el medio general.", options: [{ value: "", label: "Usar medio general" }, { value: "cash", label: "Efectivo" }, { value: "transfer", label: "Transferencia" }, { value: "mercado_pago", label: "Mercado Pago" }, { value: "card", label: "Tarjeta" }] }),
       field("items", "Productos", "repeat", { fields: quoteItemFields({}), rowFields: quoteItemFields, initialRows: 1, maxRows: 200, addLabel: "Agregar producto" }),
       field("packs", "Packs", "repeat", { fields: quotePackFields({}), rowFields: quotePackFields, maxRows: 100, addLabel: "Agregar pack" }),
       select("promotionId", "Promoción aprobada (opcional)", optionsOf(approvedPromotions), false),
@@ -1215,7 +1242,7 @@ export function OperationalWorkspace(props: Props) {
       };
     }, row, "Los productos conservan su tarifa y escala seleccionadas. Packs, promociones y beneficios requieren versiones aprobadas. Cualquier recargo reemplazado exige un motivo autorizado.") });
     if (pageId === "orders" && ["draft", "preorder"].includes(String(row.commercialState)) && hasCommand(context, "OrderCancelled")) buttons.push({ label: "Cancelar borrador", onClick: () => runAction("OrderCancelled", "Cancelar pedido", fields(field("reason", "Motivo", "textarea", { required: true }), evidenceField()), v => ({ reason: str(v, "reason"), evidence: note(v) }), row) });
-    if (pageId === "orders" && ["draft", "preorder"].includes(String(row.commercialState)) && Number(row.quoteVersion) > 0 && hasCommand(context, "OrderConfirmed")) buttons.push({ label: "Confirmar pedido", onClick: () => runAction("OrderConfirmed", "Confirmar cotización aceptada", fields(field("quoteVersion", "Versión cotizada", "integer", { required: true, defaultValue: String(row.quoteVersion) }), evidenceField("Aceptación registrada")), v => ({ quoteVersion: Number.parseInt(str(v, "quoteVersion"), 10), acceptance: note(v) }), row, "La confirmación reserva stock y exige permiso operativo vigente del socio." ) });
+    if (pageId === "orders" && !isAppSheetInvoice && ["draft", "preorder"].includes(String(row.commercialState)) && Number(row.quoteVersion) > 0 && hasCommand(context, "OrderConfirmed")) buttons.push({ label: "Confirmar pedido", onClick: () => runAction("OrderConfirmed", "Confirmar cotización aceptada", fields(field("quoteVersion", "Versión cotizada", "integer", { required: true, defaultValue: String(row.quoteVersion) }), evidenceField("Aceptación registrada")), v => ({ quoteVersion: Number.parseInt(str(v, "quoteVersion"), 10), acceptance: note(v) }), row, "La confirmación reserva stock y exige permiso operativo vigente del socio." ) });
     if (pageId === "orders" && row.commercialState === "confirmed" && ["unprepared", "partially_prepared"].includes(String(row.fulfillmentState)) && hasCommand(context, "OrderPrepared")) buttons.push({ label: "Preparar por lote", onClick: () => {
       void apiGet<Row>(`/api/operations/orders/${encodeURIComponent(id)}`).then(detail => {
         const reservations = rowsOf(detail, "reservations").flatMap(reservation => {
@@ -1313,6 +1340,10 @@ export function OperationalWorkspace(props: Props) {
 
   const headerActions = <div className="ops-header-actions">
     <button type="button" className="ops-button ops-button-quiet" onClick={onRefresh}>↻ Actualizar</button>
+    {pageId === "orders" && hasCommand(context, "InvoiceSaved") && hasCapability(context, "members.read") && <>
+      <button type="button" className="ops-button ops-button-primary" data-testid="appsheet-invoice-open" onClick={() => setInvoiceEditor({ mode: "invoice" })}>＋ Nueva factura</button>
+      <button type="button" className="ops-button ops-button-quiet" data-testid="appsheet-preorder-open" onClick={() => setInvoiceEditor({ mode: "preorder" })}>＋ Nueva preventa</button>
+    </>}
     {create.map(button => <button type="button" className="ops-button ops-button-primary" key={button.label} onClick={button.onClick}>{button.label}</button>)}
   </div>;
   const emptyMessages: Record<string, [string, string]> = {
@@ -1326,6 +1357,7 @@ export function OperationalWorkspace(props: Props) {
   return <div className="ops-page-body">
     <SectionHeading title={title} detail={pageId === "orders" ? "Productos, cobros y entregas de cada pedido." : pageId === "accounts" ? "Cuentas por moneda. El saldo requiere una apertura conciliada." : undefined} action={headerActions} />
     {pageId === "catalog" && <InfoBand title="Stock disponible"><p>El stock disponible descuenta las reservas. Al preparar un pedido, elegí el lote y registrá el peso real.</p></InfoBand>}
+    {pageId === "catalog" && <AppSheetCatalogue context={context} refreshKey={refreshKey} runCommand={runCommand} onRefresh={onRefresh} onNotice={onNotice} />}
     {pageId === "orders" && <PricingReference policies={approvedPolicies} packs={approvedPacks} promotions={approvedPromotions} />}
     {pageId === "purchases" && <><PurchaseJourneyStatus context={context} /><PurchaseReference suppliers={supplierRows} catalog={catalogRows} locations={locationRows} />
       {hasCommand(context, "PurchaseOrderCreated") && !catalogRows.length && <InfoBand tone="info" title="Catálogo no disponible"><p>Para crear una compra, el perfil necesita consultar los productos y sus unidades en Inventario. No se puede registrar una línea escribiendo identificadores.</p></InfoBand>}
@@ -1335,7 +1367,7 @@ export function OperationalWorkspace(props: Props) {
     </>}
     {pageId === "gates" && <InfoBand tone="warning" title="El cambio de sistema requiere revisión"><p>Cada habilitación requiere evidencia y la revisión de dos personas distintas. Registrar estas revisiones no activa el reemplazo del sistema anterior.</p></InfoBand>}
     {pageId === "accounts" && <InfoBand title="Saldo desconocido hasta una apertura conciliada"><p>Crear o verificar la titularidad no asigna saldo. Efectivo reportado se verifica en caja o custodia; el depósito bancario es una transferencia independiente.</p></InfoBand>}
-    {pageId === "collections" && <InfoBand title="Reporte y verificación son pasos separados"><p>Un cobro reportado no modifica una cuenta. Verificá la recepción en caja/custodia para efectivo o en banco para transferencia o tarjeta.</p></InfoBand>}
+    {pageId === "collections" && <InfoBand title="Reporte y verificación son pasos separados"><p>Un cobro reportado no modifica una cuenta. Verificá la recepción en caja/custodia para efectivo o en banco para transferencia, Mercado Pago o tarjeta.</p></InfoBand>}
     {pageId === "payables" && <InfoBand title="Devengamiento y clasificación antes del objetivo"><p>Indicá el mes YYYY-MM al que corresponde cada obligación. Un gasto operativo requiere clasificación variable o fija y verificación; si falta cualquiera de esos datos, la contribución frente al objetivo queda desconocida o sin avance.</p>{pendingManagementPayables.length > 0 && <p>{pendingManagementPayables.length} obligaciones variables o gastos operativos visibles siguen pendientes de verificación, período o clasificación.</p>}</InfoBand>}
     {pageId === "collections" && recordValue(query.data, "pendingScopeRequired") === true && <InfoBand tone="warning" title="Falta alcance para revisar cobros sin cuenta"><p>Este perfil ve las cuentas asignadas, pero los cobros reportados que todavía no tienen cuenta requieren además socios o custodios asignados. En Accesos, agregá esos identificadores al alcance financiero antes de revisar esos avisos.</p></InfoBand>}
     {pageId === "commercial" && <CommercialMarginPreview packs={rowsOf(query.data, "packs")} />}
@@ -1384,6 +1416,7 @@ export function OperationalWorkspace(props: Props) {
     {pageId === "routes" && (orders.error || people.error) && <InfoBand tone="warning" title="Faltan referencias de apoyo para la vista de rutas"><p>Los turnos siguen visibles, pero algunas referencias de pedidos o repartidores pueden estar incompletas.</p>{orders.error && <ErrorState message={orders.error} retry={orders.retry} />}{people.error && <ErrorState message={people.error} retry={people.retry} />}</InfoBand>}
     {pageId === "routes" && <RoutesDetails data={query.data} context={context} runAction={runAction} deliveryPeople={deliveryPeople} catalog={catalogRows} orders={orderRows} actionsBlocked={query.loading || Boolean(query.error)} hasMore={query.hasMore} />}
     {pageId === "settlements" && <InfoBand title="Custodia y rendición"><p>Una rendición debe explicar el bruto como dinero entregado más remuneración. El pago de remuneración requiere una obligación verificada y se registra con cuentas de custodia conciliadas.</p></InfoBand>}
+    {pageId === "orders" && invoiceEditor && <AppSheetInvoiceForm key={`${invoiceEditor.mode}-${idOf(invoiceEditor.order ?? {}) || "new"}`} open mode={invoiceEditor.mode} order={invoiceEditor.order} expectedVersion={invoiceEditor.expectedVersion} memberName={invoiceEditor.memberName} context={context} catalog={catalogRows} catalogLoading={catalogChoices.loading} catalogError={catalogChoices.error ?? undefined} retryCatalog={catalogChoices.retry} loadMoreCatalog={catalogChoices.loadMore} hasMoreCatalog={catalogChoices.hasMore} runCommand={runCommand} onClose={() => setInvoiceEditor(null)} onSaved={(_orderId, message) => { setInvoiceEditor(null); onRefresh(); onNotice(message); }} />}
   </div>;
 }
 
@@ -1680,7 +1713,7 @@ function MemberInspector({ memberId, refreshKey, documents, catalog, onClose }: 
   const skuNames = preferredSkuIds.flatMap(value => typeof value === "string" ? catalog.filter(sku => idOf(sku) === value).map(sku => labelOf(sku, ["name"])) : []);
   const windowLabel = deliveryWindow && typeof deliveryWindow === "object" ? `${textValue(recordValue(deliveryWindow, "from"), "")}–${textValue(recordValue(deliveryWindow, "to"), "")}` : "";
   const contactLabels: Record<string, string> = { whatsapp: "WhatsApp", phone: "Teléfono", email: "Correo", manual: "Manual" };
-  const paymentLabels: Record<string, string> = { cash: "Efectivo", transfer: "Transferencia", card: "Tarjeta" };
+  const paymentLabels: Record<string, string> = { cash: "Efectivo", transfer: "Transferencia", mercado_pago: "Mercado Pago", card: "Tarjeta" };
   const preferenceSummary = [
     preferenceChannel === "delivery" ? "Reparto" : preferenceChannel === "local" ? "Retiro" : preferenceChannel,
     contactLabels[contactPreference] ?? contactPreference,
@@ -1701,7 +1734,7 @@ function MemberInspector({ memberId, refreshKey, documents, catalog, onClose }: 
     {documents.length > 0 && <ListTable title="Documentos operativos disponibles" rows={documents} columns={[["kind", "Tipo"], ["state", "Estado"], ["validUntil", "Vigencia"]]} />}
     {error && <InfoBand tone="warning" title="No se pudo completar la actualización; se conservan los datos anteriores">{error}<button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={retry} disabled={loading || busy !== ""}>Reintentar actualización</button>{historicalChanged && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={() => void loadHistorical(true)} disabled={busy === "history" || loading}>Volver a consultar historia</button>}</InfoBand>}
     <div className="ops-member-history-grid">
-      <section><h3>Pedidos de Bombo</h3>{orderRows.length ? <ListTable title="Pedidos actuales" rows={orderRows.map(row => ({ ...row, amountLabel: typeof row.currency === "string" ? formatMinor(row.totalMinor, row.currency) : "Importe no disponible" }))} columns={[["createdAt", "Fecha"], ["channel", "Modalidad"], ["fulfillmentState", "Preparación"], ["financialState", "Cobro"], ["amountLabel", "Total"]]} /> : <p className="ops-muted-copy">No hay pedidos actuales en el alcance.</p>}{orderHasMore && <button type="button" className="ops-button ops-button-quiet" onClick={() => void loadOrders()} disabled={busy !== "" || loading || Boolean(error)}>{busy === "orders" ? "Cargando…" : "Cargar más pedidos"}</button>}</section>
+      <section><h3>Pedidos de Bombo</h3>{orderRows.length ? <ListTable title="Pedidos actuales" rows={orderRows.map(row => ({ ...row, amountLabel: row.totalCalculationState === "pending_definition" ? "Pendiente de definición" : typeof row.currency === "string" ? formatMinor(row.totalMinor, row.currency) : "Importe no disponible" }))} columns={[["createdAt", "Fecha"], ["channel", "Modalidad"], ["fulfillmentState", "Preparación"], ["financialState", "Cobro"], ["amountLabel", "Total"]]} /> : <p className="ops-muted-copy">No hay pedidos actuales en el alcance.</p>}{orderHasMore && <button type="button" className="ops-button ops-button-quiet" onClick={() => void loadOrders()} disabled={busy !== "" || loading || Boolean(error)}>{busy === "orders" ? "Cargando…" : "Cargar más pedidos"}</button>}</section>
       <section><h3>Historia legado aprobada</h3>{coverage && <p className="ops-muted-copy">{textValue(coverage.historical, "Cobertura pendiente")}{typeof coverage.fingerprint === "string" ? ` · revisión ${coverage.fingerprint.slice(0, 12)}` : ""}. La historia no crea saldos ni acredita pagos.</p>}{historicalRows.length ? <ul className="ops-fact-list">{historicalRows.map((fact, index) => <li key={textValue(fact.id, String(index))}><strong>{factDateLabel(fact)} · {legacyBasisLabel(fact)}</strong><span>{textValue(fact.reference, "Factura histórica")} · moneda {fact.currencyState === "known" && (fact.currency === "ARS" || fact.currency === "USD") ? String(fact.currency) : "no identificada"}{fact.correctionOf ? " · versión corregida" : ""}</span></li>)}</ul> : <p className="ops-muted-copy">No hay facturas publicadas para mostrar en esta página.</p>}{historicalHasMore && <button type="button" className="ops-button ops-button-quiet" onClick={() => void loadHistorical()} disabled={busy !== "" || loading || Boolean(error)}>{busy === "history" ? "Cargando…" : "Cargar más historia"}</button>}</section>
     </div>
   </section>;
@@ -1852,6 +1885,8 @@ function ReportsPanel({ context, refreshKey }: { context: OperationsContext; ref
 }
 
 const REPORT_METRIC_LABELS: Record<string, string> = {
+  pendingAppSheetInvoiceMemberCount: "Socios con facturas de cálculo pendiente", pendingAppSheetInvoiceOrderCount: "Facturas pendientes para segmentación", segmentationDataComplete: "Datos completos para segmentación",
+  pendingAppSheetInvoices: "Facturas con cálculo pendiente", capturedBaseMinorByCurrency: "Importes capturados de referencia por moneda", capturedProductLineMinorByCurrency: "Valores explícitos de productos por moneda", capturedProductLineCount: "Líneas de productos capturadas", capturedClientTariffMinorByCurrency: "Tarifas Cliente capturadas por moneda", totalMinorByCurrency: "Total facturado por moneda", totalCalculationState: "Definición del total", recognizedAsSalesRevenue: "Reconocido como venta", amountBasis: "Base del importe", pendingAppSheetDeliveryTariffByCurrency: "Tarifas de entrega pendientes por moneda", pendingAppSheetDeliveryTariffRecognized: "Tarifas pendientes reconocidas", pendingAppSheetInvoiceCount: "Facturas con cálculo pendiente",
   orderCount: "Pedidos incluidos", netProductRevenueByCurrency: "Ingresos netos por moneda", orderTotalByCurrency: "Total de pedidos por moneda", saleTotalByCurrency: "Ventas históricas por moneda", lineTotalByCurrency: "Líneas históricas por moneda", historicalSales: "Ventas históricas", operationalSales: "Ventas de operación", operationalOrderCount: "Pedidos de operación", historicalDeliverySaleCount: "Ventas históricas de reparto",
   deliveredLineCount: "Líneas entregadas", linesWithRevenueObserved: "Líneas con ingresos observados", revenueByCurrency: "Ingresos por moneda", actualAllocatedCostSoldByCurrency: "Costo de lotes vendidos por moneda", grossContributionBeforeFixedCostsByCurrency: "Margen por lote antes de costos fijos", managementContributionBeforeFixedCostsByCurrency: "Contribución de gestión antes de costos fijos", recognizedDeliveryAndSurchargeByCurrency: "Cargos de entrega y recargos reconocidos", approvedAccruedVariableCostsByCurrency: "Costos variables devengados aprobados", allocationCoverage: "Cobertura de asignación por lote", managementCoverage: "Cobertura de costos y período", fixedCosts: "Costos fijos aprobados", contributionAfterFixedCostsByCurrency: "Contribución después de costos fijos",
   historicalExpenseByCurrency: "Gastos históricos por moneda", compatibilityExpenseByCurrency: "Gastos de registros anteriores", currencyStatusForHistoricalSources: "Estado de moneda de fuentes históricas", verifiedPayableAccrualByCurrency: "Obligaciones verificadas devengadas", unverifiedPayableAccrualByCurrency: "Obligaciones sin verificar", paidPayableByObligationCurrency: "Pagos por moneda de obligación", openVerifiedOperatingPayablesByCurrency: "Obligaciones operativas verificadas pendientes", openUnverifiedOperatingPayablesByCurrency: "Obligaciones operativas sin verificar pendientes", counts: "Cantidades por fuente",
@@ -1994,6 +2029,7 @@ const REPORT_WORD_LABELS: Record<string, string> = {
 };
 
 const REPORT_ENUM_LABELS: Record<string, string> = {
+  pending_definition: "Pendiente de definición", "captured-components-not-a-calculated-invoice-total": "Valores capturados; fórmula del total pendiente", "captured-base-is-invalid-or-missing": "Referencia capturada inválida o ausente", "captured-product-lines-are-exposed-separately-until-invoice-total-is-defined": "Productos capturados separados hasta definir el total de factura",
   preorder: "Preventa", planned: "Programado", unprepared: "Sin preparar", partially_prepared: "Preparación parcial", prepared: "Preparado", partially_delivered: "Entrega parcial", unpaid: "Sin cobros verificados", partially_paid: "Cobro parcial", paid: "Pagado", rejected: "Rechazado", closed_with_pending: "Cerrado con pendientes",
   cash: "Caja", bank: "Banco", reserve: "Reserva", custody: "Custodia", approved_opening_and_events: "Apertura y movimientos aprobados", opening_pending: "Apertura pendiente", operating_expense: "Gasto operativo", courier_fee: "Remuneración del repartidor", purchase: "Compra", asset_purchase: "Compra de activo", owner_withdrawal: "Retiro del propietario", other: "Otro",
   partial: "Parcial", unknown: "Desconocido", unverified: "Observado · sin verificar", reconciled: "Conciliado", estimated: "Estimado", scenario: "Escenario", missing: "Sin dato", complete: "Completo", excluded: "Excluido", approved: "Aprobado", pending: "Pendiente", reported: "Informado", verified: "Verificado", staged: "En preparación", draft: "Borrador", confirmed: "Confirmado", cancelled: "Cancelado", dispatched: "Despachado", delivered: "Entregado", blocked: "Bloqueado", active: "Activo", inactive: "Inactivo", attested: "Conciliado y vigente", stale: "Conciliación desactualizada", incomplete: "Lectura de fuentes incompleta", scope_excluded: "Excluido por alcance parcial", "unknown-in-source-schema": "Moneda desconocida en el esquema de origen", "source-period-completeness-not-attested": "El período de origen aún no está conciliado", "cost-allocation-or-charge-coverage-pending": "Pendiente la cobertura de costos o cargos", "no-current-approved-scenario": "No hay escenarios aprobados vigentes", "calculated-from-approved-versioned-cash-inputs": "Calculado desde supuestos de caja aprobados", "approved-schedule-does-not-cover-whole-accrual-period": "El cronograma aprobado no cubre todo el período devengado", "unclassified-treatment-or-invalid-credit-balance": "Clasificación pendiente o saldo de crédito inválido",
@@ -2021,10 +2057,13 @@ function reportStateLabel(value: unknown): string {
   return REPORT_ENUM_LABELS[text] ?? REPORT_ENUM_LABELS[text.toLowerCase()] ?? text.replaceAll(/[-_]/g, " ");
 }
 function reportSourceLabel(value: string): string {
+  if (value === "pending-appsheet-invoice-segmentation-inputs") return "Facturas pendientes que impiden completar la segmentación";
+  if (value === "pending-appsheet-invoice-captures") return "Facturas capturadas con cálculo pendiente";
+  if (value === "pending-appsheet-captured-product-lines") return "Productos con facturación pendiente de definición";
   const exact: Record<string, string> = { "delivered-operation-order-lines": "Renglones entregados del club", "preparation-allocations": "Asignaciones de lotes", "approved-fixed-cost-configuration": "Configuración aprobada de costos fijos", "historical-delivery-sales": "Ventas históricas de reparto", "operation-orders": "Pedidos del club", "historical-expenses": "Gastos históricos", "compatibility-expenses": "Gastos de registros anteriores", "operating-payables": "Obligaciones operativas", "purchase-orders": "Órdenes de compra", "goods-receipts": "Recepciones de mercadería", "historical-purchase-receipts": "Recepciones históricas", "purchase-payables": "Obligaciones de compra", "collection-reports": "Reportes de cobro", "delivery-assignments": "Asignaciones de reparto", "accepted-renditions": "Rendiciones aceptadas", "fx-ledger-events": "Movimientos de cambio", "fx-events-with-complete-recorded-legs-and-metadata": "Cambios con movimientos y evidencia completos", "operation-members": "Socios del club", "confirmed-orders-for-segmentation": "Pedidos usados para segmentación", "customer-return-allocations": "Devoluciones de clientes", "unlinked-historical-delivery-sales": "Ventas históricas sin vínculo a socio", "commercial-policy-records": "Tarifas y políticas comerciales", "historical-promotions": "Promociones históricas", "13-week-payables": "Obligaciones del horizonte de 13 semanas", "club-and-custody-accounts": "Cuentas del club y de custodia" };
   return exact[value] ?? metricLabel(value);
 }
-function reportReasonLabel(value: string): string { return REPORT_ENUM_LABELS[value] ?? value.replaceAll(/[-_]/g, " "); }
+function reportReasonLabel(value: string): string { if (value === "pending-invoice-total-definition-prevents-complete-spend-classification") return "Falta definir el total de factura para completar el historial de gasto"; return REPORT_ENUM_LABELS[value] ?? value.replaceAll(/[-_]/g, " "); }
 function metricLabel(value: string): string {
   if (REPORT_METRIC_LABELS[value]) return REPORT_METRIC_LABELS[value];
   const tokens = value.replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2").replaceAll(/[-_]/g, " ").split(/\s+/).filter(Boolean);

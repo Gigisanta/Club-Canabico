@@ -1,20 +1,172 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { registerCommand, OperationError, json, objectId, evidence, decimal, currency, minor, positiveMinor, requireDelivery, requireCapability, capabilities, touchAggregate, audit, type CommandContext } from "./core.js";
-import { parseDecimal, roundHalfUp, canonicalJson } from "../../shared/operations/exact.js";
+import { parseDecimal, parseQuantity, formatDecimal, roundHalfUp, canonicalJson } from "../../shared/operations/exact.js";
+import { appsheetInvoiceInput, isAppSheetInvoiceTotalPending, type AppSheetInvoiceInput } from "../../shared/operations/appsheet.js";
 import { quoteInput, quoteOrder, authorizeQuoteAdjustments } from "./commercial.js";
 import { commercialAddress } from "./member-fields.js";
 import { reserveOrder, prepareOrder, releaseOrderReservations, cancelOrderLines, dispatchOrder, deliverOrder, inspectOrderReturn } from "./stock.js";
 import { postLedger, accountBalance } from "./finance.js";
 const today=(now:Date)=>new Intl.DateTimeFormat("en-CA",{timeZone:"America/Argentina/Buenos_Aires"}).format(now);
 async function draft(ctx:CommandContext){const order=await ctx.tx.operationOrder.findUniqueOrThrow({where:{id:ctx.envelope.targetId}});if(!["draft","preorder"].includes(order.commercialState))throw new OperationError(409,"CONFIRMED_QUOTE_FROZEN","La cotización confirmada requiere una revisión aceptada");return order;}
+
+type StoredOrder = NonNullable<Awaited<ReturnType<CommandContext["tx"]["operationOrder"]["findUnique"]>>>;
+async function confirmOrderSnapshot(ctx:CommandContext,order:StoredOrder,quote:Record<string,unknown>,options:{deliveryAddress?:Record<string,unknown>;acceptance?:Record<string,unknown>;financialState?:"paid"|"unpaid"}={}){
+ const permission=await ctx.tx.memberPermission.findFirst({where:{memberId:order.memberId,kind:"operations",status:"verified",validFrom:{lte:today(ctx.now)},validUntil:{gte:today(ctx.now)}}});
+ if(!permission)throw new OperationError(423,"MEMBER_PERMISSION_PENDING","El socio requiere un permiso operativo verificado y vigente");
+ const reservations=await reserveOrder(ctx,order.id);
+ await ctx.tx.operationOrder.update({where:{id:order.id},data:{commercialState:"confirmed",confirmedAt:ctx.now,quote:json({...quote,...(options.acceptance?{acceptance:options.acceptance}:{}),confirmedBy:ctx.actor.id,confirmedAt:ctx.now.toISOString()}),financialState:options.financialState??(order.totalMinor===0n?"paid":"unpaid")}});
+ let deliveryId:string|null=null;
+ if(order.channel==="delivery"){
+  const existing=await ctx.tx.deliveryAssignment.count({where:{orderId:order.id}});
+  if(existing)throw new OperationError(409,"ORDER_DELIVERY_EXISTS","El pedido ya tiene una entrega asociada");
+  deliveryId=randomUUID();
+  await ctx.tx.deliveryAssignment.create({data:{id:deliveryId,orderId:order.id,address:json(options.deliveryAddress??order.address as Record<string,unknown>),incidents:[]}});
+  await ctx.tx.operationObject.create({data:{id:deliveryId,kind:"delivery",version:1,createdBy:ctx.actor.id}});
+ }
+ return {orderId:order.id,commercialState:"confirmed",reservations,deliveryId,quoteFrozen:true};
+}
+
+function checkInvoiceMinor(amount:bigint){
+ if(!minor.safeParse(amount.toString()).success)throw new OperationError(422,"MONEY_RANGE","La factura excede el rango de importes cerrados");
+ return amount;
+}
+
+// Unknown formula outputs stay null on the wire; omit only those placeholders
+// when canonicalizing because the exact-money serializer accepts strings only.
+const pendingAppSheetMinorFields=new Set(["subtotalMinor","productTransferMinor","totalMinor","transferMinor"]);
+function appSheetQuoteCanonical(value:unknown):string{
+ const omitPendingAmounts=(current:unknown):unknown=>{
+  if(Array.isArray(current))return current.map(omitPendingAmounts);
+  if(!current||typeof current!=="object")return current;
+  return Object.fromEntries(Object.entries(current as Record<string,unknown>)
+   .filter(([key,entry])=>!(entry===null&&pendingAppSheetMinorFields.has(key)))
+   .map(([key,entry])=>[key,omitPendingAmounts(entry)]));
+ };
+ return canonicalJson(omitPendingAmounts(value));
+}
+function appSheetQuoteHash(quote:Record<string,unknown>){return createHash("sha256").update(appSheetQuoteCanonical(quote)).digest("hex");}
+
+type InvoiceSku={id:string;unit:string;active:boolean;appSheet:unknown};
+function buildAppSheetInvoiceSnapshot(input:AppSheetInvoiceInput,skuById:Map<string,InvoiceSku>){
+ const lines=input.lines.map(line=>{
+  const sku=skuById.get(line.skuId);
+  const appSheet=sku?.appSheet&&typeof sku.appSheet==="object"&&!Array.isArray(sku.appSheet)?sku.appSheet as {availability?:unknown}:{};
+  if(!sku?.active||appSheet.availability==="NO"||sku.unit!=="g")throw new OperationError(422,"ORDER_SKU_UNAVAILABLE","El producto de la factura debe estar activo, disponible y expresado en gramos");
+  let quantity:bigint;
+  try{quantity=parseQuantity(line.quantity,sku.unit);}catch{throw new OperationError(422,"QUOTE_QUANTITY","La cantidad debe respetar la precisión de la unidad seleccionada");}
+  if(quantity<=0n)throw new OperationError(422,"QUOTE_QUANTITY","La cantidad de la línea debe ser positiva");
+  const total=checkInvoiceMinor(BigInt(line.totalMinor));
+  // unitPrice is required by the shared order-line table for historical consumers;
+  // reference/revenueMinor remain the authoritative entered total even if this
+  // technical display price cannot reproduce every cent when multiplied back.
+  const quantityScaled=parseDecimal(line.quantity,3);
+  const unitPriceScaled=quantityScaled===0n?0n:roundHalfUp(total*10n**15n,quantityScaled*100n);
+  return {
+   id:line.id,skuId:sku.id,unit:sku.unit,requested:line.quantity,unitPrice:formatDecimal(unitPriceScaled,12),
+   referenceMinor:total.toString(),discountMinor:"0",revenueMinor:total.toString(),
+   appsheet:{date:line.date,scale:line.scale,explicitTotalMinor:total.toString()},
+  };
+ });
+ const productTotal=lines.reduce((sum,line)=>sum+BigInt(line.revenueMinor),0n);
+ const clientTariff=BigInt(input.moto?.clientTariffMinor??"0");
+ const capturedBase=checkInvoiceMinor(productTotal+clientTariff);
+ checkInvoiceMinor(productTotal);checkInvoiceMinor(clientTariff);
+ const quote={
+  source:"appsheet-invoice",currency:input.currency,invoiceNumber:input.invoiceNumber??null,invoiceDate:input.invoiceDate,note:input.note,
+  lines:lines.map(({appsheet,...line})=>({...line,...appsheet})),
+  subtotalMinor:null,capturedProductMinor:productTotal.toString(),subtotalCalculationState:"pending_definition",discountMinor:"0",deliveryMinor:clientTariff.toString(),deliveryDiscountMinor:"0",
+  surchargeMinor:"0",productTransferMinor:null,capturedBaseMinor:capturedBase.toString(),totalMinor:null,totalCalculationState:"pending_definition",
+  paymentComponents:{
+   products:{paymentMethod:input.productPaymentMethod,transferMinor:null,transferCalculationState:"pending_definition",totalMinor:productTotal.toString()},
+   moto:input.moto?{paymentMethod:input.moto.paymentMethod,transferMinor:null,transferCalculationState:"pending_definition",clientTariffMinor:input.moto.clientTariffMinor,totalTariffMinor:input.moto.totalTariffMinor,adminTariffMinor:input.moto.adminTariffMinor}:null,
+  },
+  moto:input.moto??null,quotedBy:null,quotedDate:input.invoiceDate,input,
+ };
+ const deliveryAddress=input.moto?{
+  ...input.address,motoDestination:input.moto.destination,motoDeliveryDate:input.moto.deliveryDate,motoServiceType:input.moto.serviceType,
+ }:input.address;
+ return {lines,quote,capturedBase,productTotal,clientTariff,deliveryAddress};
+}
+
+async function verifiedAppSheetSnapshot(ctx:CommandContext,order:StoredOrder,quote:Record<string,unknown>){
+ const parsed=appsheetInvoiceInput.safeParse(quote.input);
+ if(!parsed.success)throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La factura pendiente no conserva un formulario AppSheet válido");
+ const skuIds=[...new Set(parsed.data.lines.map(line=>line.skuId))];
+ const skus=skuIds.length?await ctx.tx.catalogSku.findMany({where:{id:{in:skuIds}}}):[];
+ const built=buildAppSheetInvoiceSnapshot(parsed.data,new Map(skus.map(sku=>[sku.id,sku])));
+ if(appSheetQuoteCanonical(built.quote)!==appSheetQuoteCanonical(quote))throw new OperationError(409,"INVOICE_SNAPSHOT_CHANGED","La instantánea de la factura cambió después de guardarse");
+ const [object,receipt]=await Promise.all([
+  ctx.tx.operationObject.findUnique({where:{id:order.id},select:{version:true}}),
+  ctx.tx.commandReceipt.findFirst({where:{targetId:order.id,command:{in:["InvoiceSaved","InvoiceUpdated"]}},orderBy:{resultingVersion:"desc"}}),
+ ]);
+ const result=(receipt?.response as {result?:{snapshotHash?:unknown;quoteVersion?:unknown}}|undefined)?.result;
+ if(!object||!receipt||receipt.resultingVersion!==object.version||result?.quoteVersion!==order.quoteVersion||result?.snapshotHash!==appSheetQuoteHash(quote))
+  throw new OperationError(409,"INVOICE_SNAPSHOT_CHANGED","La confirmación debe partir de la última factura AppSheet guardada");
+ return built;
+}
+
+registerCommand("InvoiceSaved",{kind:"order",capability:"orders.write",create:true,schema:appsheetInvoiceInput,execute:async ctx=>{
+ const v=ctx.envelope.data as AppSheetInvoiceInput;
+ if(await ctx.tx.operationOrder.findUnique({where:{id:ctx.envelope.targetId},select:{id:true}}))throw new OperationError(409,"INVOICE_ALREADY_EXISTS","La factura ya existe");
+ const member=await ctx.tx.operationMember.findUnique({where:{id:v.memberId}});
+ if(!member)throw new OperationError(422,"MEMBER_REQUIRED","Elegí un socio identificado");
+ const skuIds=[...new Set(v.lines.map(line=>line.skuId))],skus=await ctx.tx.catalogSku.findMany({where:{id:{in:skuIds}}});
+ const built=buildAppSheetInvoiceSnapshot(v,new Map(skus.map(sku=>[sku.id,sku])));
+ await ctx.tx.operationOrder.create({data:{
+  id:ctx.envelope.targetId,memberId:v.memberId,channel:v.moto?"delivery":"local",currency:v.currency,address:json(v.address),quote:json(built.quote),
+  quoteVersion:1,subtotalMinor:built.productTotal,discountMinor:0n,deliveryMinor:built.clientTariff,surchargeMinor:0n,totalMinor:built.capturedBase,
+  createdBy:ctx.actor.id,commercialState:v.preorder?"preorder":"draft",financialState:"unpaid",
+ }});
+ for(const line of built.lines)await ctx.tx.operationOrderLine.create({data:{
+  id:line.id,orderId:ctx.envelope.targetId,skuId:line.skuId,unit:line.unit,requested:line.requested,unitPrice:line.unitPrice,
+  referenceMinor:BigInt(line.referenceMinor),discountMinor:0n,revenueMinor:BigInt(line.revenueMinor),
+ }});
+ if(v.preorder)return {orderId:ctx.envelope.targetId,commercialState:"preorder",deliveryId:null,reservations:null,quoteFrozen:false,quoteVersion:1,snapshotHash:appSheetQuoteHash(built.quote)};
+ const order=await ctx.tx.operationOrder.findUniqueOrThrow({where:{id:ctx.envelope.targetId}});
+ return confirmOrderSnapshot(ctx,order,built.quote,{deliveryAddress:built.deliveryAddress,financialState:"unpaid"});
+}});
+
+registerCommand("InvoiceUpdated",{kind:"order",capability:"orders.write",schema:appsheetInvoiceInput,execute:async ctx=>{
+ const v=ctx.envelope.data as AppSheetInvoiceInput,order=await ctx.tx.operationOrder.findUnique({where:{id:ctx.envelope.targetId}});
+ if(!order||order.commercialState!=="preorder"||(order.quote as {source?:unknown}).source!=="appsheet-invoice")throw new OperationError(409,"INVOICE_NOT_EDITABLE","Sólo se puede modificar una factura pendiente de AppSheet");
+ if(v.memberId!==order.memberId)throw new OperationError(403,"INVOICE_MEMBER_FROZEN","La preventa conserva el socio autorizado al crearla");
+ const skuIds=[...new Set(v.lines.map(line=>line.skuId))],skus=skuIds.length?await ctx.tx.catalogSku.findMany({where:{id:{in:skuIds}}}):[];
+ const built=buildAppSheetInvoiceSnapshot(v,new Map(skus.map(sku=>[sku.id,sku])));
+ await ctx.tx.operationOrderLine.deleteMany({where:{orderId:order.id}});
+ for(const line of built.lines)await ctx.tx.operationOrderLine.create({data:{
+  id:line.id,orderId:order.id,skuId:line.skuId,unit:line.unit,requested:line.requested,unitPrice:line.unitPrice,
+  referenceMinor:BigInt(line.referenceMinor),discountMinor:0n,revenueMinor:BigInt(line.revenueMinor),
+ }});
+ const updated=await ctx.tx.operationOrder.update({where:{id:order.id},data:{
+  currency:v.currency,address:json(v.address),quote:json(built.quote),quoteVersion:{increment:1},subtotalMinor:built.productTotal,discountMinor:0n,
+  deliveryMinor:built.clientTariff,deliveryDiscountMinor:0n,surchargeMinor:0n,totalMinor:built.capturedBase,
+  channel:v.moto?"delivery":"local",commercialState:"preorder",financialState:"unpaid",
+ }});
+ if(v.preorder)return {orderId:order.id,commercialState:"preorder",deliveryId:null,reservations:null,quoteFrozen:false,quoteVersion:updated.quoteVersion,snapshotHash:appSheetQuoteHash(built.quote)};
+ return confirmOrderSnapshot(ctx,updated,built.quote,{deliveryAddress:built.deliveryAddress,financialState:"unpaid"});
+}});
+
+registerCommand("InvoiceConfirmed",{kind:"order",capability:"orders.write",schema:z.strictObject({acceptance:evidence}),execute:async ctx=>{
+ const order=await ctx.tx.operationOrder.findUniqueOrThrow({where:{id:ctx.envelope.targetId}});
+ if(order.commercialState!=="preorder")throw new OperationError(409,"INVOICE_NOT_PREORDER","Sólo se puede confirmar una factura pendiente");
+ const quote=order.quote as Record<string,unknown>;
+ if(quote.source!=="appsheet-invoice"||!Array.isArray(quote.lines)||!quote.lines.length)throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La factura no contiene una instantánea AppSheet completa");
+ await verifiedAppSheetSnapshot(ctx,order,quote);
+ const snapshot=quote as typeof quote & {moto?:AppSheetInvoiceInput["moto"]};
+ const deliveryAddress=snapshot.moto?{
+  ...order.address as Record<string,unknown>,motoDestination:snapshot.moto.destination,motoDeliveryDate:snapshot.moto.deliveryDate,motoServiceType:snapshot.moto.serviceType,
+ }:order.address as Record<string,unknown>;
+ return confirmOrderSnapshot(ctx,order,quote,{deliveryAddress,acceptance:ctx.envelope.data.acceptance as Record<string,unknown>,financialState:"unpaid"});
+}});
+
 registerCommand("OrderCreated",{kind:"order",capability:"orders.write",create:true,schema:z.strictObject({memberId:objectId,channel:z.enum(["local","delivery"]),currency,address:commercialAddress.default({}),preorder:z.boolean().default(false)}),execute:async ctx=>{
  const v=ctx.envelope.data as {memberId:string;channel:string;currency:string;address:Record<string,unknown>;preorder:boolean};
  if(!await ctx.tx.operationMember.findUnique({where:{id:v.memberId}}))throw new OperationError(422,"MEMBER_REQUIRED","Elegí un socio identificado");
  return {order:await ctx.tx.operationOrder.create({data:{id:ctx.envelope.targetId,memberId:v.memberId,channel:v.channel,currency:v.currency,address:json(v.address),quote:{},createdBy:ctx.actor.id,commercialState:v.preorder?"preorder":"draft"}})};
 }});
 registerCommand("OrderQuoted",{kind:"order",capability:"orders.write",schema:quoteInput,authorize:authorizeQuoteAdjustments,execute:async ctx=>{
- const order=await draft(ctx);const input=ctx.envelope.data as z.infer<typeof quoteInput>;
+ const order=await draft(ctx);if((order.quote as {source?:unknown}).source==="appsheet-invoice")throw new OperationError(409,"INVOICE_COMMAND_MISMATCH","La factura AppSheet conserva sus importes explícitos; editála con InvoiceUpdated");const input=ctx.envelope.data as z.infer<typeof quoteInput>;
  if(order.currency!==input.currency)throw new OperationError(422,"QUOTE_CURRENCY","La cotización debe conservar la moneda del pedido");
  const quote=await quoteOrder(ctx.tx,input,today(ctx.now),ctx.actor.id);
  await ctx.tx.operationOrderLine.deleteMany({where:{orderId:order.id}});
@@ -89,6 +241,7 @@ registerCommand("OrderCancelled",{kind:"order",capability:"orders.write",schema:
 }});
 registerCommand("OrderQuoteRevisionAccepted",{kind:"order",capability:"orders.write",schema:z.strictObject({quote:quoteInput,acceptance:evidence,reason:z.string().min(1).max(1000)}),authorize:authorizeQuoteAdjustments,execute:async ctx=>{
  const order=await ctx.tx.operationOrder.findUniqueOrThrow({where:{id:ctx.envelope.targetId}});
+ if((order.quote as {source?:unknown}).source==="appsheet-invoice")throw new OperationError(409,"INVOICE_COMMAND_MISMATCH","La factura AppSheet conserva sus importes explícitos y no admite revisión genérica de cotización");
  if(order.commercialState!=="confirmed"||order.fulfillmentState!=="unprepared")throw new OperationError(409,"QUOTE_REVISION_STATE","La revisión necesita un pedido confirmado todavía sin preparar");
  if(order.verifiedMinor!==0n)throw new OperationError(409,"QUOTE_REVISION_COLLECTION","El pedido tiene cobros; resolvé las diferencias financieras explícitamente");
  const quote=await quoteOrder(ctx.tx,ctx.envelope.data.quote as z.infer<typeof quoteInput>,today(ctx.now),ctx.actor.id);
@@ -176,7 +329,9 @@ registerCommand("ReturnedFulfillmentCancelled",{kind:"order",capability:"logisti
  return {orderId:order.id,lines,cancelledOnlyAfterPhysicalInspection:true};
 }});
 registerCommand("OrderRefunded",{kind:"order",capability:"collections.verify",schema:z.strictObject({accountId:objectId,amountMinor:positiveMinor,lines:z.array(z.strictObject({lineId:objectId,amountMinor:positiveMinor})).max(200),deliveryMinor:minor.default("0"),surchargeMinor:minor.default("0"),reason:z.string().min(1).max(1000),evidence}),execute:async ctx=>{
- const order=await ctx.tx.operationOrder.findUniqueOrThrow({where:{id:ctx.envelope.targetId},include:{lines:true}}),account=await ctx.tx.operationAccount.findUniqueOrThrow({where:{id:ctx.envelope.data.accountId as string}}),amount=BigInt(ctx.envelope.data.amountMinor as string);
+ const order=await ctx.tx.operationOrder.findUniqueOrThrow({where:{id:ctx.envelope.targetId},include:{lines:true}});
+ if(isAppSheetInvoiceTotalPending(order.quote))throw new OperationError(423,"INVOICE_TOTAL_DEFINITION_PENDING","El total de factura AppSheet depende de fórmulas pendientes de cotejo");
+ const account=await ctx.tx.operationAccount.findUniqueOrThrow({where:{id:ctx.envelope.data.accountId as string}}),amount=BigInt(ctx.envelope.data.amountMinor as string);
  if(account.currency!==order.currency||amount>order.verifiedMinor-order.refundedMinor)throw new OperationError(422,"REFUND_VERIFIED_LIMIT","El reintegro debe limitarse al importe verificado todavía reversible");
  if(await accountBalance(ctx.tx,account.id)<amount)throw new OperationError(422,"ACCOUNT_FUNDS","Saldo insuficiente");
  const selections=ctx.envelope.data.lines as {lineId:string;amountMinor:string}[],delivery=BigInt(ctx.envelope.data.deliveryMinor as string),surcharge=BigInt(ctx.envelope.data.surchargeMinor as string);

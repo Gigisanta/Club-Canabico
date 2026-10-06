@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { registerCommand, OperationError, json, objectId, decimal, currency, minor, civilDate, evidence, requireCapability, type Tx, type CommandContext } from "./core.js";
 import { parseQuantity, parseDecimal, moneyForQuantity, allocateMinor, formatDecimal, roundHalfUp } from "../../shared/operations/exact.js";
 const tier=z.strictObject({skuId:objectId,minQuantity:decimal,unitPrice:decimal,scale:z.string().min(1).max(80)});
-const paymentMethod=z.enum(["cash","transfer","card"]);
+const paymentMethod=z.enum(["cash","transfer","mercado_pago","card"]);
 const componentSurchargeRates=z.strictObject({method:paymentMethod,productSurchargeBps:z.number().int().min(0).max(10000),deliverySurchargeBps:z.number().int().min(0).max(10000)});
 const definition=z.strictObject({tiers:z.array(tier).min(1).max(1000),productSurchargeBps:z.number().int().min(0).max(10000).default(0),deliverySurchargeBps:z.number().int().min(0).max(10000).default(0),paymentMethods:z.array(paymentMethod).min(1),paymentMethodRates:z.array(componentSurchargeRates).optional(),automaticScaleVerified:z.boolean().default(false),segmentBenefits:z.record(z.string(),minor).default({}),deliverySegmentBenefits:z.record(z.string(),minor).default({}),evidence}).superRefine((value,ctx)=>{
  if(value.paymentMethodRates){

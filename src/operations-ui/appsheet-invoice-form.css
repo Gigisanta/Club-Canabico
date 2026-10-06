@@ -1,0 +1,71 @@
+.appsheet-invoice-dialog { width: min(860px, calc(100vw - 26px)); max-height: min(94dvh, 1000px); }
+.appsheet-invoice-card { gap: 0; padding: 0; background: var(--ops-paper); }
+.appsheet-invoice-head { position: sticky; top: 0; z-index: 2; padding: clamp(17px, 3vw, 25px); border-bottom: 1px solid #3e402e14; background: var(--ops-paper); }
+.appsheet-invoice-head h2 { font-size: clamp(22px, 3vw, 28px); }
+.appsheet-invoice-body { display: grid; gap: 16px; padding: clamp(16px, 3vw, 25px); }
+.appsheet-invoice-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.appsheet-field { min-width: 0; }
+.appsheet-lookup-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.appsheet-currency-label { margin: 0; color: var(--ops-muted); font-size: 14px; }
+.appsheet-section > h3 { margin: 0; font-size: 15px; }
+.appsheet-address-field { grid-column: 1 / -1; }
+.appsheet-address-field textarea, .appsheet-field textarea { min-height: 74px; }
+.appsheet-shell-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.appsheet-section { display: grid; gap: 12px; min-width: 0; padding: 13px; border: 1px solid #3e402e18; border-radius: 12px; background: #fffaf0; }
+.appsheet-child-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.appsheet-add-card { display: flex; align-items: center; gap: 12px; min-height: 72px; padding: 12px; border: 1px solid #76804b50; border-radius: 10px; color: var(--ops-ink); background: #f3f4e1; cursor: pointer; font: inherit; text-align: left; }
+.appsheet-add-card:hover:not(:disabled) { background: #e9efcf; }
+.appsheet-add-card:disabled { cursor: not-allowed; opacity: .58; }
+.appsheet-add-card > span:last-child { display: grid; gap: 3px; min-width: 0; }
+.appsheet-add-card strong { font-size: 15px; }
+.appsheet-add-card small { color: var(--ops-muted); font-size: 13px; line-height: 1.35; }
+.appsheet-add-icon { display: grid; flex: 0 0 34px; width: 34px; height: 34px; place-items: center; border-radius: 50%; color: #fffaf0; background: var(--ops-ink); font-size: 20px; font-weight: 700; }
+.appsheet-service-row { grid-template-columns: minmax(145px, .55fr) minmax(0, 1.45fr); align-items: center; }
+.appsheet-radio-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.appsheet-radio-group legend { flex: 0 0 100%; margin-bottom: 3px; color: var(--ops-ink); font-size: 14px; font-weight: 700; }
+.appsheet-radio-group label { display: inline-flex; align-items: center; gap: 7px; min-height: 44px; padding: 7px 11px; border: 1px solid var(--ops-line); border-radius: 9px; background: #fffdf7; cursor: pointer; }
+.appsheet-radio-group input { width: 18px; height: 18px; margin: 0; accent-color: var(--ops-ink); }
+.appsheet-moto-chip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; padding: 8px; border: 1px solid #76804b35; border-radius: 9px; background: #f3f4e1; }
+.appsheet-moto-chip > span { flex: 1 1 150px; color: var(--ops-muted); font-size: 14px; overflow-wrap: anywhere; }
+.appsheet-payment-section { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+.appsheet-payment-section > .ops-field:has(select) { grid-column: auto; }
+.appsheet-totals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.appsheet-totals > div { display: grid; align-content: space-between; gap: 8px; min-width: 0; min-height: 78px; padding: 11px 12px; border: 1px solid #3e402e18; border-radius: 10px; background: #fffaf0; }
+.appsheet-totals span { color: var(--ops-muted); font-size: 13px; }
+.appsheet-totals strong { font-size: clamp(15px, 2vw, 19px); overflow-wrap: anywhere; }
+.appsheet-totals .appsheet-total { color: var(--ops-ink); background: #e9efcf; }
+.appsheet-footnote { margin: 0; padding: 10px 12px; border-left: 3px solid #8b925a; color: var(--ops-muted); background: #f4f2e8; font-size: 14px; line-height: 1.45; }
+.appsheet-pending { margin: 0; padding: 12px 14px; border: 1px solid #ba773a55; border-radius: 9px; color: #704b27; background: #f8e8ce; font-size: 14px; line-height: 1.45; }
+.appsheet-subtle-error { color: #8d3c32 !important; }
+.appsheet-dialog-lines { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.appsheet-dialog-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 9px; padding: 11px 12px; border: 1px solid #3e402e18; border-radius: 10px; background: #fffaf0; }
+.appsheet-dialog-line > div { display: grid; gap: 4px; min-width: 0; }
+.appsheet-dialog-line > div > span { color: var(--ops-muted); font-size: 14px; overflow-wrap: anywhere; }
+.appsheet-line-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.appsheet-child-dialog { width: min(650px, calc(100vw - 26px)); max-height: min(91dvh, 880px); }
+.appsheet-child-card { background: var(--ops-paper); }
+.appsheet-child-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.appsheet-child-fields > .ops-field:has(select), .appsheet-child-fields > .ops-field:has(textarea) { grid-column: 1 / -1; }
+.appsheet-saved-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; padding: 13px; border: 1px solid #3e402e18; border-radius: 10px; background: #fffaf0; }
+.appsheet-saved-summary > div { display: grid; gap: 3px; min-width: 0; }
+.appsheet-saved-summary > div span { color: var(--ops-muted); font-size: 13px; }
+.appsheet-saved-summary > div strong { overflow-wrap: anywhere; }
+.appsheet-saved-summary > p { grid-column: 1 / -1; margin: 0; padding-top: 7px; border-top: 1px solid #3e402e12; color: var(--ops-muted); font-size: 14px; }
+.appsheet-invoice-body > .ops-dialog-actions { margin: 0 calc(clamp(16px, 3vw, 25px) * -1) calc(clamp(16px, 3vw, 25px) * -1); padding: 13px clamp(16px, 3vw, 25px) 10px; }
+.appsheet-line-summary { display: block; max-width: 220px; color: var(--ops-muted); font-size: 13px; }
+
+@media (max-width: 680px) {
+  .appsheet-invoice-dialog, .appsheet-child-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); border-radius: 13px; }
+  .appsheet-invoice-fields, .appsheet-shell-grid, .appsheet-child-actions, .appsheet-payment-section, .appsheet-child-fields { grid-template-columns: 1fr; }
+  .appsheet-address-field, .appsheet-child-fields > .ops-field:has(select), .appsheet-child-fields > .ops-field:has(textarea) { grid-column: auto; }
+  .appsheet-service-row { grid-template-columns: 1fr; }
+  .appsheet-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .appsheet-saved-summary { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 400px) {
+  .appsheet-invoice-head { gap: 8px; }
+  .appsheet-invoice-body { gap: 12px; }
+  .appsheet-section { padding: 10px; }
+  .appsheet-totals > div { min-height: 68px; padding: 9px; }
+  .appsheet-dialog-line { grid-template-columns: 1fr; }
+}
