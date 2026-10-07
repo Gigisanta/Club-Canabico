@@ -21,7 +21,7 @@ test("new order can select a long-tail member through paged lookup and search", 
     expect(response.status(), await response.text()).toBe(200);
   }
   await page.getByRole("button", { name: "Pedidos", exact: true }).click();
-  await page.getByRole("group", { name: "Pedidos: acciones", exact: true }).getByRole("button", { name: "＋ Nuevo pedido", exact: true }).click();
+  await page.getByRole("group", { name: "Pedidos: acciones", exact: true }).getByRole("button", { name: "＋ Pedido avanzado", exact: true }).click();
   const dialog = page.getByRole("dialog");
   const member = dialog.getByRole("combobox", { name: "Socio", exact: true });
   await expect(dialog.getByRole("searchbox", { name: "Buscar socio por nombre", exact: true })).toBeVisible();

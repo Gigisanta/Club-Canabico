@@ -238,7 +238,7 @@ export default function DeliveryShift({ client: suppliedClient, manifest, onRefr
     await runBusy(async () => {
       const note = String(values.get("evidence") ?? "").trim();
       if (!note) throw new Error("Describí el comprobante recibido.");
-      const method = String(values.get("method") ?? "cash") as "cash" | "transfer" | "card";
+      const method = String(values.get("method") ?? "cash") as "cash" | "transfer" | "mercado_pago" | "card";
       const data = {
         orderId: assignment.orderId,
         deliveryId: assignment.id,
@@ -485,7 +485,7 @@ function AssignmentCard({ assignment, busy, snapshotNeedsRefresh, onDelivery, on
     </form></details>
     <details><summary>Informar un cobro</summary><form onSubmit={submitCollection} aria-busy={busy}>
       <div className="delivery-shift__form-row">
-        <label htmlFor={formId + "-method"}>Medio<select id={formId + "-method"} name="method" disabled={busy}><option value="cash">Efectivo</option><option value="transfer">Transferencia</option><option value="card">Tarjeta</option></select></label>
+        <label htmlFor={formId + "-method"}>Medio<select id={formId + "-method"} name="method" disabled={busy}><option value="cash">Efectivo</option><option value="transfer">Transferencia</option><option value="mercado_pago">Mercado Pago</option><option value="card">Tarjeta</option></select></label>
         <label htmlFor={formId + "-currency"}>Moneda<select id={formId + "-currency"} name="currency" defaultValue={assignment.currency} disabled={busy}><option value="ARS">ARS</option><option value="USD">USD</option></select></label>
       </div>
       <label htmlFor={formId + "-amount"}>Importe<input ref={(input) => setFieldRef("amount", input)} id={formId + "-amount"} name="amount" inputMode="decimal" placeholder="0,00" required disabled={busy} aria-invalid={fieldErrors.amount ? "true" : undefined} aria-describedby={fieldErrors.amount ? formId + "-amount-error" : undefined} onChange={() => clearFieldError("amount")} />{fieldErrors.amount && <small id={formId + "-amount-error"} className="delivery-shift__field-error" role="alert">{fieldErrors.amount}</small>}</label>

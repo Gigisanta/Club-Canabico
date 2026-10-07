@@ -28,9 +28,10 @@ export function CanonicalExportPanel({ context }: { context: OperationsContext }
   return <section className="ops-sheet" aria-label="Exportación canónica">
     <div className="ops-sheet-head"><h3>Exportar hechos verificables</h3></div>
     <InfoBand title="Importes, moneda y procedencia"><p>Cada parte contiene hasta 200 hechos. Conservá todas las partes del mismo fingerprint. Historia aprobada y operaciones nuevas tienen poblaciones separadas. Los valores desconocidos incluyen su estado; las fechas desconocidas sólo se incluyen sin filtro de período.</p></InfoBand>
+    {feed === "sales-lines" && <p className="ops-small-note">Los productos de facturas con cálculo pendiente se identifican como valores capturados. Su importe no representa una venta calculada.</p>}
     <div className="ops-form-grid">
       <label className="ops-field"><span>Hechos</span><select value={feed} disabled={busy || parts > 0} onChange={event => { setFeed(event.target.value); reset(); }}>
-        <option value="sales-lines">Detalle de ventas nuevas</option><option value="ledger">Movimientos de cuentas</option>
+        <option value="sales-lines">Ventas y productos capturados</option><option value="ledger">Movimientos de cuentas</option>
         {hasCapability(context, "stock.read") && <option value="stock">Movimientos físicos</option>}
         {hasCapability(context, "imports.review") && <option value="history">Historia aprobada</option>}
       </select></label>

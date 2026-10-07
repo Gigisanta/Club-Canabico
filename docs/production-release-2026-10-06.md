@@ -36,4 +36,29 @@ Con la sesión real de Tiziano, el resumen respondió `200` en tres recargas y s
 
 Las tres recargas sin caché del navegador registraron FCP de 1760, 288 y 472 ms y fin del último recurso de 4776, 1308 y 1618 ms. La primera fue inmediatamente posterior a la promoción y tuvo cargas de recursos y APIs más lentas. El estado del CDN y del servidor no está controlado; esas cifras no demuestran una mejora global frente a la medición previa. Sí revelaron una pausa repetida de unos 310 ms entre contexto listo y consultas del resumen.
 
-El ajuste adicional comparte la Promise y el módulo de la consola precargada y usa un componente estable para abrirla sin una primera suspensión. Conserva contexto, identidad, drafts, carga recuperable y boundary de errores. Typecheck, build y los cuatro E2E focalizados de autenticación y rendimiento pasaron con Node 24 y PostgreSQL aislado. Su reducción de latencia publicada sigue pendiente de medición y requiere CI y revisión independientes antes de promocionarlo.
+El ajuste adicional comparte la Promise y el módulo de la consola precargada y usa un componente estable para abrirla sin una primera suspensión. Conserva contexto, identidad, drafts, carga recuperable y boundary de errores. Typecheck, build y los cuatro E2E focalizados de autenticación y rendimiento pasaron con Node 24 y PostgreSQL aislado. La revisión independiente no encontró regresiones de identidad, contexto, drafts o recuperación.
+
+## Publicación final y medición real
+
+El código publicado es el commit `ce46f5669806e4fe5c7790ead69fb39b0a8b57f3`. Los runs `37511426054` (PR) y `37511418734` (push) aprobaron el CI completo para ese SHA. El log del PR confirma 264 pruebas de backend sin fallos ni skips, 45 de navegador en 3,5 minutos y 12 offline, además de los controles de restauración PostgreSQL 18, contingencia y respaldo. GitGuardian y Vercel aprobaron el candidato.
+
+Se promocionó normalmente, sin forzar los controles, el deployment ya verificado `dpl_D7ET2FmCiPXDrPivzdQhy5BrfEFq`. El dominio personalizado resuelve a ese ID y sirve el fingerprint `7f842b7d8f2da30301c4ae79128b83515c15a23a09f7ebc7619e71770653ecae`, Node 24.21.0 y 254 fuentes. La fuente Git tiene fingerprint `b891b5399d0e8936bdb8fcf73ce8b79067a57032ef223033f8b0093e8abe5af3`; se reprodujo el mismo cambio de configuración de build explicado arriba. La metadata de este candidato no expone el array de rutas compiladas: se verificaron sus reglas efectivas y los smokes, y se confirmó el informe autenticado en el dominio, sin afirmar una inspección de ese array ausente.
+
+Después de la primera carga se hicieron tres recargas con caché del navegador desactivada, sin limitar red ni CPU y con la misma sesión real. El estado del servidor y del CDN no está controlado:
+
+| Medida publicada | Recarga 1 | Recarga 2 | Recarga 3 |
+| --- | ---: | ---: | ---: |
+| FCP | 284 ms | 220 ms | 200 ms |
+| Fin del último recurso | 984 ms | 514 ms | 594 ms |
+| Contexto listo → solicitud del resumen | 2,8 ms | 3,0 ms | 9,7 ms |
+| Solicitudes de contexto | 1 | 1 | 1 |
+
+Todas las nueve consultas API de cada recarga devolvieron `200`, incluido el informe de contribución. La pausa observada antes del ajuste (304–311 ms, con el módulo ya disponible) desaparece en estas tres muestras. El fin del último recurso no es una medida de interacción ni un percentil de campo; no se promete ese tiempo para todas las redes, equipos o estados del proveedor.
+
+La primera carga inmediatamente después de la promoción tuvo FCP de 812 ms y último recurso a 4119 ms. El observador de readiness agotó su plazo de herramienta; al leer el estado después, la página estaba lista, todas las APIs eran `200` y no había errores de consola. La caché del navegador se había restaurado antes de esa observación final, por lo que esta captura diagnóstica se registra separada de las tres recargas comparables.
+
+Dos consultas, cuentas y configuración, duraron aproximadamente 2650 ms; las restantes APIs tardaron 116–394 ms. Los assets individuales tardaron 58–294 ms. Esta cola se concentra en las APIs, pero la captura no separa el inicio de instancia, conexión, espera de pool y consultas. La revisión independiente confirmó que función `gru1` y base Neon `sa-east-1` están en São Paulo ([Vercel](https://vercel.com/docs/regions), [AWS](https://docs.aws.amazon.com/global-infrastructure/latest/regions/aws-regions.html)); el cliente Prisma ya se comparte por instancia y su pool está limitado. La consulta acotada del CLI de Vercel no expuso estados HTTP, duraciones o spans de inicio, y alcanzó su límite de registros; tampoco permite atribuir la demora ni calcular una tasa global de errores. No se cambia región, pool ni arquitectura por un único outlier sin atribución. La medición de una primera carga prolongada se conserva y no se oculta dentro de una mediana.
+
+Tras la promoción se repitieron el diálogo de pedido sin enviar datos (Escape cierra y devuelve el foco), el menú a 390×844 (cierre con Escape y foco correcto, ancho de página 375 px), y la vista de escritorio sin animaciones activas al asentarse ni errores de consola. Los hashes de usuarios y permisos y los conteos de hechos de negocio permanecen iguales al preflight. No se habilitaron autoridades comerciales.
+
+Evidencia privada nueva: `loader-candidate-verification.json`, `loader-published-verification.json`, `loader-ci.log`, `loader-production-cold-run.json`, `loader-production-runs.json`, `loader-production-desktop.png`, `loader-production-mobile.png` y `state-published-final.json`. La vuelta inmediata de código puede usar el deployment previamente verificado `dpl_EzxszCWGuX9oNFVntdZgN1kkmz3v`; no exige revertir el índice aditivo. Los cambios documentales posteriores no alteran el fingerprint de fuentes runtime publicado.

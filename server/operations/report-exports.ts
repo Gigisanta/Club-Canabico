@@ -7,6 +7,7 @@ import { OperationError, objectScope, requireCapability, type Tx } from "./core.
 import { reportPeriodDateBounds } from "./report-queries.js";
 import { signCursor, verifyCursor } from "./signed-cursor.js";
 import { stockFactScopeWhere } from "./stock-scope.js";
+import { isAppSheetInvoiceTotalPending } from "../../shared/operations/appsheet.js";
 
 const feeds = ["sales-lines", "ledger", "stock", "history"] as const;
 type Feed = typeof feeds[number];
@@ -18,7 +19,7 @@ const csvCell = (value: unknown, exactNumber = false) => {
   const trustedNumber = exactNumber && /^-?\d+(?:\.\d+)?$/.test(text);
   return `"${(!trustedNumber && /^[=+@\-\t\r]/.test(text) ? "'" : "") + text.replaceAll('"', '""')}"`;
 };
-const columns = ["id", "population", "kind", "occurredOn", "dateState", "currency", "currencyState", "amountMinor", "amountState", "quantity", "quantityState", "unit", "unitState", "sourceSystem", "sourceTable", "sourceKey", "sourceRow", "sourceHash", "objectId", "accountId", "skuId", "lotId"];
+const columns = ["id", "population", "kind", "occurredOn", "dateState", "currency", "currencyState", "amountMinor", "amountState", "quantity", "quantityState", "unit", "unitState", "sourceSystem", "sourceTable", "sourceKey", "sourceRow", "sourceHash", "objectId", "accountId", "skuId", "lotId", "invoiceTotalMinor", "invoiceTotalState", "invoiceSource", "invoiceTotalCalculationState", "invoiceTotalCalculationSource", "invoiceActorId", "invoiceConfirmedAt", "invoiceQuoteVersion", "invoiceSnapshotHash", "invoiceProductsTotalMinor", "invoiceMotoClientTotalMinor", "invoiceProductLineBasisMinor", "invoiceUnallocatedProductDeltaMinor", "invoiceProductPaymentMethod", "invoiceMotoPaymentMethod"];
 type ExportRow = Record<string, string | number | null> & { id: string };
 
 function authorizeScope(feed: Feed, scope: Scope) {
@@ -33,8 +34,68 @@ async function page(tx: Tx, feed: Feed, range: { from?: string; to?: string }, s
     const where: Prisma.OperationOrderLineWhereInput = { order: { commercialState: "confirmed", confirmedAt: { not: null, ...date }, ...(scope.memberIds ? { memberId: { in: scope.memberIds } } : {}) } };
     const count = await tx.operationOrderLine.count({ where });
     const last = await tx.commandReceipt.findFirst({ orderBy: [{ committedAt: "desc" }, { requestId: "desc" }], select: { requestId: true } });
-    const items = await tx.operationOrderLine.findMany({ where: { AND: [where, ...(cursor ? [{ id: { gt: cursor } }] : [])] }, orderBy: { id: "asc" }, take: limit + 1, select: { id: true, skuId: true, revenueMinor: true, requested: true, unit: true, order: { select: { id: true, currency: true, confirmedAt: true } } } });
-    return { marker: { count, last: last?.requestId }, items: items.map(row => ({ id: row.id, population: "operations", kind: "sale-line", occurredOn: row.order.confirmedAt?.toISOString() ?? null, dateState: row.order.confirmedAt ? "known" : "absent", currency: row.order.currency, currencyState: "known", amountMinor: row.revenueMinor.toString(), amountState: "known", quantity: row.requested.toString(), quantityState: "known", unit: row.unit, unitState: "known", objectId: row.order.id, skuId: row.skuId } as ExportRow)) };
+    const items = await tx.operationOrderLine.findMany({ where: { AND: [where, ...(cursor ? [{ id: { gt: cursor } }] : [])] }, orderBy: { id: "asc" }, take: limit + 1, select: { id: true, orderId: true, skuId: true, revenueMinor: true, requested: true, unit: true, order: { select: { id: true, currency: true, totalMinor: true, confirmedAt: true, quote: true } } } });
+    const orderIds = [...new Set(items.map(row => row.orderId))];
+    const orderLineTotals = orderIds.length ? await tx.operationOrderLine.groupBy({
+      by: ["orderId"], where: { orderId: { in: orderIds } },
+      _min: { id: true }, _sum: { revenueMinor: true },
+    }) : [];
+    const firstLineByOrder = new Map(orderLineTotals.map(row => [row.orderId, row._min.id]));
+    const lineBasisByOrder = new Map(orderLineTotals.map(row => [row.orderId, row._sum.revenueMinor ?? 0n]));
+    return { marker: { count, last: last?.requestId }, items: items.map(row => {
+      const quote = row.order.quote && typeof row.order.quote === "object" && !Array.isArray(row.order.quote)
+        ? row.order.quote as Record<string, unknown> : {};
+      const resolution = quote.financialResolution && typeof quote.financialResolution === "object" && !Array.isArray(quote.financialResolution)
+        ? quote.financialResolution as Record<string, unknown> : {};
+      const components = quote.paymentComponents && typeof quote.paymentComponents === "object" && !Array.isArray(quote.paymentComponents)
+        ? quote.paymentComponents as Record<string, unknown> : {};
+      const productComponent = components.products && typeof components.products === "object" && !Array.isArray(components.products)
+        ? components.products as Record<string, unknown> : {};
+      const motoComponent = components.moto && typeof components.moto === "object" && !Array.isArray(components.moto)
+        ? components.moto as Record<string, unknown> : {};
+      const appSheet = quote.source === "appsheet-invoice";
+      const pending = isAppSheetInvoiceTotalPending(quote);
+      const calculationState = typeof quote.totalCalculationState === "string" ? quote.totalCalculationState : "unknown";
+      const quoteTotal = typeof quote.totalMinor === "string" && /^(0|[1-9][0-9]*)$/.test(quote.totalMinor)
+        ? quote.totalMinor : null;
+      const totalConsistent = quoteTotal !== null && BigInt(quoteTotal) === row.order.totalMinor;
+      const invoiceTotalKnown = !appSheet || ((calculationState === "defined" || calculationState === "staff_confirmed") && totalConsistent);
+      const staffConfirmed = appSheet && calculationState === "staff_confirmed";
+      const firstLine = firstLineByOrder.get(row.orderId) === row.id;
+      const productTotal = staffConfirmed && typeof resolution.productsTotalMinor === "string"
+        ? resolution.productsTotalMinor : staffConfirmed ? null : typeof productComponent.totalMinor === "string" ? productComponent.totalMinor : null;
+      const motoTotal = staffConfirmed && typeof resolution.motoClientTotalMinor === "string"
+        ? resolution.motoClientTotalMinor : staffConfirmed ? null : typeof motoComponent.clientTotalMinor === "string" ? motoComponent.clientTotalMinor : null;
+      const lineBasis = lineBasisByOrder.get(row.orderId)?.toString() ?? "0";
+      const validProductTotal = productTotal !== null && /^(0|[1-9][0-9]*)$/.test(productTotal);
+      const productDelta = staffConfirmed && validProductTotal ? (BigInt(productTotal) - BigInt(lineBasis)).toString() : null;
+      const fields = firstLine ? {
+        invoiceTotalMinor: invoiceTotalKnown ? row.order.totalMinor.toString() : null,
+        invoiceTotalState: invoiceTotalKnown ? "known" : pending ? "captured-invoice-total-pending" : "unknown",
+        invoiceSource: appSheet ? "appsheet-invoice" : "operation-order",
+        invoiceTotalCalculationState: calculationState,
+        invoiceTotalCalculationSource: typeof quote.totalCalculationSource === "string" ? quote.totalCalculationSource : null,
+        invoiceActorId: staffConfirmed && typeof resolution.actorId === "string" ? resolution.actorId : null,
+        invoiceConfirmedAt: staffConfirmed && typeof resolution.confirmedAt === "string" ? resolution.confirmedAt : null,
+        invoiceQuoteVersion: staffConfirmed && typeof resolution.quoteVersion === "number" ? resolution.quoteVersion : null,
+        invoiceSnapshotHash: staffConfirmed && typeof resolution.snapshotHash === "string" ? resolution.snapshotHash : null,
+        invoiceProductsTotalMinor: validProductTotal ? productTotal : null,
+        invoiceMotoClientTotalMinor: motoTotal !== null && /^(0|[1-9][0-9]*)$/.test(motoTotal) ? motoTotal : null,
+        invoiceProductLineBasisMinor: staffConfirmed ? lineBasis : null,
+        invoiceUnallocatedProductDeltaMinor: productDelta,
+        invoiceProductPaymentMethod: typeof productComponent.paymentMethod === "string" ? productComponent.paymentMethod : null,
+        invoiceMotoPaymentMethod: typeof motoComponent.paymentMethod === "string" ? motoComponent.paymentMethod : null,
+      } : {};
+      return {
+        id: row.id, population: "operations", kind: pending ? "captured-product-line" : "sale-line",
+        occurredOn: row.order.confirmedAt?.toISOString() ?? null, dateState: row.order.confirmedAt ? "known" : "absent",
+        currency: row.order.currency, currencyState: "known", amountMinor: row.revenueMinor.toString(),
+        amountState: pending ? "captured-invoice-total-pending" : "known", quantity: row.requested.toString(),
+        quantityState: "known", unit: row.unit, unitState: "known", sourceSystem: appSheet ? "appsheet-invoice" : "operation-order",
+        sourceTable: "OperationOrderLine", sourceKey: row.id, objectId: row.order.id, skuId: row.skuId,
+        ...fields,
+      } as ExportRow;
+    }) };
   }
   if (feed === "ledger") {
     const where: Prisma.LedgerLegWhereInput = { ...(scope.accountIds ? { accountId: { in: scope.accountIds } } : {}), event: { occurredAt: date } };
@@ -67,7 +128,7 @@ operationsExports.get("/:feed", async (req, res) => {
     if (feed === "stock") await requireCapability(tx, req.user, "stock.read");
     if (feed === "history") await requireCapability(tx, req.user, "imports.review");
     const scope = await objectScope(tx, req.user); authorizeScope(feed, scope);
-    const identity = digest({ actor: req.user.id, feed, from: params.from, to: params.to, scope, queryVersion: "canonical-csv-v1" });
+    const identity = digest({ actor: req.user.id, feed, from: params.from, to: params.to, scope, queryVersion: "canonical-csv-v3" });
     let current: { id: string; fingerprint: string; identity: string } | undefined;
     if (params.cursor) {
       try { current = z.strictObject({ id: z.string().max(200), fingerprint: z.string().length(64), identity: z.string().length(64) }).parse(verifyCursor("canonical-export", params.cursor)); }
@@ -78,10 +139,10 @@ operationsExports.get("/:feed", async (req, res) => {
     const fingerprint = digest({ identity, population: found.marker });
     if (current && current.fingerprint !== fingerprint) throw new OperationError(409, "EXPORT_POPULATION_CHANGED", "Los hechos cambiaron. Reiniciá la exportación para conservar una población consistente.");
     let count = Math.min(params.limit, found.items.length), csv = "";
-    do { csv = "\uFEFF" + columns.map(key => csvCell(key)).join(",") + "\r\n" + found.items.slice(0,count).map(row => columns.map(key => csvCell(row[key], ["amountMinor", "quantity", "sourceRow"].includes(key))).join(",")).join("\r\n") + "\r\n"; if (Buffer.byteLength(csv, "utf8") <= 400*1024) break; count = Math.floor(count/2); } while (count);
+    do { csv = "\uFEFF" + columns.map(key => csvCell(key)).join(",") + "\r\n" + found.items.slice(0,count).map(row => columns.map(key => csvCell(row[key], ["amountMinor", "quantity", "sourceRow", "invoiceTotalMinor", "invoiceProductsTotalMinor", "invoiceMotoClientTotalMinor", "invoiceProductLineBasisMinor", "invoiceUnallocatedProductDeltaMinor", "invoiceQuoteVersion"].includes(key))).join(",")).join("\r\n") + "\r\n"; if (Buffer.byteLength(csv, "utf8") <= 400*1024) break; count = Math.floor(count/2); } while (count);
     if (!count && found.items.length) throw new OperationError(422, "EXPORT_ROW_TOO_LARGE", "Un registro excede el tamaño permitido y requiere revisión.");
     const hasMore = found.items.length > count;
-    return { csv, rows: count, nextCursor: hasMore ? signCursor("canonical-export", { id: found.items[count-1]!.id, fingerprint, identity }) : null, fingerprint, coverage: { population: feed === "history" ? "approved-selected-history" : "canonical-operations", historyAndOperationsCombined: false, queryCompleteForPage: true, totalRows: String(found.marker.count), dateUnknownIncluded: !params.from && !params.to, money: "exact-minor-unit-strings", unknownValues: "empty-with-explicit-state", unit: "per-fact", queryVersion: "canonical-csv-v1" } };
+    return { csv, rows: count, nextCursor: hasMore ? signCursor("canonical-export", { id: found.items[count-1]!.id, fingerprint, identity }) : null, fingerprint, coverage: { population: feed === "history" ? "approved-selected-history" : "canonical-operations", historyAndOperationsCombined: false, queryCompleteForPage: true, totalRows: String(found.marker.count), dateUnknownIncluded: !params.from && !params.to, money: "exact-minor-unit-strings", unknownValues: "empty-with-explicit-state", unit: "per-fact", queryVersion: "canonical-csv-v3" } };
   }, { isolationLevel: "RepeatableRead", timeout: 15000 });
   res.setHeader("Cache-Control", "private, no-store"); res.json(result);
 });

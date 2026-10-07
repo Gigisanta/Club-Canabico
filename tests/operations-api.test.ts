@@ -8,7 +8,7 @@ import { parse as parseCsv } from "csv-parse/sync";
 import { splitSqlStatements } from "./migration-sql.js";
 import { readLegacyWorkbook, legacyReaderVersion } from "../server/operations/legacy-reader.js";
 import { legacyPayloadHash } from "../server/operations/legacy-upload-contract.js";
-import type { CommandEnvelope } from "../shared/operations/contracts.js";
+import { cutoverGateIds, type CommandEnvelope } from "../shared/operations/contracts.js";
 // Primary owner: observable API effects, receipts and authorization. Fixtures establish only pre-existing objects.
 test("canonical financial commands preserve cash custody, debt and global replay",{skip:!process.env.TEST_DATABASE_URL},async t=>{
  const url=new URL(process.env.TEST_DATABASE_URL!);assert.ok(["127.0.0.1","localhost","[::1]"].includes(url.hostname));assert.match(url.pathname,/test|ci/i);
@@ -42,6 +42,46 @@ test("canonical financial commands preserve cash custody, debt and global replay
  }
  try{
   for(const id of ["owner","finance","driver","cashier","importer"])await login(id);
+  await t.test("cutover requires active authors and reviewers and rolls back stale approvals",async()=>{
+   const passphrase=pass;
+   for(const [id,active] of [["cutover-author",true],["cutover-reviewer",true],["cutover-inactive-author",false],["cutover-activator",true]] as const)
+    await db.user.create({data:{id,name:id,email:`${id}@test.local`,password:passphrase,role:"owner",active}});
+   for(const id of ["cutover-author","cutover-reviewer","cutover-activator"])await login(id);
+   const assertNoCommandEffects=async(request:CommandEnvelope)=>{
+    assert.equal(await db.commandReceipt.findUnique({where:{requestId:request.requestId}}),null);
+    assert.equal(await db.operationAudit.count({where:{requestId:request.requestId}}),0);
+    assert.equal(await db.operationOutbox.count({where:{requestId:request.requestId}}),0);
+    assert.equal(await db.operationObject.findUnique({where:{id:request.targetId}}),null);
+   };
+   const firstGate=cutoverGateIds[0]!;
+   const inactiveApproval=e(firstGate,"CutoverGateReviewed",{gateId:firstGate,authorId:"cutover-inactive-author",evidence:{note:"synthetic inactive author"}});
+   const inactiveApprovalResponse=await call("/operations/commands","cutover-reviewer",inactiveApproval);
+   assert.equal(inactiveApprovalResponse.status,409);assert.equal((await inactiveApprovalResponse.json()).code,"AUTHOR_INACTIVE");
+   await assertNoCommandEffects(inactiveApproval);
+   assert.equal(await db.cutoverGate.findUnique({where:{id:firstGate}}),null);
+
+   for(const gateId of cutoverGateIds){
+    const reviewed=await cmd(e(gateId,"CutoverGateReviewed",{gateId,authorId:"cutover-author",evidence:{note:`synthetic human review ${gateId}`}}),"cutover-reviewer");
+    assert.equal(reviewed.result.status,"approved");
+   }
+   const approvals=await db.cutoverGate.findMany({where:{id:{in:[...cutoverGateIds]}}});
+   assert.equal(approvals.length,cutoverGateIds.length);
+   assert.ok(approvals.every(gate=>gate.status==="approved"&&gate.approvedBy==="cutover-author"&&gate.reviewedBy==="cutover-reviewer"));
+
+   const assertActivationRejected=async()=>{
+    const request=e("operations","AuthorityActivated",{evidence:{note:"synthetic stale-approval regression"}});
+    const response=await call("/operations/commands","cutover-activator",request),body=await response.json();
+    assert.equal(response.status,422);assert.equal(body.code,"CUTOVER_GATES_PENDING");
+    assert.deepEqual(body.details.missing,[...cutoverGateIds]);
+    await assertNoCommandEffects(request);
+    assert.equal(await db.operationAuthority.findUnique({where:{id:"operations"}}),null);
+   };
+   await db.user.update({where:{id:"cutover-author"},data:{active:false,authorizationEpoch:{increment:1}}});
+   await assertActivationRejected();
+   await db.user.update({where:{id:"cutover-author"},data:{active:true,authorizationEpoch:{increment:1}}});
+   await db.user.update({where:{id:"cutover-reviewer"},data:{active:false,authorizationEpoch:{increment:1}}});
+   await assertActivationRejected();
+  });
   await t.test("legacy preview is transient and creates no source rows or command receipts",async()=>{
    const workbook=new ExcelJS.Workbook();const sheet=workbook.addWorksheet("C_Cliente");sheet.addRow(["Id_Cliente","Nombre"]);sheet.addRow(["preview-only","Fixture"]);
    const before=[await db.legacyImportSnapshot.count(),await db.legacySourceRecord.count(),await db.commandReceipt.count()];
@@ -261,7 +301,13 @@ test("canonical financial commands preserve cash custody, debt and global replay
    const restricted=await call(path,"finance");assert.equal(restricted.status,200);const filtered=await restricted.json();assert.deepEqual(filtered.historicalItems,[]);assert.equal(filtered.coverage.historical,"location-custody-mapping-pending");
    await db.operationAccess.update({where:{userId:"finance"},data:{capabilities:prior.capabilities,scope:prior.scope}});
   });
-  await t.test("customer segmentation preserves the strict 20 g boundary through the reports API",async()=>{
+  await t.test("customer segmentation preserves the strict 20 g boundary through the reports API",async t=>{
+   t.after(async()=>{
+    const orderIds=["order-threshold-20","order-threshold-20-001"];
+    await db.operationOrderLine.deleteMany({where:{orderId:{in:orderIds}}});
+    await db.operationOrder.deleteMany({where:{id:{in:orderIds}}});
+    await db.operationMember.deleteMany({where:{id:{in:["member-threshold-20","member-threshold-20-001"]}}});
+   });
    for(const [memberId,orderId,grams] of [["member-threshold-20","order-threshold-20","20"],["member-threshold-20-001","order-threshold-20-001","20.001"]] as const){
     await db.operationMember.create({data:{id:memberId,name:"Synthetic threshold fixture",address:{},preferences:{}}});
     await db.operationOrder.create({data:{
@@ -347,7 +393,27 @@ test("canonical financial commands preserve cash custody, debt and global replay
    const denied=await call("/operations/commands","scoped-finance",e(hidden.targetId,"CollectionReportRejected",{reason:"Outside scope",evidence:{reference:"review"}},1));assert.equal(denied.status,403);
    const before=await db.ledgerLeg.count();await cmd(decision,"scoped-finance");assert.equal(await db.ledgerLeg.count(),before);assert.equal((await db.collectionReport.findUniqueOrThrow({where:{id:pending.targetId}})).status,"rejected");
   });
-  await t.test("canonical exports preserve exact values, unknowns, pages and current scopes",async()=>{
+  await t.test("canonical exports preserve exact values, unknowns, pages and current scopes",async t=>{
+   const exportDate=new Date(),genericSale="sales-export-generic",pendingInvoice="sales-export-pending";
+   t.after(async()=>{
+    await db.operationOrderLine.deleteMany({where:{id:{in:["sales-export-generic-line","sales-export-pending-line"]}}});
+    await db.operationOrder.deleteMany({where:{id:{in:[genericSale,pendingInvoice]}}});
+   });
+   await db.operationOrder.createMany({data:[
+    {id:genericSale,memberId:member,channel:"local",currency:"ARS",commercialState:"confirmed",confirmedAt:exportDate,quote:{},subtotalMinor:1200n,totalMinor:1200n,address:{},createdBy:"owner"},
+    {id:pendingInvoice,memberId:member,channel:"local",currency:"ARS",commercialState:"confirmed",confirmedAt:exportDate,quote:{source:"appsheet-invoice",capturedBaseMinor:"950",capturedProductMinor:"900",subtotalMinor:null,totalMinor:null,subtotalCalculationState:"pending_definition",totalCalculationState:"pending_definition"},subtotalMinor:900n,totalMinor:950n,address:{},createdBy:"owner"},
+   ]});
+   await db.operationOrderLine.createMany({data:[
+    {id:"sales-export-generic-line",orderId:genericSale,skuId:"sales-generic-sku",unit:"g",requested:"1",unitPrice:"1",referenceMinor:1200n,revenueMinor:1200n},
+    {id:"sales-export-pending-line",orderId:pendingInvoice,skuId:"sales-pending-sku",unit:"g",requested:"1",unitPrice:"1",referenceMinor:900n,revenueMinor:900n},
+   ]});
+   const salesBlockResponse=await call("/reports/operations/exports/sales-lines");assert.equal(salesBlockResponse.status,200,await salesBlockResponse.clone().text());
+   const salesBlock=await salesBlockResponse.json();assert.equal(salesBlock.rows,2);
+   const salesRows=parseCsv(salesBlock.csv,{bom:true,columns:true,skip_empty_lines:true}) as Array<{id:string;kind:string;amountMinor:string;amountState:string}>;
+   assert.deepEqual(salesRows.map(row=>({id:row.id,kind:row.kind,amountMinor:row.amountMinor,amountState:row.amountState})).sort((a,b)=>a.id.localeCompare(b.id)),[
+    {id:"sales-export-generic-line",kind:"sale-line",amountMinor:"1200",amountState:"known"},
+    {id:"sales-export-pending-line",kind:"captured-product-line",amountMinor:"900",amountState:"captured-invoice-total-pending"},
+   ]);
    const sourceSystem=`export-${randomUUID()}`,snapshotId=`export-${randomUUID()}`;
    await db.legacyImportSnapshot.create({data:{id:snapshotId,sourceSystem,filename:"synthetic.csv",fileHash:"4".repeat(64),importerVersion:"export-fixture",createdBy:"importer",reviewedBy:"finance",status:"reviewed",coverage:[],controls:{}}});
    await db.legacyHistoryPublication.create({data:{sourceSystem,snapshotId,fileHash:"4".repeat(64),mappingId:"export-mapping",fingerprint:"5".repeat(64),publishedBy:"owner",evidence:{reference:"fixture-independent-review"}}});

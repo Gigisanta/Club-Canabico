@@ -953,6 +953,7 @@ model CatalogSku {
   variety String
   category String
   unit String
+  appSheet Json?
   minQuantity Decimal @default(0) @db.Decimal(38, 12)
   minVarieties Int @default(0)
   active Boolean @default(true)

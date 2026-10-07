@@ -4,6 +4,8 @@ import { z } from "zod";
 import { db } from "../db.js";
 import { capabilities, requireCapability, executeCommand, commandSpecs, envelopeSchema, wire, OperationError, requireMemberScope, requireAccountScope, objectScope } from "./core.js";
 import "./access.js";
+import { projectAppSheetCatalogue } from "./appsheet-catalogue.js";
+import { projectInvoiceAmount } from "./invoice-projection.js";
 import "./commercial.js";
 import "./finance.js";
 import "./period-coverage.js";
@@ -101,6 +103,17 @@ operationsRoutes.get("/catalog",async(req,res)=>{
  const items=visible.map(s=>({...s,lots:s.lots.map(l=>({...l,unitCost:caps.includes("finance.read")||caps.includes("stock.read")?l.unitCost:null,balances:l.balances.map(b=>{const a=byBalance.get(b.id);return {...b,availableQuantity:a?.availableQuantity??"0",availabilityState:a?.state??"pending",availabilityReason:a?.reason??"Falta cobertura",availabilityVersion:a?.version??null};})}))}));
  res.json(wire({items,versions:await versions(visible.map(s=>s.id)),hasMore:skus.length>limit,nextCursor:skus.length>limit?visible.at(-1)!.id:null,channel,availabilityCoverage:availability.coverage,availability:"approved-location-custody-channel-minus-reservations"}));
 });
+operationsRoutes.get("/catalogue-sheets",async(req,res)=>{
+ try{await requireCapability(db,req.user,"prices.propose");}
+ catch(error){if(!(error instanceof OperationError)||error.code!=="CAPABILITY_REQUIRED")throw error;await requireCapability(db,req.user,"stock.adjust");}
+ const q=z.string().max(120).parse(req.query.q??"");
+ const limit=z.coerce.number().int().min(1).max(200).parse(req.query.limit??200),cursor=pageCursor(req.query.cursor);
+ const where:Prisma.CatalogSkuWhereInput=q?{OR:[{code:{contains:q,mode:"insensitive"}},{name:{contains:q,mode:"insensitive"}},{variety:{contains:q,mode:"insensitive"}},{category:{contains:q,mode:"insensitive"}}]}:{};
+ if(cursor&&!await db.catalogSku.findFirst({where:{AND:[where,{id:cursor}]},select:{id:true}}))throw new OperationError(400,"PAGE_CURSOR","Reiniciá el catálogo con la búsqueda actual");
+ const found=await db.catalogSku.findMany({where,select:{id:true,code:true,name:true,variety:true,category:true,unit:true,active:true,appSheet:true},orderBy:[{category:"asc"},{name:"asc"},{id:"asc"}],take:limit+1,...(cursor?{cursor:{id:cursor},skip:1}:{})});
+ const items=found.slice(0,limit).map(sku=>({...sku,appSheet:projectAppSheetCatalogue(sku.appSheet)}));
+ res.json(wire({items,versions:await versions(items.map(sku=>sku.id)),hasMore:found.length>limit,nextCursor:found.length>limit?items.at(-1)!.id:null}));
+});
 operationsRoutes.get("/catalog/:id/history",async(req,res)=>{
  await requireCapability(db,req.user,"stock.read");
  const historicalCursor=z.string().max(4096).optional().parse(req.query.historicalCursor);
@@ -115,7 +128,7 @@ operationsRoutes.get("/orders",async(req,res)=>{
  const rows=await db.operationOrder.findMany({where,include:{lines:true},orderBy:[{createdAt:"desc"},{id:"desc"}],take:limit+1,...(cursor?{cursor:{id:cursor},skip:1}:{})});
  const orders=rows.slice(0,limit);
  const financial=(await capabilities(db,req.user)).includes("finance.read");
- const items=orders.map(o=>({...o,lines:o.lines.map(l=>({...l,costMinor:financial?l.costMinor:null}))}));
+ const items=orders.map(o=>({...projectInvoiceAmount(o),lines:o.lines.map(l=>({...l,costMinor:financial?l.costMinor:null}))}));
  res.json(wire({items,versions:await versions(orders.map(o=>o.id)),hasMore:rows.length>limit,nextCursor:rows.length>limit?orders.at(-1)!.id:null}));
 });
 operationsRoutes.get("/orders/:id",async(req,res)=>{
@@ -125,7 +138,7 @@ operationsRoutes.get("/orders/:id",async(req,res)=>{
  const caps=await capabilities(db,req.user),financial=caps.includes("finance.read"),scope=await objectScope(db,req.user);
  const visibleBalances=scope.locationIds||scope.custodianIds?await db.stockBalance.findMany({where:{...(scope.locationIds?{locationId:{in:scope.locationIds}}:{}),...(scope.custodianIds?{custodianId:{in:scope.custodianIds}}:{})},select:{id:true}}):null;
  const reservations=caps.includes("stock.prepare")?await db.stockReservation.findMany({where:{orderId:id,status:"active",...(visibleBalances?{balanceId:{in:visibleBalances.map(balance=>balance.id)}}:{})},select:{id:true,lineId:true,balanceId:true,quantity:true,consumed:true}}):[];
- res.json(wire({order:{...order,lines:order.lines.map(l=>({...l,costMinor:financial?l.costMinor:null}))},reservations,allocations:await db.preparationAllocation.findMany({where:{orderId:id,...(visibleBalances?{balanceId:{in:visibleBalances.map(b=>b.id)}}:{})},select:{id:true,lineId:true,lotId:true,balanceId:true,requestedQuantity:true,actualQuantity:true,deliveredQuantity:true,returnedQuantity:true,returnedDeliveredQuantity:true,state:true}}),deliveries:await db.deliveryAssignment.findMany({where:{orderId:id}}),version:(await versions([id]))[id]}));
+ res.json(wire({order:{...projectInvoiceAmount(order),lines:order.lines.map(l=>({...l,costMinor:financial?l.costMinor:null}))},reservations,allocations:await db.preparationAllocation.findMany({where:{orderId:id,...(visibleBalances?{balanceId:{in:visibleBalances.map(b=>b.id)}}:{})},select:{id:true,lineId:true,lotId:true,balanceId:true,requestedQuantity:true,actualQuantity:true,deliveredQuantity:true,returnedQuantity:true,returnedDeliveredQuantity:true,state:true}}),deliveries:await db.deliveryAssignment.findMany({where:{orderId:id}}),version:(await versions([id]))[id]}));
 });
 operationsRoutes.get("/purchases",async(req,res)=>{
  await requireCapability(db,req.user,"purchases.write");const limit=pageSize(req.query.limit??200),cursor=pageCursor(req.query.cursor);

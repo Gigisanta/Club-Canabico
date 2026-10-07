@@ -130,30 +130,49 @@ test("a revoked session's real 401 removes operational context", async ({ page }
   expect((await initialContext).status()).toBe(200);
   await expect(page.locator(".ops-console")).toBeVisible();
 
-  const createOrder = page.getByRole("group", { name: "Pedidos: acciones", exact: true }).getByRole("button", { name: "＋ Nuevo pedido", exact: true });
-  await createOrder.click();
-  const orderDialog = page.getByRole("dialog");
-  const member = orderDialog.getByRole("combobox", { name: "Socio", exact: true });
-  await expect(member.locator("option").nth(1)).toBeAttached();
-  const memberId = await member.locator("option").nth(1).getAttribute("value");
-  expect(memberId).toBeTruthy();
-  await member.selectOption(memberId!);
-  await orderDialog.getByLabel("Modalidad", { exact: true }).selectOption("local");
-  await orderDialog.getByLabel("Moneda", { exact: true }).selectOption("ARS");
-  const orderCreated = page.waitForResponse(response =>
+  await page.getByTestId("appsheet-preorder-open").click();
+  const preorderDialog = page.getByTestId("appsheet-invoice-dialog");
+  await expect(preorderDialog).toBeVisible();
+  const dateField = preorderDialog.getByLabel("Fecha", { exact: true });
+  await expect(dateField).toBeDisabled();
+  const invoiceDate = await dateField.inputValue();
+  expect(invoiceDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  const member = preorderDialog.getByRole("combobox", { name: "Nombre del asociado", exact: true });
+  await expect(member).toHaveAttribute("required", "");
+  await preorderDialog.getByRole("searchbox", { name: "Buscar nombre del asociado por nombre", exact: true }).fill("Socio de ensayo");
+  await expect(member.locator('option[value="ops-member"]')).toHaveCount(1);
+  await member.selectOption("ops-member");
+
+  const preorderSaved = page.waitForResponse(response =>
     response.url().endsWith("/api/operations/commands") &&
     response.request().method() === "POST" &&
-    response.request().postDataJSON()?.command === "OrderCreated",
+    response.request().postDataJSON()?.command === "InvoiceSaved",
   );
-  await orderDialog.getByRole("button", { name: "Revisar y registrar", exact: true }).click();
-  const created = await orderCreated;
-  expect(created.status()).toBe(200);
-  const createdBody = await created.json();
-  expect(createdBody.targetId).toBeTruthy();
-  const persistedOrder = await page.request.get(`/api/operations/orders/${createdBody.targetId}`);
+  await preorderDialog.getByTestId("appsheet-save-invoice").click();
+  const saved = await preorderSaved;
+  const savedStatus = saved.status();
+  const savedText = savedStatus === 200 ? "" : await saved.text();
+  expect(savedStatus, savedText).toBe(200);
+  const savedBody = await saved.json();
+  expect(savedBody.targetId).toBeTruthy();
+  expect(saved.request().postDataJSON()).toMatchObject({
+    command: "InvoiceSaved",
+    expectedVersion: 0,
+    targetId: savedBody.targetId,
+    data: { memberId: "ops-member", invoiceDate, lines: [], preorder: true },
+  });
+  const persistedOrder = await page.request.get(`/api/operations/orders/${savedBody.targetId}`);
   expect(persistedOrder.status()).toBe(200);
-  expect((await persistedOrder.json()).order.memberId).toBe(memberId);
-  await expect(page.locator(".ops-toast")).toBeVisible();
+  const persisted = await persistedOrder.json();
+  expect(persisted.order).toMatchObject({
+    id: savedBody.targetId,
+    memberId: "ops-member",
+    commercialState: "preorder",
+  });
+  expect(persisted.order.quote).toMatchObject({ source: "appsheet-invoice", invoiceDate, lines: [] });
+  expect(persisted.reservations).toHaveLength(0);
+  expect(persisted.deliveries).toHaveLength(0);
+  await expect(page.locator(".ops-toast")).toContainText("Preventa creada. Todavía no reserva stock ni programa un envío.");
   expect(commandRequests).toBe(1);
 
   const logout = await page.request.post("/api/auth/logout", {

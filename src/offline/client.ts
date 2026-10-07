@@ -1148,7 +1148,7 @@ function assertCollectionReportedData(data: Record<string, unknown>, assignment:
   if (data.orderId !== assignment.orderId || data.deliveryId !== assignment.id) {
     throw new TypeError("El cobro debe corresponder al pedido y entrega del manifiesto.");
   }
-  if (data.method !== "cash" && data.method !== "transfer" && data.method !== "card") {
+  if (data.method !== "cash" && data.method !== "transfer" && data.method !== "mercado_pago" && data.method !== "card") {
     throw new TypeError("El medio de cobro no es válido.");
   }
   if (data.currency !== "ARS" && data.currency !== "USD") throw new TypeError("La moneda del cobro no es válida.");

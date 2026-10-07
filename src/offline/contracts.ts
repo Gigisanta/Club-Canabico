@@ -114,7 +114,7 @@ export interface SyncResponseV1 {
 export interface CollectionReportedDataV1 {
   orderId: string;
   deliveryId: string;
-  method: "cash" | "transfer" | "card";
+  method: "cash" | "transfer" | "mercado_pago" | "card";
   currency: Currency;
   amountMinor: MinorUnitString | string;
   custodianId?: string;
