@@ -8,7 +8,7 @@ import { parse as parseCsv } from "csv-parse/sync";
 import { splitSqlStatements } from "./migration-sql.js";
 import { readLegacyWorkbook, legacyReaderVersion } from "../server/operations/legacy-reader.js";
 import { legacyPayloadHash } from "../server/operations/legacy-upload-contract.js";
-import type { CommandEnvelope } from "../shared/operations/contracts.js";
+import { cutoverGateIds, type CommandEnvelope } from "../shared/operations/contracts.js";
 // Primary owner: observable API effects, receipts and authorization. Fixtures establish only pre-existing objects.
 test("canonical financial commands preserve cash custody, debt and global replay",{skip:!process.env.TEST_DATABASE_URL},async t=>{
  const url=new URL(process.env.TEST_DATABASE_URL!);assert.ok(["127.0.0.1","localhost","[::1]"].includes(url.hostname));assert.match(url.pathname,/test|ci/i);
@@ -42,6 +42,46 @@ test("canonical financial commands preserve cash custody, debt and global replay
  }
  try{
   for(const id of ["owner","finance","driver","cashier","importer"])await login(id);
+  await t.test("cutover requires active authors and reviewers and rolls back stale approvals",async()=>{
+   const passphrase=pass;
+   for(const [id,active] of [["cutover-author",true],["cutover-reviewer",true],["cutover-inactive-author",false],["cutover-activator",true]] as const)
+    await db.user.create({data:{id,name:id,email:`${id}@test.local`,password:passphrase,role:"owner",active}});
+   for(const id of ["cutover-author","cutover-reviewer","cutover-activator"])await login(id);
+   const assertNoCommandEffects=async(request:CommandEnvelope)=>{
+    assert.equal(await db.commandReceipt.findUnique({where:{requestId:request.requestId}}),null);
+    assert.equal(await db.operationAudit.count({where:{requestId:request.requestId}}),0);
+    assert.equal(await db.operationOutbox.count({where:{requestId:request.requestId}}),0);
+    assert.equal(await db.operationObject.findUnique({where:{id:request.targetId}}),null);
+   };
+   const firstGate=cutoverGateIds[0]!;
+   const inactiveApproval=e(firstGate,"CutoverGateReviewed",{gateId:firstGate,authorId:"cutover-inactive-author",evidence:{note:"synthetic inactive author"}});
+   const inactiveApprovalResponse=await call("/operations/commands","cutover-reviewer",inactiveApproval);
+   assert.equal(inactiveApprovalResponse.status,409);assert.equal((await inactiveApprovalResponse.json()).code,"AUTHOR_INACTIVE");
+   await assertNoCommandEffects(inactiveApproval);
+   assert.equal(await db.cutoverGate.findUnique({where:{id:firstGate}}),null);
+
+   for(const gateId of cutoverGateIds){
+    const reviewed=await cmd(e(gateId,"CutoverGateReviewed",{gateId,authorId:"cutover-author",evidence:{note:`synthetic human review ${gateId}`}}),"cutover-reviewer");
+    assert.equal(reviewed.result.status,"approved");
+   }
+   const approvals=await db.cutoverGate.findMany({where:{id:{in:[...cutoverGateIds]}}});
+   assert.equal(approvals.length,cutoverGateIds.length);
+   assert.ok(approvals.every(gate=>gate.status==="approved"&&gate.approvedBy==="cutover-author"&&gate.reviewedBy==="cutover-reviewer"));
+
+   const assertActivationRejected=async()=>{
+    const request=e("operations","AuthorityActivated",{evidence:{note:"synthetic stale-approval regression"}});
+    const response=await call("/operations/commands","cutover-activator",request),body=await response.json();
+    assert.equal(response.status,422);assert.equal(body.code,"CUTOVER_GATES_PENDING");
+    assert.deepEqual(body.details.missing,[...cutoverGateIds]);
+    await assertNoCommandEffects(request);
+    assert.equal(await db.operationAuthority.findUnique({where:{id:"operations"}}),null);
+   };
+   await db.user.update({where:{id:"cutover-author"},data:{active:false,authorizationEpoch:{increment:1}}});
+   await assertActivationRejected();
+   await db.user.update({where:{id:"cutover-author"},data:{active:true,authorizationEpoch:{increment:1}}});
+   await db.user.update({where:{id:"cutover-reviewer"},data:{active:false,authorizationEpoch:{increment:1}}});
+   await assertActivationRejected();
+  });
   await t.test("legacy preview is transient and creates no source rows or command receipts",async()=>{
    const workbook=new ExcelJS.Workbook();const sheet=workbook.addWorksheet("C_Cliente");sheet.addRow(["Id_Cliente","Nombre"]);sheet.addRow(["preview-only","Fixture"]);
    const before=[await db.legacyImportSnapshot.count(),await db.legacySourceRecord.count(),await db.commandReceipt.count()];

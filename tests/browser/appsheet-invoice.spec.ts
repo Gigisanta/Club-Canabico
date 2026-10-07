@@ -128,6 +128,32 @@ async function financeSnapshot(page: Page) {
   };
 }
 
+async function stockSnapshot(page: Page, skuId: string) {
+  const catalog = await getJson(page, "catalog");
+  const sku = catalog.items.find((item: { id: string }) => item.id === skuId);
+  if (!sku) throw new Error(`No se encontró el SKU sintético ${skuId}`);
+  return sku.lots.flatMap((lot: { id: string; balances: Array<Record<string, unknown>> }) =>
+    lot.balances.map(balance => ({
+      lotId: lot.id,
+      balanceId: balance.id,
+      quantity: balance.quantity,
+      reserved: balance.reserved,
+      availableQuantity: balance.availableQuantity,
+    })),
+  ).sort((left: { balanceId: unknown }, right: { balanceId: unknown }) => String(left.balanceId).localeCompare(String(right.balanceId)));
+}
+
+async function postCommand(page: Page, envelope: CommandEnvelope) {
+  const response = await page.request.post("/api/operations/commands", {
+    headers: { Origin: new URL(page.url()).origin },
+    data: envelope,
+  });
+  const status = response.status();
+  const text = status === 200 ? "" : await response.text();
+  expect(status, text).toBe(200);
+  return response.json();
+}
+
 async function saveResponse(page: Page, command: string) {
   return page.waitForResponse(response => isCommand(response.request(), command));
 }
@@ -174,7 +200,7 @@ test("canceling product and moto subforms keeps the invoice local until Guardar"
   expect(commandPosts).toHaveLength(0);
 });
 
-test("invoice preserves editable line totals and separate product and moto terms after a lost acknowledgement", async ({ page }) => {
+test("AppSheet invoice retries the save, confirms an independent total, and settles product and moto receipts once", async ({ page }) => {
   await enterOrders(page);
   const financeBefore = await financeSnapshot(page);
   const invoice = await openInvoice(page);
@@ -352,6 +378,256 @@ test("invoice preserves editable line totals and separate product and moto terms
   expect(detail.deliveries[0].address).toMatchObject({ motoDestination: moto.destination, motoDeliveryDate: moto.deliveryDate });
   expect((committed!.result as Record<string, unknown>).deliveryId).toBe(detail.deliveries[0].id);
   expect(await financeSnapshot(page)).toEqual(financeBefore);
+
+  const stockBeforeTotalConfirmation = await stockSnapshot(page, "ops-sku-c");
+  const financeBeforeTotalConfirmation = await financeSnapshot(page);
+  const totalEnvelopes: CommandEnvelope[] = [];
+  const trackTotalConfirmation = async (route: import("@playwright/test").Route) => {
+    if (!isCommand(route.request(), "InvoiceTotalsConfirmed")) return route.continue();
+    totalEnvelopes.push(route.request().postDataJSON() as CommandEnvelope);
+    return route.continue();
+  };
+  await page.route("**/api/operations/commands", trackTotalConfirmation);
+  await refreshedRow.getByRole("button", { name: "Confirmar total facturado", exact: true }).click();
+  const totalDialog = page.getByRole("dialog");
+  await expect(totalDialog.getByRole("heading", { name: "Confirmar total facturado", exact: true })).toBeVisible();
+  await expect(totalDialog.getByLabel("Moneda de la factura", { exact: true })).toHaveValue("ARS");
+  await totalDialog.getByLabel("Moneda de la factura", { exact: true }).selectOption("ARS");
+  await totalDialog.getByLabel("Total de productos confirmado", { exact: true }).fill("13.51");
+  await totalDialog.getByLabel("Total de moto confirmado", { exact: true }).fill("26.00");
+  const totalEvidence = "Transcripción sintética de la factura fuente: productos ARS 13.51 y moto ARS 26.00.";
+  await totalDialog.getByLabel("Evidencia del total facturado", { exact: true }).fill(totalEvidence);
+
+  const totalOrdersRefresh = page.waitForResponse(response =>
+    response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/orders",
+  );
+  const totalConfirmationResponse = saveResponse(page, "InvoiceTotalsConfirmed");
+  await totalDialog.getByRole("button", { name: "Revisar y registrar", exact: true }).click();
+  const totalResponse = await totalConfirmationResponse;
+  const totalStatus = totalResponse.status();
+  const totalText = totalStatus === 200 ? "" : await totalResponse.text();
+  expect(totalStatus, totalText).toBe(200);
+  const totalReceipt = await totalResponse.json();
+  expect(totalEnvelopes).toHaveLength(1);
+  const totalEnvelope = totalEnvelopes[0]!;
+  expect(totalEnvelope).toMatchObject({
+    command: "InvoiceTotalsConfirmed",
+    targetId: first.targetId,
+    expectedVersion: 1,
+  });
+  expect(totalEnvelope.data).toEqual({
+    currency: "ARS",
+    productsTotalMinor: "1351",
+    motoClientTotalMinor: "2600",
+    evidence: { note: totalEvidence },
+  });
+  expect(totalReceipt.result).toMatchObject({
+    orderId: first.targetId,
+    totalMinor: "3951",
+    totalCalculationState: "staff_confirmed",
+    totalCalculationSource: "staff_confirmation",
+  });
+  await page.unroute("**/api/operations/commands", trackTotalConfirmation);
+
+  const totalOrders = await (await totalOrdersRefresh).json();
+  expect(totalOrders.items.filter((item: { id: string }) => item.id === first.targetId)).toHaveLength(1);
+  await expect(totalDialog).toHaveCount(0);
+  await expect(refreshedRow).toContainText("ARS 39,51");
+  await expect(refreshedRow).toContainText("Productos ARS 13,51 · Moto ARS 26,00");
+  await expect(refreshedRow).toContainText("Confirmado por el personal");
+  await expect(refreshedRow).not.toContainText("Pendiente de definición");
+  await expect(refreshedRow.getByRole("button", { name: "Confirmar total facturado", exact: true })).toHaveCount(0);
+
+  const confirmedDetail = await getJson(page, `orders/${encodeURIComponent(first.targetId)}`);
+  expect(confirmedDetail.order).toMatchObject({
+    totalMinor: "3951",
+    quoteVersion: 1,
+    capturedBaseMinor: "3701",
+    capturedProductMinor: "1201",
+    totalCalculationState: "staff_confirmed",
+    totalCalculationSource: "staff_confirmation",
+    financialResolution: {
+      kind: "staff_confirmation",
+      currency: "ARS",
+      productsTotalMinor: "1351",
+      motoClientTotalMinor: "2600",
+      totalMinor: "3951",
+      evidence: { note: totalEvidence },
+    },
+  });
+  expect(confirmedDetail.order.quote).toMatchObject({
+    totalMinor: "3951",
+    totalCalculationState: "staff_confirmed",
+    totalCalculationSource: "staff_confirmation",
+    financialResolution: {
+      kind: "staff_confirmation",
+      productsTotalMinor: "1351",
+      motoClientTotalMinor: "2600",
+      totalMinor: "3951",
+      evidence: { note: totalEvidence },
+    },
+    paymentComponents: {
+      products: { totalMinor: "1351" },
+      moto: { clientTotalMinor: "2600" },
+    },
+  });
+  expect(confirmedDetail.order.quote.moto.clientTariffMinor).toBe("2500");
+  expect(confirmedDetail.reservations).toEqual(detail.reservations);
+  expect(confirmedDetail.deliveries).toEqual(detail.deliveries);
+  expect(await stockSnapshot(page, "ops-sku-c")).toEqual(stockBeforeTotalConfirmation);
+  expect(await financeSnapshot(page)).toEqual(financeBeforeTotalConfirmation);
+
+  const financialResolution = confirmedDetail.order.financialResolution;
+  expect(financialResolution).toMatchObject({
+    kind: "staff_confirmation",
+    currency: "ARS",
+    productsTotalMinor: "1351",
+    motoClientTotalMinor: "2600",
+    totalMinor: "3951",
+    evidence: { note: totalEvidence },
+    quoteVersion: 1,
+  });
+  expect(financialResolution.actorId).toBeTruthy();
+  expect(Date.parse(financialResolution.confirmedAt)).not.toBeNaN();
+  expect(financialResolution.snapshotHash).toMatch(/^[a-f0-9]{64}$/i);
+
+  const traceViewPosts: Request[] = [];
+  const trackTraceViewPosts = (request: Request) => {
+    if (request.method() === "POST") traceViewPosts.push(request);
+  };
+  page.on("request", trackTraceViewPosts);
+  const traceButton = refreshedRow.getByRole("button", { name: "Ver confirmación del total", exact: true });
+  if (!(await traceButton.isVisible())) await refreshedRow.locator("details.ops-row-actions-disclosure summary").click();
+  await traceButton.click();
+  const traceDialog = page.getByTestId("appsheet-invoice-total-trace-dialog");
+  await expect(traceDialog.getByRole("heading", { name: "Confirmación del total facturado", exact: true })).toBeVisible();
+  const traceField = (label: string) => traceDialog.locator(".ops-field").filter({ hasText: label });
+  await expect(traceField("Total de productos confirmado")).toContainText("ARS 13,51");
+  await expect(traceField("Total de moto confirmado")).toContainText("ARS 26,00");
+  await expect(traceField("Total facturado confirmado")).toContainText("ARS 39,51");
+  await expect(traceField("Evidencia registrada")).toContainText(financialResolution.evidence.note);
+  await expect(traceField("Confirmado por")).toContainText(financialResolution.actorId);
+  await expect(traceField("Fecha de confirmación")).toContainText(financialResolution.confirmedAt);
+  await expect(traceField("Versión de cotización")).toContainText(String(financialResolution.quoteVersion));
+  await expect(traceField("Huella del resumen confirmado")).toContainText(financialResolution.snapshotHash);
+  await traceDialog.getByRole("button", { name: "Cerrar", exact: true }).click();
+  await expect(traceDialog).toHaveCount(0);
+  page.off("request", trackTraceViewPosts);
+  expect(traceViewPosts).toHaveLength(0);
+
+  const accountsBeforeCollections = await getJson(page, "accounts");
+  const cashBefore = BigInt(accountsBeforeCollections.items.find((account: { id: string }) => account.id === "ops-cash-ARS").balanceMinor);
+  const bankBefore = BigInt(accountsBeforeCollections.items.find((account: { id: string }) => account.id === "ops-bank-ARS").balanceMinor);
+  const collections = [
+    { id: crypto.randomUUID(), method: "cash", amountMinor: "1351", accountId: "ops-cash-ARS", component: "productos" },
+    { id: crypto.randomUUID(), method: "mercado_pago", amountMinor: "2600", accountId: "ops-bank-ARS", component: "moto" },
+  ];
+  for (const collection of collections) {
+    const reportEnvelope: CommandEnvelope = {
+      schemaVersion: 1,
+      requestId: crypto.randomUUID(),
+      targetId: collection.id,
+      expectedVersion: 0,
+      occurredAt: new Date().toISOString(),
+      command: "CollectionReported",
+      data: {
+        orderId: first.targetId,
+        method: collection.method,
+        currency: "ARS",
+        amountMinor: collection.amountMinor,
+        evidence: { note: `Reporte sintético recibido para ${collection.component}.` },
+      },
+    };
+    const reportReceipt = await postCommand(page, reportEnvelope);
+    expect(reportReceipt.result).toMatchObject({ effect: "reported_only", report: { id: collection.id, status: "reported" } });
+  }
+  const financeAfterReports = await financeSnapshot(page);
+  expect(financeAfterReports.collections).toEqual(
+    [...financeBeforeTotalConfirmation.collections, ...collections.map(({ id }) => id)].sort(),
+  );
+  expect(financeAfterReports.ledgers).toEqual(financeBeforeTotalConfirmation.ledgers);
+  const orderBeforeCollectionVerification = await getJson(page, `orders/${encodeURIComponent(first.targetId)}`);
+  expect(orderBeforeCollectionVerification.order).toMatchObject({
+    totalMinor: "3951",
+    verifiedMinor: "0",
+    financialState: "unpaid",
+  });
+  const accountsAfterReports = await getJson(page, "accounts");
+  expect(BigInt(accountsAfterReports.items.find((account: { id: string }) => account.id === "ops-cash-ARS").balanceMinor)).toBe(cashBefore);
+  expect(BigInt(accountsAfterReports.items.find((account: { id: string }) => account.id === "ops-bank-ARS").balanceMinor)).toBe(bankBefore);
+
+  const verificationEnvelopes: CommandEnvelope[] = [];
+  for (const collection of collections) {
+    const verificationEnvelope: CommandEnvelope = {
+      schemaVersion: 1,
+      requestId: crypto.randomUUID(),
+      targetId: collection.id,
+      expectedVersion: 1,
+      occurredAt: new Date().toISOString(),
+      command: "CollectionVerified",
+      data: {
+        accountId: collection.accountId,
+        evidence: { note: `Verificación sintética independiente de ${collection.component}.` },
+      },
+    };
+    const verifiedReceipt = await postCommand(page, verificationEnvelope);
+    expect(verifiedReceipt.result).toMatchObject({ collectionId: collection.id, appliedMinor: collection.amountMinor, excessMinor: "0" });
+    verificationEnvelopes.push(verificationEnvelope);
+  }
+  const paidDetail = await getJson(page, `orders/${encodeURIComponent(first.targetId)}`);
+  expect(paidDetail.order).toMatchObject({ totalMinor: "3951", verifiedMinor: "3951", financialState: "paid" });
+  expect(BigInt(paidDetail.order.totalMinor) - BigInt(paidDetail.order.verifiedMinor)).toBe(0n);
+  expect(collections.reduce((sum, item) => sum + BigInt(item.amountMinor), 0n)).toBe(BigInt(paidDetail.order.totalMinor));
+  const verifiedCollections = await getJson(page, "collections");
+  expect(collections.map(({ id }) => verifiedCollections.items.find((item: { id: string }) => item.id === id))).toMatchObject([
+    { status: "verified", accountId: "ops-cash-ARS", amountMinor: "1351", appliedMinor: "1351" },
+    { status: "verified", accountId: "ops-bank-ARS", amountMinor: "2600", appliedMinor: "2600" },
+  ]);
+  const accountsAfterCollections = await getJson(page, "accounts");
+  expect(BigInt(accountsAfterCollections.items.find((account: { id: string }) => account.id === "ops-cash-ARS").balanceMinor)).toBe(cashBefore + 1351n);
+  expect(BigInt(accountsAfterCollections.items.find((account: { id: string }) => account.id === "ops-bank-ARS").balanceMinor)).toBe(bankBefore + 2600n);
+  const financeAfterCollections = await financeSnapshot(page);
+  for (const accountId of ["ops-cash-ARS", "ops-bank-ARS"]) {
+    const beforeIds = financeBeforeTotalConfirmation.ledgers[accountId] ?? [];
+    const afterIds = financeAfterCollections.ledgers[accountId] ?? [];
+    expect(afterIds.filter(id => !beforeIds.includes(id))).toHaveLength(1);
+  }
+  const [cashLedger, bankLedger] = await Promise.all([
+    getJson(page, "accounts/ops-cash-ARS/ledger"),
+    getJson(page, "accounts/ops-bank-ARS/ledger"),
+  ]);
+  const cashBeforeIds = financeBeforeTotalConfirmation.ledgers["ops-cash-ARS"] ?? [];
+  const bankBeforeIds = financeBeforeTotalConfirmation.ledgers["ops-bank-ARS"] ?? [];
+  const cashCollectionLeg = cashLedger.items.find((item: { id: string }) => !cashBeforeIds.includes(item.id));
+  const bankCollectionLeg = bankLedger.items.find((item: { id: string }) => !bankBeforeIds.includes(item.id));
+  expect(cashCollectionLeg).toMatchObject({
+    accountId: "ops-cash-ARS",
+    currency: "ARS",
+    amountMinor: "1351",
+    event: {
+      kind: "collection",
+      sourceObjectId: collections[0]!.id,
+      metadata: { orderId: first.targetId, appliedMinor: "1351", appliedCurrency: "ARS" },
+    },
+  });
+  expect(bankCollectionLeg).toMatchObject({
+    accountId: "ops-bank-ARS",
+    currency: "ARS",
+    amountMinor: "2600",
+    event: {
+      kind: "collection",
+      sourceObjectId: collections[1]!.id,
+      metadata: { orderId: first.targetId, appliedMinor: "2600", appliedCurrency: "ARS" },
+    },
+  });
+  expect(financeAfterCollections.collections).toEqual(
+    [...financeBeforeTotalConfirmation.collections, ...collections.map(({ id }) => id)].sort(),
+  );
+  const replayedVerification = await postCommand(page, verificationEnvelopes[1]!);
+  expect(replayedVerification.replay).toBe(true);
+  expect(await financeSnapshot(page)).toEqual(financeAfterCollections);
+  const afterReplay = await getJson(page, `orders/${encodeURIComponent(first.targetId)}`);
+  expect(afterReplay.order).toMatchObject({ totalMinor: "3951", verifiedMinor: "3951", financialState: "paid" });
 });
 
 test("an unverified member rejection retains the invoice draft for a corrected real retry", async ({ page }) => {

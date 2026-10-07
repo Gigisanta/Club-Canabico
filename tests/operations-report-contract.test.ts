@@ -1,6 +1,8 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import { parse as parseCsv } from "csv-parse/sync";
+import type { AddressInfo } from "node:net";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PrismaClient } from "@prisma/client";
@@ -145,9 +147,10 @@ test("customer segmentation uses all confirmed history through the inclusive Bue
 
 test("pending AppSheet captures stay outside official reports while generic orders remain included", { skip: !reportTestSchema }, async t => {
   t.after(async () => {
-    await reportTestSchema!.db.operationOrderLine.deleteMany({ where: { id: { in: ["utc-boundary-generic-line", "pending-appsheet-line"] } } });
-    await reportTestSchema!.db.operationOrder.deleteMany({ where: { id: { in: ["utc-boundary-order", "pending-appsheet-order", "pending-only-appsheet-order"] } } });
-    await reportTestSchema!.db.operationMember.deleteMany({ where: { id: { in: ["utc-boundary-member", "pending-only-member"] } } });
+    await reportTestSchema!.db.operationOrderLine.deleteMany({ where: { id: { in: ["utc-boundary-generic-line", "pending-appsheet-line", "unknown-appsheet-line", "staff-confirmed-a-line", "staff-confirmed-b-line", "staff-version-zero-line", "staff-version-mismatch-line"] } } });
+    await reportTestSchema!.db.operationOrder.deleteMany({ where: { id: { in: ["utc-boundary-order", "pending-appsheet-order", "pending-only-appsheet-order", "unknown-appsheet-order", "staff-confirmed-appsheet-order", "staff-version-zero-order", "staff-version-mismatch-order"] } } });
+    await reportTestSchema!.db.operationMember.deleteMany({ where: { id: { in: ["utc-boundary-member", "pending-only-member", "staff-confirmed-member", "staff-version-member"] } } });
+    await reportTestSchema!.db.user.deleteMany({ where: { id: "report-export-owner" } });
     await reportTestSchema!.db.historicalDeliverySale.deleteMany({ where: { sourceSystem: "report-contract-boundary" } });
   });
   const fixture = new Date("2026-10-02T00:30:00.000Z");
@@ -159,6 +162,12 @@ test("pending AppSheet captures stay outside official reports while generic orde
   });
   await reportTestSchema!.db.operationMember.create({
     data: { id: "pending-only-member", name: "Pending invoice fixture", address: {}, preferences: {} },
+  });
+  await reportTestSchema!.db.operationMember.create({
+    data: { id: "staff-confirmed-member", name: "Confirmed invoice fixture", address: {}, preferences: {} },
+  });
+  await reportTestSchema!.db.operationMember.create({
+    data: { id: "staff-version-member", name: "Invoice version fixture", address: {}, preferences: {} },
   });
   await reportTestSchema!.db.operationOrder.create({
     data: {
@@ -225,6 +234,45 @@ test("pending AppSheet captures stay outside official reports while generic orde
       confirmedAt: new Date("2026-09-30T15:00:00.000Z"),
     },
   });
+  await reportTestSchema!.db.operationOrder.create({
+    data: {
+      id: "unknown-appsheet-order", memberId: "utc-boundary-member", channel: "local", currency: "ARS",
+      commercialState: "confirmed", fulfillmentState: "delivered",
+      quote: { source: "appsheet-invoice", capturedBaseMinor: "900", capturedProductMinor: "800", totalCalculationState: "future-review" },
+      subtotalMinor: 800n, totalMinor: 900n, deliveryMinor: 100n, address: {}, createdBy: "report-contract-fixture", confirmedAt: fixture,
+    },
+  });
+  await reportTestSchema!.db.operationOrder.create({
+    data: {
+      id: "staff-confirmed-appsheet-order", memberId: "staff-confirmed-member", channel: "local", currency: "ARS",
+      commercialState: "confirmed", fulfillmentState: "delivered", quoteVersion: 1, subtotalMinor: 1_000n, deliveryMinor: 700n, totalMinor: 1_350n,
+      quote: {
+        source: "appsheet-invoice", currency: "ARS", capturedBaseMinor: "1_700", capturedProductMinor: "1_000",
+        subtotalMinor: null, totalMinor: "1350", subtotalCalculationState: "pending_definition", totalCalculationState: "staff_confirmed",
+        totalCalculationSource: "staff_confirmation",
+        financialResolution: { kind: "staff_confirmation", currency: "ARS", productsTotalMinor: "1050", motoClientTotalMinor: "300", totalMinor: "1350", evidence: { note: "fixture evidence" }, actorId: "report-export-owner", confirmedAt: fixture.toISOString(), quoteVersion: 1, snapshotHash: "a".repeat(64) },
+        paymentComponents: { products: { paymentMethod: "transfer", totalMinor: "1050" }, moto: { paymentMethod: "cash", clientTotalMinor: "300" } },
+      },
+      address: {}, createdBy: "report-contract-fixture", confirmedAt: fixture,
+    },
+  });
+  for (const [id, resolutionVersion] of [["staff-version-zero-order", 0], ["staff-version-mismatch-order", 2]] as const) {
+    await reportTestSchema!.db.operationOrder.create({
+      data: {
+        id, memberId: "staff-version-member", channel: "local", currency: "ARS",
+        commercialState: "confirmed", fulfillmentState: "delivered", quoteVersion: 1,
+        subtotalMinor: 200n, deliveryMinor: 50n, totalMinor: 250n,
+        quote: {
+          source: "appsheet-invoice", currency: "ARS", capturedBaseMinor: "250", capturedProductMinor: "200",
+          subtotalMinor: null, totalMinor: "250", subtotalCalculationState: "pending_definition", totalCalculationState: "staff_confirmed",
+          totalCalculationSource: "staff_confirmation",
+          financialResolution: { kind: "staff_confirmation", currency: "ARS", productsTotalMinor: "200", motoClientTotalMinor: "50", totalMinor: "250", evidence: { note: "fixture evidence" }, actorId: "report-export-owner", confirmedAt: "2026-10-02T15:00:00.000Z", quoteVersion: resolutionVersion, snapshotHash: "b".repeat(64) },
+          paymentComponents: { products: { paymentMethod: "transfer", totalMinor: "200" }, moto: { paymentMethod: "cash", clientTotalMinor: "50" } },
+        },
+        address: {}, createdBy: "report-contract-fixture", confirmedAt: new Date("2026-10-02T15:00:00.000Z"),
+      },
+    });
+  }
   await reportTestSchema!.db.operationOrderLine.createMany({
     data: [
       {
@@ -234,6 +282,26 @@ test("pending AppSheet captures stay outside official reports while generic orde
       {
         id: "pending-appsheet-line", orderId: "pending-appsheet-order", skuId: "pending-sku", unit: "g",
         requested: "1", delivered: "1", unitPrice: "1", referenceMinor: 190_000_000n, revenueMinor: 190_000_000n,
+      },
+      {
+        id: "unknown-appsheet-line", orderId: "unknown-appsheet-order", skuId: "unknown-sku", unit: "g",
+        requested: "1", delivered: "1", unitPrice: "1", referenceMinor: 800n, revenueMinor: 800n,
+      },
+      {
+        id: "staff-confirmed-a-line", orderId: "staff-confirmed-appsheet-order", skuId: "staff-sku-a", unit: "g",
+        requested: "1", delivered: "1", unitPrice: "1", referenceMinor: 400n, revenueMinor: 400n,
+      },
+      {
+        id: "staff-confirmed-b-line", orderId: "staff-confirmed-appsheet-order", skuId: "staff-sku-b", unit: "g",
+        requested: "1", delivered: "1", unitPrice: "1", referenceMinor: 600n, revenueMinor: 600n,
+      },
+      {
+        id: "staff-version-zero-line", orderId: "staff-version-zero-order", skuId: "staff-version-sku", unit: "g",
+        requested: "1", delivered: "1", unitPrice: "1", referenceMinor: 200n, revenueMinor: 200n,
+      },
+      {
+        id: "staff-version-mismatch-line", orderId: "staff-version-mismatch-order", skuId: "staff-version-sku", unit: "g",
+        requested: "1", delivered: "1", unitPrice: "1", referenceMinor: 200n, revenueMinor: 200n,
       },
     ],
   });
@@ -262,32 +330,114 @@ test("pending AppSheet captures stay outside official reports while generic orde
     "sales-revenue",
     { from: civilDate, to: civilDate },
   );
-  assert.equal(report.metrics.operational.confirmedOrderCount, 1);
-  assert.deepEqual(report.metrics.operational.orderTotalByCurrency, [{ currency: "ARS", minor: "5500000" }]);
-  assert.deepEqual(report.metrics.pendingAppSheetInvoices.capturedBaseMinorByCurrency, [{ currency: "ARS", minor: "190000700" }]);
-  assert.deepEqual(report.metrics.pendingAppSheetInvoices.capturedProductLineMinorByCurrency, [{ currency: "ARS", minor: "190000000" }]);
-  assert.deepEqual(report.metrics.pendingAppSheetInvoices.capturedClientTariffMinorByCurrency, [{ currency: "ARS", minor: "700" }]);
+  assert.equal(report.metrics.operational.confirmedOrderCount, 2);
+  assert.deepEqual(report.metrics.operational.orderTotalByCurrency, [{ currency: "ARS", minor: "5501350" }]);
+  assert.deepEqual(report.metrics.pendingAppSheetInvoices.capturedBaseMinorByCurrency, [{ currency: "ARS", minor: "190001600" }]);
+  assert.deepEqual(report.metrics.pendingAppSheetInvoices.capturedProductLineMinorByCurrency, [{ currency: "ARS", minor: "190000800" }]);
+  assert.deepEqual(report.metrics.pendingAppSheetInvoices.capturedClientTariffMinorByCurrency, [{ currency: "ARS", minor: "800" }]);
   assert.equal(report.metrics.pendingAppSheetInvoices.totalMinorByCurrency, null);
   assert.equal(report.metrics.pendingAppSheetInvoices.recognizedAsSalesRevenue, false);
+  assert.equal(report.metrics.staffConfirmedAppSheetInvoices.count, 1);
+  assert.equal(report.metrics.staffConfirmedAppSheetInvoices.invalidResolutionCount, 0);
+  assert.deepEqual(report.metrics.staffConfirmedAppSheetInvoices.invoiceTotalMinorByCurrency, [{ currency: "ARS", minor: "1350" }]);
+  assert.deepEqual(report.metrics.staffConfirmedAppSheetInvoices.productsTotalMinorByCurrency, [{ currency: "ARS", minor: "1050" }]);
+  assert.deepEqual(report.metrics.staffConfirmedAppSheetInvoices.motoClientTotalMinorByCurrency, [{ currency: "ARS", minor: "300" }]);
+  assert.deepEqual(report.metrics.staffConfirmedAppSheetInvoices.unallocatedProductDeltaMinorByCurrency, [{ currency: "ARS", minor: "50" }]);
+  assert.equal(report.metrics.operational.netProductRevenueByCurrency, null);
+  assert.deepEqual(report.metrics.operational.lineBasisNetProductRevenueByCurrency, [{ currency: "ARS", minor: "5501000" }]);
   assert.equal(report.metrics.historicalDelivery.saleCount, 1);
 
   const products = await reportTestSchema!.queries.queryOperationsReport("product-contribution", { from: civilDate, to: civilDate });
-  assert.equal(products.metrics.deliveredLineCount, 1);
-  assert.deepEqual(products.metrics.pendingAppSheetInvoices.capturedProductLineMinorByCurrency, [{ currency: "ARS", minor: "190000000" }]);
-  assert.deepEqual(products.metrics.recognizedDeliveryAndSurchargeByCurrency, [{ currency: "ARS", minor: "0" }]);
-  assert.deepEqual(products.metrics.pendingAppSheetDeliveryTariffByCurrency, [{ currency: "ARS", minor: "700" }]);
+  assert.equal(products.metrics.deliveredLineCount, 3);
+  assert.deepEqual(products.metrics.pendingAppSheetInvoices.capturedProductLineMinorByCurrency, [{ currency: "ARS", minor: "190000800" }]);
+  assert.deepEqual(products.metrics.recognizedDeliveryAndSurchargeByCurrency, [{ currency: "ARS", minor: "300" }]);
+  assert.deepEqual(products.metrics.pendingAppSheetDeliveryTariffByCurrency, [{ currency: "ARS", minor: "800" }]);
   assert.equal(products.metrics.pendingAppSheetDeliveryTariffRecognized, false);
+  assert.equal(products.metrics.productAmountAttributionComplete, false);
+  assert.deepEqual(products.metrics.staffConfirmedAppSheetInvoices.unallocatedProductDeltaMinorByCurrency, [{ currency: "ARS", minor: "50" }]);
+
+  const invalidVersionReport = await reportTestSchema!.queries.queryOperationsReport(
+    "sales-revenue", { from: "2026-10-02", to: "2026-10-02" }, { memberIds: ["staff-version-member"] },
+  );
+  assert.equal(invalidVersionReport.metrics.staffConfirmedAppSheetInvoices.count, 2);
+  assert.equal(invalidVersionReport.metrics.staffConfirmedAppSheetInvoices.invalidResolutionCount, 2);
+  assert.equal(invalidVersionReport.metrics.staffConfirmedAppSheetInvoices.unallocatedProductInvoiceCount, 0);
+  assert.deepEqual(invalidVersionReport.metrics.staffConfirmedAppSheetInvoices.unallocatedProductDeltaMinorByCurrency, [{ currency: "ARS", minor: "0" }]);
+  const invalidVersionSegmentation = await reportTestSchema!.queries.queryOperationsReport(
+    "customer-segmentation", { from: "2026-10-02", to: "2026-10-02" }, { memberIds: ["staff-version-member"] },
+  );
+  assert.equal(invalidVersionSegmentation.metrics.currentOperationOrderCount, 2);
+  assert.equal(invalidVersionSegmentation.metrics.pendingAppSheetInvoiceOrderCount, 0);
+  assert.equal(invalidVersionSegmentation.metrics.sourceRowsComplete, true);
+  assert.equal(invalidVersionSegmentation.metrics.segmentationDataComplete, false);
+  assert.equal(invalidVersionSegmentation.metrics.staffConfirmedProductAllocationMemberCount, 1);
+  assert.equal(invalidVersionSegmentation.metrics.staffConfirmedProductAllocationOrderCount, 2);
+  assert.deepEqual(invalidVersionSegmentation.metrics.segmentCounts, [
+    { segment: "insufficient-data", memberCount: null, suppressed: true },
+  ]);
+  assert.ok(invalidVersionSegmentation.coverage.some(row => row.source === "staff-confirmed-unallocated-product-segmentation-inputs"
+    && row.state === "partial" && row.knownCount === 0 && row.expectedCount === 2));
 
   const segmentation = await reportTestSchema!.queries.queryOperationsReport("customer-segmentation", { from: civilDate, to: civilDate });
-  assert.equal(segmentation.metrics.currentOperationOrderCount, 1);
+  assert.equal(segmentation.metrics.currentOperationOrderCount, 2);
   assert.equal(segmentation.metrics.sourceRowsComplete, true);
   assert.equal(segmentation.metrics.segmentationSummaryComplete, true);
   assert.equal(segmentation.metrics.segmentationDataComplete, false);
   assert.equal(segmentation.metrics.pendingAppSheetInvoiceMemberCount, 2);
-  assert.equal(segmentation.metrics.pendingAppSheetInvoiceOrderCount, 2);
-  assert.deepEqual(segmentation.metrics.segmentCounts, [{ segment: "insufficient-data", memberCount: null, suppressed: true }]);
+  assert.equal(segmentation.metrics.pendingAppSheetInvoiceOrderCount, 3);
+  assert.deepEqual(segmentation.metrics.segmentCounts, [
+    { segment: "insufficient-data", memberCount: null, suppressed: true },
+    { segment: "no-purchase-history", memberCount: null, suppressed: true },
+  ]);
+  assert.equal(segmentation.metrics.staffConfirmedProductAllocationMemberCount, 1);
+  assert.equal(segmentation.metrics.staffConfirmedProductAllocationOrderCount, 1);
   assert.ok(segmentation.coverage.some(row => row.source === "pending-appsheet-invoice-segmentation-inputs"
-    && row.state === "partial" && row.knownCount === 0 && row.expectedCount === 2));
+    && row.state === "partial" && row.knownCount === 0 && row.expectedCount === 3));
+  const manualOnlySegmentation = await reportTestSchema!.queries.queryOperationsReport(
+    "customer-segmentation", { from: civilDate, to: civilDate }, { memberIds: ["staff-confirmed-member"] },
+  );
+  assert.equal(manualOnlySegmentation.metrics.currentOperationOrderCount, 1);
+  assert.equal(manualOnlySegmentation.metrics.pendingAppSheetInvoiceOrderCount, 0);
+  assert.equal(manualOnlySegmentation.metrics.sourceRowsComplete, true);
+  assert.equal(manualOnlySegmentation.metrics.segmentationDataComplete, false);
+  assert.equal(manualOnlySegmentation.metrics.staffConfirmedProductAllocationMemberCount, 1);
+  assert.equal(manualOnlySegmentation.metrics.staffConfirmedProductAllocationOrderCount, 1);
+  assert.deepEqual(manualOnlySegmentation.metrics.segmentCounts, [
+    { segment: "insufficient-data", memberCount: null, suppressed: true },
+  ]);
+  assert.ok(manualOnlySegmentation.coverage.some(row => row.source === "staff-confirmed-unallocated-product-segmentation-inputs"
+    && row.state === "partial" && row.knownCount === 0 && row.expectedCount === 1));
+
+  process.env.JWT_SECRET ??= "report-contract-export-test-secret-0123456789";
+  const exportActor = await reportTestSchema!.db.user.create({ data: { id: "report-export-owner", name: "Report export fixture", email: "report-export-owner@example.test", password: "fixture-hash", role: "owner" } });
+  const express = (await import("express")).default;
+  const { operationsExports } = await import("../server/operations/report-exports.js");
+  const app = express();
+  app.use((req, _res, next) => { (req as typeof req & { user: typeof exportActor }).user = exportActor; next(); });
+  app.use("/exports", operationsExports);
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve, reject) => { server.once("listening", resolve); server.once("error", reject); });
+  t.after(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); });
+  const address = server.address() as AddressInfo;
+  let cursor: string | null = null;
+  const exportedRows: Array<Record<string, string>> = [];
+  do {
+    const cursorParam = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+    const response = await fetch(`http://127.0.0.1:${address.port}/exports/sales-lines?from=${civilDate}&to=${civilDate}&limit=1${cursorParam}`);
+    assert.equal(response.status, 200, await response.clone().text());
+    const block = await response.json() as { csv: string; nextCursor: string | null; coverage: { queryVersion: string } };
+    assert.equal(block.coverage.queryVersion, "canonical-csv-v3");
+    exportedRows.push(...parseCsv(block.csv, { bom: true, columns: true, skip_empty_lines: true }) as Array<Record<string, string>>);
+    cursor = block.nextCursor;
+  } while (cursor);
+  const manualExportRows = exportedRows.filter(row => row.objectId === "staff-confirmed-appsheet-order");
+  assert.equal(manualExportRows.length, 2);
+  assert.equal(manualExportRows[0]!.invoiceTotalMinor, "1350");
+  assert.equal(manualExportRows[0]!.invoiceTotalCalculationSource, "staff_confirmation");
+  assert.equal(manualExportRows[0]!.invoiceUnallocatedProductDeltaMinor, "50");
+  assert.equal(manualExportRows[0]!.invoiceSnapshotHash, "a".repeat(64));
+  assert.equal(manualExportRows[1]!.invoiceTotalMinor, "");
+  assert.equal(exportedRows.find(row => row.objectId === "unknown-appsheet-order")!.kind, "captured-product-line");
 
   const { memberHistory } = await import("../server/operations/member-history.js");
   const history = await memberHistory("utc-boundary-member", 10);

@@ -67,6 +67,18 @@ const FX_DETAIL_ROW_LIMIT = REPORT_DETAIL_ROW_LIMIT;
 const DAY_MS = 86_400_000;
 const WEEK_MS = 7 * DAY_MS;
 const TIME_ZONE = "America/Argentina/Buenos_Aires";
+const knownAppSheetInvoiceTotalPredicate = Prisma.sql`NOT (
+  COALESCE(o."quote"->>'source', '') = 'appsheet-invoice'
+  AND COALESCE(o."quote"->>'totalCalculationState', '') NOT IN ('defined', 'staff_confirmed')
+)`;
+const pendingAppSheetInvoiceTotalPredicate = Prisma.sql`
+  COALESCE(o."quote"->>'source', '') = 'appsheet-invoice'
+  AND COALESCE(o."quote"->>'totalCalculationState', '') NOT IN ('defined', 'staff_confirmed')
+`;
+const staffConfirmedAppSheetInvoicePredicate = Prisma.sql`
+  COALESCE(o."quote"->>'source', '') = 'appsheet-invoice'
+  AND COALESCE(o."quote"->>'totalCalculationState', '') = 'staff_confirmed'
+`;
 const CIVIL_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
   timeZone: TIME_ZONE,
   year: "numeric",
@@ -561,7 +573,7 @@ async function salesRevenue(range: ReportDateRange, scope: ReportScope) {
     Prisma.sql`o."commercialState" = 'confirmed'`,
     Prisma.sql`o."fulfillmentState" <> 'cancelled'`,
     Prisma.sql`o."confirmedAt" IS NOT NULL`,
-    Prisma.sql`NOT (COALESCE(o."quote"->>'source', '') = 'appsheet-invoice' AND COALESCE(o."quote"->>'totalCalculationState', '') <> 'defined')`,
+    knownAppSheetInvoiceTotalPredicate,
   ];
   const timeRange = timestampFilter(range);
   if (timeRange.gte) orderPredicates.push(Prisma.sql`o."confirmedAt" >= ${rawSqlUtcTimestamp(timeRange.gte)}`);
@@ -571,7 +583,10 @@ async function salesRevenue(range: ReportDateRange, scope: ReportScope) {
       ? Prisma.sql`o."memberId" IN (${Prisma.join(scope.memberIds)})`
       : Prisma.sql`FALSE`);
   }
-  const pendingInvoiceCaptures = await pendingAppSheetInvoiceCaptures(range, scope);
+  const [pendingInvoiceCaptures, staffConfirmedInvoices] = await Promise.all([
+    pendingAppSheetInvoiceCaptures(range, scope),
+    staffConfirmedAppSheetInvoices(range, scope),
+  ]);
   const historyPredicates: Prisma.Sql[] = [];
   if (dateRange.gte) historyPredicates.push(Prisma.sql`s."saleDate" >= ${rawSqlUtcTimestamp(dateRange.gte)}`);
   if (dateRange.lt) historyPredicates.push(Prisma.sql`s."saleDate" < ${rawSqlUtcTimestamp(dateRange.lt)}`);
@@ -663,6 +678,9 @@ async function salesRevenue(range: ReportDateRange, scope: ReportScope) {
     expectedCount: Number(groups[0]?.returnAllocationCount ?? 0n),
     invalidCount: Number(groups[0]?.invalidReturnAllocationCount ?? 0n) + Number(groups[0]?.invalidLineCount ?? 0n),
   };
+  const staffConfirmedInvoiceState = staffConfirmedAppSheetInvoiceProjection(staffConfirmedInvoices);
+  const productAmountAttributionComplete = staffConfirmedInvoiceState.invalidResolutionCount === 0
+    && staffConfirmedInvoiceState.unallocatedProductInvoiceCount === 0;
   const byChannel = new Map<string, { orderCount: number; netProductRevenue: Map<string, bigint>; orderTotal: Map<string, bigint> }>();
   const operationalRevenue = moneyTotals();
   const operationalTotals = moneyTotals();
@@ -682,22 +700,25 @@ async function salesRevenue(range: ReportDateRange, scope: ReportScope) {
   addMoney(historicTotals, null, BigInt(history.saleTotalCents));
   addMoney(historicLineTotals, null, BigInt(history.lineTotalCents));
   return queryEnvelope("sales-revenue", range, {
-    revenueBasis: "retained-confirmed-quote; cancelled-demand-and-customer-returns-excluded; not-cash-received-or-delivered-revenue",
-    originalOrderTotalBasis: "frozen-original-quote; cancellation-and-refunds-remain-separate-facts",
-    revenueQuantityCoverage: { queryComplete: returnCoverage.knownCount === returnCoverage.expectedCount, invalidCount: returnCoverage.invalidCount },
+    revenueBasis: "retained-confirmed-known-order-total; AppSheet staff-confirmed totals preserve manual provenance; cancelled-demand-and-customer-returns-excluded; not-cash-received-or-delivered-revenue",
+    originalOrderTotalBasis: "known-order-total; AppSheet staff confirmation is explicit products-plus-moto input, not an automatic formula claim; cancellation-and-refunds-remain-separate-facts",
+    revenueQuantityCoverage: { queryComplete: returnCoverage.knownCount === returnCoverage.expectedCount && productAmountAttributionComplete, invalidCount: returnCoverage.invalidCount, productAmountAttributionComplete },
     connectedSources: ["operation-orders-by-channel", "historical-delivery-sales"],
     operationalChannels: [...byChannel.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([channel, values]) => ({
       channel,
       orderCount: values.orderCount,
-      netProductRevenueByCurrency: asMoneyBuckets(values.netProductRevenue),
+      netProductRevenueByCurrency: productAmountAttributionComplete ? asMoneyBuckets(values.netProductRevenue) : null,
+      lineBasisNetProductRevenueByCurrency: asMoneyBuckets(values.netProductRevenue),
       orderTotalByCurrency: asMoneyBuckets(values.orderTotal),
     })),
     operational: {
       confirmedOrderCount: orderCount,
-      netProductRevenueByCurrency: asMoneyBuckets(operationalRevenue),
+      netProductRevenueByCurrency: productAmountAttributionComplete ? asMoneyBuckets(operationalRevenue) : null,
+      lineBasisNetProductRevenueByCurrency: asMoneyBuckets(operationalRevenue),
       orderTotalByCurrency: asMoneyBuckets(operationalTotals),
     },
     pendingAppSheetInvoices: pendingAppSheetInvoiceProjection(pendingInvoiceCaptures),
+    staffConfirmedAppSheetInvoices: staffConfirmedInvoiceState,
     historicalDelivery: scope.memberIds === undefined ? {
       state: "observed-unlinked-historical-source",
       saleCount: Number(history.saleCount),
@@ -713,7 +734,7 @@ async function salesRevenue(range: ReportDateRange, scope: ReportScope) {
       reason: "historical-delivery-sales-have-no-member-link",
       createsOperationalOrders: false,
     },
-  }, [coverage("operation-orders", orderCount, orderCount), ...(hasPendingAppSheetInvoices(pendingInvoiceCaptures) ? [pendingInvoiceCaptureCoverage(pendingInvoiceCaptures)] : []), returnCoverage.invalidCount ? partialCoverage("customer-return-allocations", returnCoverage.knownCount, returnCoverage.expectedCount, "invalid-billed-return-ratio") : coverage("customer-return-allocations", returnCoverage.knownCount, returnCoverage.expectedCount), ...(scope.memberIds === undefined ? [coverage("historical-delivery-sales", Number(history.saleCount), Number(history.saleCount))] : [excludedCoverage("historical-delivery-sales", "historical-delivery-sales-have-no-member-link")])]);
+  }, [coverage("operation-orders", orderCount, orderCount), ...(hasPendingAppSheetInvoices(pendingInvoiceCaptures) ? [pendingInvoiceCaptureCoverage(pendingInvoiceCaptures)] : []), ...(staffConfirmedInvoices.length ? [staffConfirmedAppSheetInvoiceCoverage(staffConfirmedInvoices), staffConfirmedProductLineAllocationCoverage(staffConfirmedInvoices)] : []), returnCoverage.invalidCount ? partialCoverage("customer-return-allocations", returnCoverage.knownCount, returnCoverage.expectedCount, "invalid-billed-return-ratio") : coverage("customer-return-allocations", returnCoverage.knownCount, returnCoverage.expectedCount), ...(scope.memberIds === undefined ? [coverage("historical-delivery-sales", Number(history.saleCount), Number(history.saleCount))] : [excludedCoverage("historical-delivery-sales", "historical-delivery-sales-have-no-member-link")])]);
 }
 
 type PendingAppSheetInvoiceCaptureRow = {
@@ -732,7 +753,7 @@ async function pendingAppSheetInvoiceCaptures(range: ReportDateRange, scope: Rep
     Prisma.sql`o."commercialState" = 'confirmed'`,
     Prisma.sql`o."fulfillmentState" <> 'cancelled'`,
     Prisma.sql`o."confirmedAt" IS NOT NULL`,
-    Prisma.sql`COALESCE(o."quote"->>'source', '') = 'appsheet-invoice' AND COALESCE(o."quote"->>'totalCalculationState', '') <> 'defined'`,
+    pendingAppSheetInvoiceTotalPredicate,
   ];
   const timeRange = timestampFilter(range);
   if (timeRange.gte) predicates.push(Prisma.sql`o."confirmedAt" >= ${rawSqlUtcTimestamp(timeRange.gte)}`);
@@ -804,12 +825,136 @@ function hasPendingAppSheetInvoices(rows: PendingAppSheetInvoiceCaptureRow[]): b
   return rows.some(row => row.invoiceCount > 0n);
 }
 
+type StaffConfirmedAppSheetInvoiceRow = {
+  currency: string;
+  invoiceCount: bigint;
+  invoiceTotalMinor: string;
+  productsTotalMinor: string;
+  motoClientTotalMinor: string;
+  productLineBasisMinor: string;
+  unallocatedProductDeltaMinor: string;
+  unallocatedProductInvoiceCount: bigint;
+  invalidResolutionCount: bigint;
+};
+
+/** Manual invoice totals remain recognized with their confirmation provenance and SKU allocation limit visible. */
+async function staffConfirmedAppSheetInvoices(range: ReportDateRange, scope: ReportScope): Promise<StaffConfirmedAppSheetInvoiceRow[]> {
+  const predicates: Prisma.Sql[] = [
+    Prisma.sql`o."commercialState" = 'confirmed'`,
+    Prisma.sql`o."fulfillmentState" <> 'cancelled'`,
+    Prisma.sql`o."confirmedAt" IS NOT NULL`,
+    staffConfirmedAppSheetInvoicePredicate,
+  ];
+  const timeRange = timestampFilter(range);
+  if (timeRange.gte) predicates.push(Prisma.sql`o."confirmedAt" >= ${rawSqlUtcTimestamp(timeRange.gte)}`);
+  if (timeRange.lt) predicates.push(Prisma.sql`o."confirmedAt" < ${rawSqlUtcTimestamp(timeRange.lt)}`);
+  if (scope.memberIds !== undefined) predicates.push(scope.memberIds.length
+    ? Prisma.sql`o."memberId" IN (${Prisma.join(scope.memberIds)})`
+    : Prisma.sql`FALSE`);
+  return reportDb().$queryRaw<StaffConfirmedAppSheetInvoiceRow[]>(Prisma.sql`
+    WITH selected_orders AS (
+      SELECT o."id", o."currency", o."totalMinor", o."quote", o."quoteVersion",
+        CASE WHEN COALESCE(o."quote"->'financialResolution'->>'productsTotalMinor', '') ~ '^(0|[1-9][0-9]*)$'
+          THEN (o."quote"->'financialResolution'->>'productsTotalMinor')::numeric END AS products_total_minor,
+        CASE WHEN COALESCE(o."quote"->'financialResolution'->>'motoClientTotalMinor', '') ~ '^(0|[1-9][0-9]*)$'
+          THEN (o."quote"->'financialResolution'->>'motoClientTotalMinor')::numeric END AS moto_client_total_minor,
+        CASE WHEN COALESCE(o."quote"->'financialResolution'->>'totalMinor', '') ~ '^(0|[1-9][0-9]*)$'
+          THEN (o."quote"->'financialResolution'->>'totalMinor')::numeric END AS resolution_total_minor,
+        CASE WHEN COALESCE(o."quote"->>'totalMinor', '') ~ '^(0|[1-9][0-9]*)$'
+          THEN (o."quote"->>'totalMinor')::numeric END AS quote_total_minor
+      FROM "OperationOrder" AS o
+      WHERE ${Prisma.join(predicates, " AND ")}
+    ), product_line_basis AS (
+      SELECT l."orderId", SUM(l."revenueMinor")::numeric AS product_line_minor
+      FROM "OperationOrderLine" AS l
+      JOIN selected_orders AS o ON o."id" = l."orderId"
+      GROUP BY l."orderId"
+    )
+    SELECT o."currency", COUNT(*)::bigint AS "invoiceCount",
+      COALESCE(SUM(o."totalMinor"), 0)::text AS "invoiceTotalMinor",
+      COALESCE(SUM(o.products_total_minor), 0)::text AS "productsTotalMinor",
+      COALESCE(SUM(o.moto_client_total_minor), 0)::text AS "motoClientTotalMinor",
+      COALESCE(SUM(COALESCE(l.product_line_minor, 0)), 0)::text AS "productLineBasisMinor",
+      COALESCE(SUM(CASE WHEN o.products_total_minor IS NOT NULL
+        THEN o.products_total_minor - COALESCE(l.product_line_minor, 0) ELSE 0 END), 0)::text AS "unallocatedProductDeltaMinor",
+      COUNT(*) FILTER (WHERE o.products_total_minor IS NOT NULL
+        AND o.products_total_minor <> COALESCE(l.product_line_minor, 0))::bigint AS "unallocatedProductInvoiceCount",
+      COUNT(*) FILTER (WHERE COALESCE(o."quote"->>'totalCalculationSource', '') <> 'staff_confirmation'
+        OR COALESCE(o."quote"->'financialResolution'->>'kind', '') <> 'staff_confirmation'
+        OR COALESCE(o."quote"->'financialResolution'->>'currency', '') <> o."currency"
+        OR o.products_total_minor IS NULL OR o.moto_client_total_minor IS NULL
+        OR o.resolution_total_minor IS NULL OR o.resolution_total_minor <> o."totalMinor"
+        OR o.quote_total_minor IS NULL OR o.quote_total_minor <> o."totalMinor"
+        OR o.products_total_minor + o.moto_client_total_minor <> o."totalMinor"
+        OR COALESCE(o."quote"->'financialResolution'->>'actorId', '') = ''
+        OR COALESCE(o."quote"->'financialResolution'->>'confirmedAt', '') = ''
+        OR o."quoteVersion" <= 0
+        OR COALESCE(o."quote"->'financialResolution'->>'quoteVersion', '') !~ '^[1-9][0-9]*$'
+        OR COALESCE(o."quote"->'financialResolution'->>'quoteVersion', '') <> o."quoteVersion"::text
+        OR COALESCE(o."quote"->'financialResolution'->>'snapshotHash', '') !~ '^[a-fA-F0-9]{64}$'
+        OR COALESCE(o."quote"->'financialResolution'->'evidence'->>'note', '') = '')::bigint AS "invalidResolutionCount"
+    FROM selected_orders AS o
+    LEFT JOIN product_line_basis AS l ON l."orderId" = o."id"
+    GROUP BY o."currency"
+    ORDER BY o."currency"
+  `);
+}
+
+function staffConfirmedAppSheetInvoiceProjection(rows: StaffConfirmedAppSheetInvoiceRow[]) {
+  const invoiceTotals = moneyTotals();
+  const productsTotals = moneyTotals();
+  const motoTotals = moneyTotals();
+  const productLineBasis = moneyTotals();
+  const unallocatedProductDelta = moneyTotals();
+  let invoiceCount = 0;
+  let unallocatedProductInvoiceCount = 0;
+  let invalidResolutionCount = 0;
+  for (const row of rows) {
+    invoiceCount += Number(row.invoiceCount);
+    unallocatedProductInvoiceCount += Number(row.unallocatedProductInvoiceCount);
+    invalidResolutionCount += Number(row.invalidResolutionCount);
+    addMoney(invoiceTotals, row.currency, BigInt(row.invoiceTotalMinor));
+    addMoney(productsTotals, row.currency, BigInt(row.productsTotalMinor));
+    addMoney(motoTotals, row.currency, BigInt(row.motoClientTotalMinor));
+    addMoney(productLineBasis, row.currency, BigInt(row.productLineBasisMinor));
+    addMoney(unallocatedProductDelta, row.currency, BigInt(row.unallocatedProductDeltaMinor));
+  }
+  return {
+    count: invoiceCount,
+    invoiceTotalMinorByCurrency: asMoneyBuckets(invoiceTotals),
+    productsTotalMinorByCurrency: asMoneyBuckets(productsTotals),
+    motoClientTotalMinorByCurrency: asMoneyBuckets(motoTotals),
+    productLineBasisMinorByCurrency: asMoneyBuckets(productLineBasis),
+    unallocatedProductDeltaMinorByCurrency: asMoneyBuckets(unallocatedProductDelta),
+    unallocatedProductInvoiceCount,
+    invalidResolutionCount,
+    totalCalculationState: "staff_confirmed",
+    totalCalculationSource: "staff_confirmation",
+    recognizedAsSalesRevenue: true,
+    automaticFormulaClaimed: false,
+  };
+}
+
+function staffConfirmedAppSheetInvoiceCoverage(rows: StaffConfirmedAppSheetInvoiceRow[]): Coverage {
+  const total = rows.reduce((sum, row) => sum + Number(row.invoiceCount), 0);
+  const invalid = rows.reduce((sum, row) => sum + Number(row.invalidResolutionCount), 0);
+  return invalid ? partialCoverage("staff-confirmed-appsheet-invoice-provenance", total - invalid, total, "staff-confirmation-metadata-invalid-or-inconsistent")
+    : coverage("staff-confirmed-appsheet-invoice-provenance", total, total);
+}
+
+function staffConfirmedProductLineAllocationCoverage(rows: StaffConfirmedAppSheetInvoiceRow[]): Coverage {
+  const total = rows.reduce((sum, row) => sum + Number(row.invoiceCount), 0);
+  const unallocated = rows.reduce((sum, row) => sum + Number(row.unallocatedProductInvoiceCount), 0);
+  return unallocated ? partialCoverage("staff-confirmed-product-line-allocation", total - unallocated, total, "staff-confirmed-product-total-differs-from-line-bases-and-is-not-assigned-to-skus")
+    : coverage("staff-confirmed-product-line-allocation", total, total);
+}
+
 async function productContribution(range: ReportDateRange, scope: ReportScope) {
   const productPredicates: Prisma.Sql[] = [
     Prisma.sql`o."commercialState" = 'confirmed'`,
     Prisma.sql`o."confirmedAt" IS NOT NULL`,
     Prisma.sql`l."delivered" > 0`,
-    Prisma.sql`NOT (COALESCE(o."quote"->>'source', '') = 'appsheet-invoice' AND COALESCE(o."quote"->>'totalCalculationState', '') <> 'defined')`,
+    knownAppSheetInvoiceTotalPredicate,
   ];
   const timeRange = timestampFilter(range);
   if (timeRange.gte) productPredicates.push(Prisma.sql`o."confirmedAt" >= ${rawSqlUtcTimestamp(timeRange.gte)}`);
@@ -818,7 +963,7 @@ async function productContribution(range: ReportDateRange, scope: ReportScope) {
     ? Prisma.sql`o."memberId" IN (${Prisma.join(scope.memberIds)})`
     : Prisma.sql`FALSE`);
   type ProductLineRow = { id: string; orderId: string; skuId: string; unit: string; requested: string; delivered: string; revenueMinor: bigint; channel: string; currency: string };
-  const [lineCountRows, productLineRows, pendingInvoiceCaptures] = await Promise.all([
+  const [lineCountRows, productLineRows, pendingInvoiceCaptures, staffConfirmedInvoices] = await Promise.all([
     reportDb().$queryRaw<Array<{ rowCount: bigint }>>(Prisma.sql`
       SELECT COUNT(*)::bigint AS "rowCount"
       FROM "OperationOrderLine" AS l JOIN "OperationOrder" AS o ON o."id" = l."orderId"
@@ -832,6 +977,7 @@ async function productContribution(range: ReportDateRange, scope: ReportScope) {
       ORDER BY l."orderId" ASC, l."id" ASC LIMIT ${REPORT_ROW_LIMIT}
     `),
     pendingAppSheetInvoiceCaptures(range, scope),
+    staffConfirmedAppSheetInvoices(range, scope),
   ]);
   const lineCount = Number(lineCountRows[0]?.rowCount ?? 0n);
   const lines = productLineRows.map(({ channel, currency, ...line }) => ({ ...line, order: { channel, currency } }));
@@ -930,9 +1076,13 @@ async function productContribution(range: ReportDateRange, scope: ReportScope) {
   const missingAllocationLineCount = [...soldLines.keys()].filter(id => !allocatedByLine.has(id)).length + revenueExceptionLineCount;
   const revenueAmounts = new Map(asMoneyBuckets(revenueByCurrency).map(row => [row.currency ?? "\u0000unknown-currency", BigInt(row.minor)]));
   const productPopulationComplete = lineCount === lines.length && allocationCount === allocations.length;
-  const grossMarginByCurrency: MoneyBucket[] | null = !productPopulationComplete || missingAllocationLineCount || allocationExceptionCount
+  const lineBasisGrossMarginByCurrency: MoneyBucket[] | null = !productPopulationComplete || missingAllocationLineCount || allocationExceptionCount
     ? null
     : [...revenueAmounts.entries()].map(([currency, revenue]) => ({ currency: currency === "\u0000unknown-currency" ? null : currency, minor: (revenue - (matchedCostByCurrency.get(currency) ?? 0n)).toString() }));
+  const staffConfirmedInvoiceState = staffConfirmedAppSheetInvoiceProjection(staffConfirmedInvoices);
+  const staffProductAmountComplete = staffConfirmedInvoiceState.invalidResolutionCount === 0
+    && staffConfirmedInvoiceState.unallocatedProductInvoiceCount === 0;
+  const grossMarginByCurrency = staffProductAmountComplete ? lineBasisGrossMarginByCurrency : null;
   const fixedCosts = await approvedFixedCosts(range, scope);
   const management = await managementContribution(range, scope, grossMarginByCurrency, pendingInvoiceCaptures);
   const contributionAfterFixedCostsByCurrency = subtractFixedCostsByCurrency(
@@ -942,11 +1092,16 @@ async function productContribution(range: ReportDateRange, scope: ReportScope) {
   return queryEnvelope("product-contribution", range, {
     deliveredLineCount: lineCount,
     linesWithRevenueObserved: revenueRows,
-    revenueByCurrency: productPopulationComplete ? asMoneyBuckets(revenueByCurrency) : null,
+    revenueByCurrency: productPopulationComplete && staffProductAmountComplete ? asMoneyBuckets(revenueByCurrency) : null,
+    lineBasisRevenueByCurrency: productPopulationComplete ? asMoneyBuckets(revenueByCurrency) : null,
     actualAllocatedCostSoldByCurrency: productPopulationComplete ? asMoneyBuckets(costByCurrency) : null,
     productSourceRowsComplete: productPopulationComplete,
     grossContributionBeforeFixedCostsByCurrency: grossMarginByCurrency,
+    lineBasisGrossContributionBeforeFixedCostsByCurrency: lineBasisGrossMarginByCurrency,
+    productAmountAttributionComplete: staffProductAmountComplete,
+    productRevenueBasis: "delivered-line-revenue; staff-confirmed product totals are reported separately; unmatched aggregate differences are not assigned to SKUs",
     pendingAppSheetInvoices: pendingAppSheetInvoiceProjection(pendingInvoiceCaptures),
+    staffConfirmedAppSheetInvoices: staffConfirmedInvoiceState,
     ...management,
     fixedCosts,
     contributionAfterFixedCostsByCurrency,
@@ -959,7 +1114,7 @@ async function productContribution(range: ReportDateRange, scope: ReportScope) {
       method: "billed-delivery-revenue; customer-returns-at-frozen-preparation-ratio; actual-delivered-net-lot-cost",
       quotedReplacementCostUsed: false,
     },
-  }, [coverage("delivered-operation-order-lines", lines.length, lineCount), coverage("preparation-allocations", allocations.length, allocationCount), ...(hasPendingAppSheetInvoices(pendingInvoiceCaptures) ? [pendingInvoiceCaptureCoverage(pendingInvoiceCaptures), excludedCoverage("pending-appsheet-captured-product-lines", "captured-product-lines-are-exposed-separately-until-invoice-total-is-defined")] : []), fixedCostCoverage(fixedCosts)]);
+  }, [coverage("delivered-operation-order-lines", lines.length, lineCount), coverage("preparation-allocations", allocations.length, allocationCount), ...(hasPendingAppSheetInvoices(pendingInvoiceCaptures) ? [pendingInvoiceCaptureCoverage(pendingInvoiceCaptures), excludedCoverage("pending-appsheet-captured-product-lines", "captured-product-lines-are-exposed-separately-until-invoice-total-is-defined-or-staff-confirmed")] : []), ...(staffConfirmedInvoices.length ? [staffConfirmedAppSheetInvoiceCoverage(staffConfirmedInvoices), staffConfirmedProductLineAllocationCoverage(staffConfirmedInvoices)] : []), fixedCostCoverage(fixedCosts)]);
 }
 
 /** Management contribution adds frozen charges and accrued, verified variable obligations.
@@ -971,7 +1126,7 @@ async function managementContribution(range: ReportDateRange, scope: ReportScope
     Prisma.sql`o."commercialState" = 'confirmed'`,
     Prisma.sql`o."confirmedAt" IS NOT NULL`,
     Prisma.sql`EXISTS (SELECT 1 FROM "OperationOrderLine" AS l WHERE l."orderId" = o."id" AND l."delivered" > 0)`,
-    Prisma.sql`NOT (COALESCE(o."quote"->>'source', '') = 'appsheet-invoice' AND COALESCE(o."quote"->>'totalCalculationState', '') <> 'defined')`,
+    knownAppSheetInvoiceTotalPredicate,
   ];
   const chargeRange = timestampFilter(range);
   if (chargeRange.gte) chargePredicates.push(Prisma.sql`o."confirmedAt" >= ${rawSqlUtcTimestamp(chargeRange.gte)}`);
@@ -980,18 +1135,29 @@ async function managementContribution(range: ReportDateRange, scope: ReportScope
     ? Prisma.sql`o."memberId" IN (${Prisma.join(scope.memberIds)})`
     : Prisma.sql`FALSE`);
   const chargeGroups = await reportDb().$queryRaw<ChargeAggregate[]>(Prisma.sql`
-    SELECT o."currency", COUNT(*) FILTER (WHERE
-        o."deliveryMinor" - o."deliveryDiscountMinor" - o."refundedDeliveryMinor" + o."surchargeMinor" - o."refundedSurchargeMinor" < 0
-        OR (o."deliveryMinor" - o."deliveryDiscountMinor" - o."refundedDeliveryMinor" + o."surchargeMinor" - o."refundedSurchargeMinor" > 0 AND o."fulfillmentState" <> 'delivered')) AS "unresolvedCount",
-      COALESCE(SUM(CASE WHEN
-        o."deliveryMinor" - o."deliveryDiscountMinor" - o."refundedDeliveryMinor" + o."surchargeMinor" - o."refundedSurchargeMinor" >= 0
-        AND (o."deliveryMinor" - o."deliveryDiscountMinor" - o."refundedDeliveryMinor" + o."surchargeMinor" - o."refundedSurchargeMinor" = 0 OR o."fulfillmentState" = 'delivered')
-        THEN o."deliveryMinor" - o."deliveryDiscountMinor" - o."refundedDeliveryMinor" + o."surchargeMinor" - o."refundedSurchargeMinor"
-        ELSE 0 END), 0)::text AS "recognizedMinor"
-    FROM "OperationOrder" AS o
-    WHERE ${Prisma.join(chargePredicates, " AND ")}
-    GROUP BY o."currency"
-    ORDER BY o."currency"
+    WITH charge_inputs AS (
+      SELECT o."currency", o."fulfillmentState",
+        CASE WHEN ${staffConfirmedAppSheetInvoicePredicate} THEN
+          CASE
+            WHEN COALESCE(o."quote"->'paymentComponents'->'moto'->>'clientTotalMinor', '') ~ '^(0|[1-9][0-9]*)$'
+              THEN (o."quote"->'paymentComponents'->'moto'->>'clientTotalMinor')::numeric
+            WHEN COALESCE(o."quote"->'financialResolution'->>'motoClientTotalMinor', '') = '0' THEN 0::numeric
+            ELSE NULL
+          END
+        ELSE o."deliveryMinor" - o."deliveryDiscountMinor" - o."refundedDeliveryMinor"
+          + o."surchargeMinor" - o."refundedSurchargeMinor"
+        END AS charge_minor
+      FROM "OperationOrder" AS o
+      WHERE ${Prisma.join(chargePredicates, " AND ")}
+    )
+    SELECT "currency", COUNT(*) FILTER (WHERE charge_minor IS NULL OR charge_minor < 0
+        OR (charge_minor > 0 AND "fulfillmentState" <> 'delivered')) AS "unresolvedCount",
+      COALESCE(SUM(CASE WHEN charge_minor >= 0
+        AND (charge_minor = 0 OR "fulfillmentState" = 'delivered')
+        THEN charge_minor ELSE 0 END), 0)::text AS "recognizedMinor"
+    FROM charge_inputs
+    GROUP BY "currency"
+    ORDER BY "currency"
   `);
   const charges = moneyTotals();
   const pendingDeliveryTariffs = moneyTotals();
@@ -1056,7 +1222,7 @@ async function managementContribution(range: ReportDateRange, scope: ReportScope
       classifiedCostCount: scope.memberIds === undefined ? classifiedCostCount : null,
       costQueryComplete: scope.memberIds === undefined ? true : null,
       costRecognition: "verified-variable-obligations-by-explicit-accrual-month; payments-not-added",
-      chargeRecognition: "frozen-net-charges-on-completed-fulfillment; partial-positive-charges-require-review",
+      chargeRecognition: "frozen-net-charges-on-completed-fulfillment; staff-confirmed-AppSheet-moto-client-total-is-explicit; partial-positive-charges-require-review",
       reason: scope.memberIds !== undefined ? "general-costs-withheld-by-member-scope" : ready ? attestation?.sourcePeriodCompletenessAttested ? null : "source-period-completeness-not-attested" : "cost-allocation-or-charge-coverage-pending",
     },
   };
@@ -2003,11 +2169,11 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
   }
   const orderPredicates = [
     ...orderPopulationPredicates,
-    Prisma.sql`NOT (COALESCE(o."quote"->>'source', '') = 'appsheet-invoice' AND COALESCE(o."quote"->>'totalCalculationState', '') <> 'defined')`,
+    knownAppSheetInvoiceTotalPredicate,
   ];
   const pendingOrderPredicates = [
     ...orderPopulationPredicates,
-    Prisma.sql`COALESCE(o."quote"->>'source', '') = 'appsheet-invoice' AND COALESCE(o."quote"->>'totalCalculationState', '') <> 'defined'`,
+    pendingAppSheetInvoiceTotalPredicate,
   ];
   const [memberCount, members, orderCountRows, orders, summaryRows, unlinkedHistoryCount] = await Promise.all([
     reportDb().operationMember.count({ where: memberWhere }),
@@ -2031,6 +2197,8 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
       sourceOrderCount: bigint;
       pendingInvoiceMemberCount: bigint;
       pendingInvoiceOrderCount: bigint;
+      staffConfirmedProductAllocationMemberCount: bigint;
+      staffConfirmedProductAllocationOrderCount: bigint;
       returnAllocationCount: bigint;
       invalidReturnAllocationCount: bigint;
       invalidReturnLineCount: bigint;
@@ -2048,13 +2216,53 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
         FROM pending_orders AS o
         JOIN selected_members AS m ON m."id" = o."memberId"
       ), selected_orders AS (
-        SELECT o."id", o."memberId", o."currency", o."confirmedAt"
+        SELECT o."id", o."memberId", o."currency", o."confirmedAt", o."totalMinor", o."quote", o."quoteVersion"
         FROM "OperationOrder" AS o
         WHERE ${Prisma.join(orderPredicates, " AND ")}
       ), selected_lines AS (
         SELECT l."id", l."orderId", l."unit", l."requested", l."cancelled", l."delivered", l."revenueMinor"
         FROM "OperationOrderLine" AS l
         JOIN selected_orders AS o ON o."id" = l."orderId"
+      ), staff_product_order_values AS (
+        SELECT o."id", o."memberId", o."currency", o."totalMinor", o."quote", o."quoteVersion",
+          CASE WHEN COALESCE(o."quote"->'financialResolution'->>'productsTotalMinor', '') ~ '^(0|[1-9][0-9]*)$'
+            THEN (o."quote"->'financialResolution'->>'productsTotalMinor')::numeric END AS products_total_minor,
+          CASE WHEN COALESCE(o."quote"->'financialResolution'->>'motoClientTotalMinor', '') ~ '^(0|[1-9][0-9]*)$'
+            THEN (o."quote"->'financialResolution'->>'motoClientTotalMinor')::numeric END AS moto_total_minor,
+          CASE WHEN COALESCE(o."quote"->'financialResolution'->>'totalMinor', '') ~ '^(0|[1-9][0-9]*)$'
+            THEN (o."quote"->'financialResolution'->>'totalMinor')::numeric END AS resolution_total_minor,
+          CASE WHEN COALESCE(o."quote"->>'totalMinor', '') ~ '^(0|[1-9][0-9]*)$'
+            THEN (o."quote"->>'totalMinor')::numeric END AS quote_total_minor,
+          COALESCE(SUM(l."revenueMinor"), 0)::numeric AS product_line_minor
+        FROM selected_orders AS o
+        LEFT JOIN selected_lines AS l ON l."orderId" = o."id"
+        WHERE ${staffConfirmedAppSheetInvoicePredicate}
+        GROUP BY o."id", o."memberId", o."currency", o."totalMinor", o."quote", o."quoteVersion"
+      ), staff_product_reviews AS (
+        SELECT *,
+          (COALESCE("quote"->>'totalCalculationSource', '') <> 'staff_confirmation'
+            OR COALESCE("quote"->'financialResolution'->>'kind', '') <> 'staff_confirmation'
+            OR COALESCE("quote"->'financialResolution'->>'currency', '') <> "currency"
+            OR products_total_minor IS NULL OR moto_total_minor IS NULL
+            OR resolution_total_minor IS NULL OR resolution_total_minor <> "totalMinor"
+            OR quote_total_minor IS NULL OR quote_total_minor <> "totalMinor"
+            OR products_total_minor + moto_total_minor <> "totalMinor"
+            OR COALESCE("quote"->'financialResolution'->>'actorId', '') = ''
+            OR COALESCE("quote"->'financialResolution'->>'confirmedAt', '') = ''
+            OR "quoteVersion" <= 0
+            OR COALESCE("quote"->'financialResolution'->>'quoteVersion', '') !~ '^[1-9][0-9]*$'
+            OR COALESCE("quote"->'financialResolution'->>'quoteVersion', '') <> "quoteVersion"::text
+            OR COALESCE("quote"->'financialResolution'->>'snapshotHash', '') !~ '^[a-fA-F0-9]{64}$'
+            OR COALESCE("quote"->'financialResolution'->'evidence'->>'note', '') = '') AS invalid_resolution
+        FROM staff_product_order_values
+      ), incomplete_staff_product_orders AS (
+        SELECT "id", "memberId"
+        FROM staff_product_reviews
+        WHERE invalid_resolution OR products_total_minor <> product_line_minor
+      ), incomplete_staff_product_members AS (
+        SELECT DISTINCT "memberId"
+        FROM incomplete_staff_product_orders
+        WHERE "memberId" IS NOT NULL
       ), return_allocations AS (
         SELECT a."orderId", a."lineId",
           (l."id" IS NULL OR a."actualQuantity" <= 0 OR a."requestedQuantity" <= 0
@@ -2113,6 +2321,7 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
         SELECT m."id",
           CASE
             WHEN pending."memberId" IS NOT NULL THEN 'insufficient-data'
+            WHEN incomplete_staff."memberId" IS NOT NULL THEN 'insufficient-data'
             WHEN p."memberId" IS NULL THEN 'no-purchase-history'
             WHEN p.spend_ars_minor IS NULL OR p.max_grams_scaled IS NULL THEN 'insufficient-data'
             WHEN (${throughDate}::date - p.last_purchase_day) >= 105 THEN 'recency-priority'
@@ -2123,6 +2332,7 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
           END AS segment
         FROM selected_members AS m
         LEFT JOIN pending_members AS pending ON pending."memberId" = m."id"
+        LEFT JOIN incomplete_staff_product_members AS incomplete_staff ON incomplete_staff."memberId" = m."id"
         LEFT JOIN member_profiles AS p ON p."memberId" = m."id"
       ), segment_counts AS (
         SELECT segment, COUNT(*)::bigint AS member_count
@@ -2133,6 +2343,8 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
           (SELECT COUNT(*)::bigint FROM selected_orders) AS order_count,
           (SELECT COUNT(*)::bigint FROM pending_members) AS pending_invoice_member_count,
           (SELECT COUNT(*)::bigint FROM pending_orders) AS pending_invoice_order_count,
+          (SELECT COUNT(*)::bigint FROM incomplete_staff_product_members) AS staff_product_member_count,
+          (SELECT COUNT(*)::bigint FROM incomplete_staff_product_orders) AS staff_product_order_count,
           (SELECT COUNT(*)::bigint FROM return_allocations) AS return_allocation_count,
           (SELECT COUNT(*) FILTER (WHERE invalid)::bigint FROM return_allocations) AS invalid_return_allocation_count,
           (SELECT COUNT(*) FILTER (WHERE invalid_line)::bigint FROM line_values) AS invalid_return_line_count
@@ -2144,6 +2356,8 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
         t.member_count AS "sourceMemberCount", t.order_count AS "sourceOrderCount",
         t.pending_invoice_member_count AS "pendingInvoiceMemberCount",
         t.pending_invoice_order_count AS "pendingInvoiceOrderCount",
+        t.staff_product_member_count AS "staffConfirmedProductAllocationMemberCount",
+        t.staff_product_order_count AS "staffConfirmedProductAllocationOrderCount",
         t.return_allocation_count AS "returnAllocationCount",
         t.invalid_return_allocation_count AS "invalidReturnAllocationCount",
         t.invalid_return_line_count AS "invalidReturnLineCount"
@@ -2160,12 +2374,14 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
   const sourceOrderCount = Number(summary?.sourceOrderCount ?? 0n);
   const pendingInvoiceMemberCount = Number(summary?.pendingInvoiceMemberCount ?? 0n);
   const pendingInvoiceOrderCount = Number(summary?.pendingInvoiceOrderCount ?? 0n);
+  const staffConfirmedProductAllocationMemberCount = Number(summary?.staffConfirmedProductAllocationMemberCount ?? 0n);
+  const staffConfirmedProductAllocationOrderCount = Number(summary?.staffConfirmedProductAllocationOrderCount ?? 0n);
   const returnAllocationCount = Number(summary?.returnAllocationCount ?? 0n);
   const invalidReturnAllocationCount = Number(summary?.invalidReturnAllocationCount ?? 0n);
   const invalidReturnLineCount = Number(summary?.invalidReturnLineCount ?? 0n);
   const sourceRowsComplete = summary !== undefined && sourceMemberCount === memberCount && sourceOrderCount === orderCount
     && invalidReturnAllocationCount === 0 && invalidReturnLineCount === 0;
-  const segmentationDataComplete = sourceRowsComplete && pendingInvoiceOrderCount === 0;
+  const segmentationDataComplete = sourceRowsComplete && pendingInvoiceOrderCount === 0 && staffConfirmedProductAllocationOrderCount === 0;
   const segmentCounts = new Map<LegacyCustomerSegment, number>();
   if (sourceRowsComplete) {
     for (const row of summaryRows) {
@@ -2187,6 +2403,8 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
     operationOrderRowsComplete: orders.length === orderCount,
     pendingAppSheetInvoiceMemberCount: pendingInvoiceMemberCount,
     pendingAppSheetInvoiceOrderCount: pendingInvoiceOrderCount,
+    staffConfirmedProductAllocationMemberCount,
+    staffConfirmedProductAllocationOrderCount,
     segmentationDataComplete,
     segmentationAsOfDate: throughDate,
     memberHistoryBasis: "retained-confirmed-operation-orders-through-as-of-date; cancelled-demand-and-customer-returns-excluded; fromDate-does-not-truncate-lifetime-measures",
@@ -2201,7 +2419,7 @@ async function customerSegmentation(range: ReportDateRange, scope: ReportScope) 
     customerReturnAllocationCount: returnAllocationCount,
     invalidCustomerReturnAllocationCount: invalidReturnAllocationCount,
     invalidCustomerReturnLineCount: invalidReturnLineCount,
-  }, [coverage("operation-members", members.length, memberCount), coverage("confirmed-orders-for-segmentation", orders.length, orderCount), returnCoverage, ...(pendingInvoiceOrderCount > 0 ? [partialCoverage("pending-appsheet-invoice-segmentation-inputs", 0, pendingInvoiceOrderCount, "pending-invoice-total-definition-prevents-complete-spend-classification")] : []), sourceRowsComplete
+  }, [coverage("operation-members", members.length, memberCount), coverage("confirmed-orders-for-segmentation", orders.length, orderCount), returnCoverage, ...(pendingInvoiceOrderCount > 0 ? [partialCoverage("pending-appsheet-invoice-segmentation-inputs", 0, pendingInvoiceOrderCount, "pending-invoice-total-definition-prevents-complete-spend-classification")] : []), ...(staffConfirmedProductAllocationOrderCount > 0 ? [partialCoverage("staff-confirmed-unallocated-product-segmentation-inputs", 0, staffConfirmedProductAllocationOrderCount, "staff-confirmed-product-total-differs-from-line-basis-or-resolution-is-invalid")] : []), sourceRowsComplete
     ? coverage("customer-segmentation-full-population", memberCount, memberCount)
     : partialCoverage("customer-segmentation-full-population", 0, memberCount, "invalid-retained-order-or-return-data-or-source-count-mismatch"), ...(scope.memberIds === undefined ? [coverage("unlinked-historical-delivery-sales", 0, unlinkedHistoryCount)] : [excludedCoverage("unlinked-historical-delivery-sales", "historical-delivery-sales-have-no-member-link")])]);
 }

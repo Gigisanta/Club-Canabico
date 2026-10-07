@@ -160,6 +160,67 @@ registerCommand("InvoiceConfirmed",{kind:"order",capability:"orders.write",schem
  return confirmOrderSnapshot(ctx,order,quote,{deliveryAddress,acceptance:ctx.envelope.data.acceptance as Record<string,unknown>,financialState:"unpaid"});
 }});
 
+const invoiceTotalConfirmationSchema=z.strictObject({
+ currency:z.enum(["ARS","USD"]),
+ productsTotalMinor:positiveMinor,
+ motoClientTotalMinor:minor,
+ evidence:z.strictObject({note:z.string().trim().min(1).max(1000)}),
+});
+registerCommand("InvoiceTotalsConfirmed",{kind:"order",capability:"orders.write",schema:invoiceTotalConfirmationSchema,execute:async ctx=>{
+ const order=await ctx.tx.operationOrder.findUnique({where:{id:ctx.envelope.targetId}});
+ if(!order)throw new OperationError(404,"INVOICE_ORDER_NOT_FOUND","No se encontró la factura AppSheet");
+ const rawQuote=order.quote;
+ if(!rawQuote||typeof rawQuote!=="object"||Array.isArray(rawQuote))throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La orden no conserva una instantánea de factura válida");
+ const quote=rawQuote as Record<string,unknown>;
+ if(quote.source!=="appsheet-invoice")throw new OperationError(409,"INVOICE_COMMAND_MISMATCH","El cierre manual sólo corresponde a facturas AppSheet");
+ if(order.commercialState!=="confirmed")throw new OperationError(409,"INVOICE_NOT_CONFIRMED","Confirmá la factura antes de cerrar su total");
+ if(quote.totalCalculationState!=="pending_definition"){
+  if(quote.totalCalculationState==="defined"||quote.totalCalculationState==="staff_confirmed")
+   throw new OperationError(409,"INVOICE_TOTAL_ALREADY_RESOLVED","La factura ya tiene un total conocido");
+  throw new OperationError(409,"INVOICE_TOTAL_STATE_INVALID","La factura no está en un estado de total pendiente reconocido");
+ }
+ if(quote.financialResolution!==undefined&&quote.financialResolution!==null)
+  throw new OperationError(409,"INVOICE_TOTAL_STATE_INVALID","La factura pendiente ya conserva un cierre financiero previo");
+ const v=ctx.envelope.data as z.infer<typeof invoiceTotalConfirmationSchema>;
+ if(order.currency!==v.currency||quote.currency!==v.currency)
+  throw new OperationError(422,"INVOICE_TOTAL_CURRENCY","La moneda debe coincidir con la factura original");
+ const hasMoto=quote.moto!==null&&quote.moto!==undefined;
+ if(!hasMoto&&v.motoClientTotalMinor!=="0")
+  throw new OperationError(422,"INVOICE_MOTO_TOTAL_WITHOUT_MOTO","Una factura sin moto debe confirmar cero para ese componente");
+ const components=quote.paymentComponents;
+ if(!components||typeof components!=="object"||Array.isArray(components))
+  throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La factura no conserva sus componentes de pago AppSheet");
+ const paymentComponents=components as Record<string,unknown>;
+ const products=paymentComponents.products;
+ if(!products||typeof products!=="object"||Array.isArray(products))
+  throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La factura no conserva el componente de productos AppSheet");
+ const moto=paymentComponents.moto;
+ if(hasMoto&&(!moto||typeof moto!=="object"||Array.isArray(moto)))
+  throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La factura no conserva el componente de moto AppSheet");
+ if(!hasMoto&&moto!==null)
+  throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","Los componentes de pago no coinciden con la factura AppSheet");
+ const productsTotal=BigInt(v.productsTotalMinor),motoClientTotal=BigInt(v.motoClientTotalMinor);
+ const total=checkInvoiceMinor(productsTotal+motoClientTotal);
+ const snapshotHash=appSheetQuoteHash(quote);
+ const confirmedAt=ctx.now.toISOString();
+ const financialResolution={
+  kind:"staff_confirmation",currency:v.currency,productsTotalMinor:productsTotal.toString(),
+  motoClientTotalMinor:motoClientTotal.toString(),totalMinor:total.toString(),evidence:v.evidence,
+  actorId:ctx.actor.id,confirmedAt,quoteVersion:order.quoteVersion,snapshotHash,
+ };
+ const resolvedQuote={
+  ...quote,totalMinor:total.toString(),totalCalculationState:"staff_confirmed",totalCalculationSource:"staff_confirmation",
+  financialResolution,
+  paymentComponents:{
+   ...paymentComponents,
+   products:{...(products as Record<string,unknown>),totalMinor:productsTotal.toString()},
+   moto:hasMoto?{...(moto as Record<string,unknown>),clientTotalMinor:motoClientTotal.toString()}:moto,
+  },
+ };
+ await ctx.tx.operationOrder.update({where:{id:order.id},data:{quote:json(resolvedQuote),totalMinor:total,financialState:"unpaid"}});
+ return {orderId:order.id,commercialState:order.commercialState,currency:v.currency,totalMinor:total.toString(),totalCalculationState:"staff_confirmed",totalCalculationSource:"staff_confirmation",financialResolution};
+}});
+
 registerCommand("OrderCreated",{kind:"order",capability:"orders.write",create:true,schema:z.strictObject({memberId:objectId,channel:z.enum(["local","delivery"]),currency,address:commercialAddress.default({}),preorder:z.boolean().default(false)}),execute:async ctx=>{
  const v=ctx.envelope.data as {memberId:string;channel:string;currency:string;address:Record<string,unknown>;preorder:boolean};
  if(!await ctx.tx.operationMember.findUnique({where:{id:v.memberId}}))throw new OperationError(422,"MEMBER_REQUIRED","Elegí un socio identificado");

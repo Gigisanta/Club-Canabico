@@ -78,7 +78,9 @@ registerCommand("CutoverGateReviewed",{kind:"cutover",capability:"cutover.approv
  execute:async ctx=>{
   const v=ctx.envelope.data as {gateId:string;evidence:Record<string,unknown>;authorId:string};
   if(v.authorId===ctx.actor.id)throw new OperationError(409,"INDEPENDENT_REVIEW_REQUIRED","Autor y revisor deben ser personas distintas");
-  if(!await ctx.tx.user.findUnique({where:{id:v.authorId}}))throw new OperationError(404,"AUTHOR_NOT_FOUND","Autor no encontrado");
+  const author=await ctx.tx.user.findUnique({where:{id:v.authorId},select:{id:true,active:true}});
+  if(!author)throw new OperationError(404,"AUTHOR_NOT_FOUND","Autor no encontrado");
+  if(!author.active)throw new OperationError(409,"AUTHOR_INACTIVE","El autor del control debe estar activo");
   await ctx.tx.cutoverGate.upsert({where:{id:v.gateId},create:{id:v.gateId,status:"approved",evidence:json(v.evidence),approvedBy:v.authorId,reviewedBy:ctx.actor.id,approvedAt:ctx.now},update:{status:"approved",evidence:json(v.evidence),approvedBy:v.authorId,reviewedBy:ctx.actor.id,approvedAt:ctx.now}});
   return {gateId:v.gateId,status:"approved"};
  }});
@@ -87,7 +89,14 @@ registerCommand("AuthorityActivated",{kind:"authority",capability:"cutover.appro
  execute:async ctx=>{
   if(ctx.envelope.targetId!=="operations")throw new OperationError(400,"AUTHORITY_ID","Circuito inválido");
   const gates=await ctx.tx.cutoverGate.findMany({where:{id:{in:[...cutoverGateIds]},status:"approved"}});
-  const missing=cutoverGateIds.filter(id=>!gates.some(g=>g.id===id&&g.reviewedBy&&g.approvedBy!==g.reviewedBy));
+  const gateActorIds=[...new Set(gates.flatMap(g=>[g.approvedBy,g.reviewedBy].filter((id):id is string=>typeof id==="string"&&id.length>0)))];
+  const activeGateActors=gateActorIds.length?await ctx.tx.user.findMany({where:{id:{in:gateActorIds},active:true},select:{id:true}}):[];
+  const activeGateActorIds=new Set(activeGateActors.map(user=>user.id));
+  const gatesById=new Map(gates.map(g=>[g.id,g]));
+  const missing=cutoverGateIds.filter(id=>{
+   const gate=gatesById.get(id);
+   return !gate?.approvedBy||!gate.reviewedBy||gate.approvedBy===gate.reviewedBy||!activeGateActorIds.has(gate.approvedBy)||!activeGateActorIds.has(gate.reviewedBy);
+  });
   if(missing.length)throw new OperationError(422,"CUTOVER_GATES_PENDING","Faltan controles para el cambio de autoridad",{missing});
   const old=await ctx.tx.operationAuthority.findUnique({where:{id:"operations"}});
   if(old?.mode==="active")throw new OperationError(409,"AUTHORITY_ALREADY_ACTIVE","El circuito ya está activo");

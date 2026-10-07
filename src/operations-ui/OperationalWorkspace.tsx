@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { apiGet, apiPost, hasCapability, hasCommand, OperationsApiError, recordValue, responseItems, responseVersion, textValue } from "./api";
 import { amountFormToMinor, formatMinor } from "./money";
@@ -18,6 +18,56 @@ import type { ActionField, CommandAction, JsonRecord, OperationsContext, RunComm
 import { RouteOrderEditor, type RouteOrderStop } from "./RouteOrderEditor";
 
 type Row = Record<string, unknown>;
+function objectValue(value: unknown): Row { return value && typeof value === "object" && !Array.isArray(value) ? value as Row : {}; }
+type InvoiceTotalTrace = {
+  currency: string;
+  productsTotalMinor: unknown;
+  motoClientTotalMinor: unknown;
+  totalMinor: unknown;
+  evidenceNote: string;
+  actorLabel: string;
+  confirmedAt: string;
+  quoteVersion: string;
+  snapshotHash: string;
+};
+
+function traceText(value: unknown, fallback = "Dato no disponible") {
+  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "number" || typeof value === "bigint") return String(value);
+  return fallback;
+}
+
+function traceAmount(value: unknown, currency: string) {
+  return typeof value === "string" && /^\d+$/.test(value) ? formatMinor(value, currency) : "Importe no disponible";
+}
+
+function InvoiceTotalTraceDialog({ trace, onClose }: { trace: InvoiceTotalTrace; onClose: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    if (dialog.current && !dialog.current.open) dialog.current.showModal();
+  }, []);
+  const fieldStyle = { gridColumn: "1 / -1" as const };
+  const valueStyle = { margin: 0, color: "var(--ops-ink)", fontWeight: 600, whiteSpace: "pre-wrap" as const, overflowWrap: "anywhere" as const, lineHeight: 1.5 };
+  return <dialog className="ops-dialog" ref={dialog} data-testid="appsheet-invoice-total-trace-dialog" aria-labelledby="invoice-total-trace-title" onCancel={event => { event.preventDefault(); onClose(); }}>
+    <div className="ops-dialog-card">
+      <header className="ops-dialog-head">
+        <div><span className="ops-kicker">Confirmado por el personal</span><h2 id="invoice-total-trace-title">Confirmación del total facturado</h2><p>Detalle guardado de la factura. El total confirmado suma productos y moto.</p></div>
+        <button type="button" className="ops-icon-button" aria-label="Cerrar confirmación del total" onClick={onClose}>×</button>
+      </header>
+      <div className="ops-dialog-fields" aria-label="Importes confirmados">
+        <div className="ops-field"><span>Total de productos confirmado</span><output style={valueStyle}>{traceAmount(trace.productsTotalMinor, trace.currency)}</output></div>
+        <div className="ops-field"><span>Total de moto confirmado</span><output style={valueStyle}>{traceAmount(trace.motoClientTotalMinor, trace.currency)}</output></div>
+        <div className="ops-field"><span>Total facturado confirmado</span><output style={valueStyle}>{traceAmount(trace.totalMinor, trace.currency)}</output></div>
+        <div className="ops-field" style={fieldStyle}><span>Evidencia registrada</span><output style={valueStyle}>{trace.evidenceNote || "Sin evidencia disponible"}</output></div>
+        <div className="ops-field" style={fieldStyle}><span>Confirmado por</span><output style={valueStyle}>{trace.actorLabel}</output></div>
+        <div className="ops-field" style={fieldStyle}><span>Fecha de confirmación</span><output style={valueStyle}>{trace.confirmedAt}</output></div>
+        <div className="ops-field"><span>Versión de cotización</span><output style={valueStyle}>{trace.quoteVersion}</output></div>
+        <div className="ops-field" style={fieldStyle}><span>Huella del resumen confirmado</span><output style={valueStyle}>{trace.snapshotHash}</output></div>
+      </div>
+      <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-primary" onClick={onClose}>Cerrar</button></footer>
+    </div>
+  </dialog>;
+}
 interface Props {
   pageId: string;
   context: OperationsContext;
@@ -667,9 +717,10 @@ export function OperationalWorkspace(props: Props) {
   const [selectedMemberId, setSelectedMemberId] = useState("");
   const [selectedProductId, setSelectedProductId] = useState("");
   const [invoiceEditor, setInvoiceEditor] = useState<{ mode: "invoice" | "preorder" | "edit-preorder" | "confirm-preorder"; order?: Row; expectedVersion?: number; memberName?: string } | null>(null);
+  const [invoiceTotalTrace, setInvoiceTotalTrace] = useState<InvoiceTotalTrace | null>(null);
   const [memberSearch, setMemberSearch] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
-  useEffect(() => { if (pageId !== "orders") setInvoiceEditor(null); }, [pageId]);
+  useEffect(() => { if (pageId !== "orders") { setInvoiceEditor(null); setInvoiceTotalTrace(null); } }, [pageId]);
   const listSearchKey = `q-${pageId}`;
   const tableSearch = pageId === "members" ? "" : searchParams.get(listSearchKey) ?? "";
   const updateTableSearch = (value: string) => {
@@ -831,6 +882,16 @@ export function OperationalWorkspace(props: Props) {
     }) : row[key];
     const orderQuote = recordValue(row, "quote");
     const appSheetInvoice = pageId === "orders" && recordValue(orderQuote, "source") === "appsheet-invoice";
+    const invoiceTotalState = recordValue(orderQuote, "totalCalculationState");
+    const invoiceTotalKnown = appSheetInvoice && (invoiceTotalState === "defined" || invoiceTotalState === "staff_confirmed");
+    const invoiceCurrency = textValue(recordValue(orderQuote, "currency"), textValue(row.currency, "ARS"));
+    const invoiceResolution = objectValue(recordValue(orderQuote, "financialResolution") ?? row.financialResolution);
+    const productsTotalMinor = invoiceResolution.productsTotalMinor;
+    const motoClientTotalMinor = invoiceResolution.motoClientTotalMinor;
+    const hasInvoiceResolution = typeof productsTotalMinor === "string" && /^\d+$/.test(productsTotalMinor)
+      && typeof motoClientTotalMinor === "string" && /^\d+$/.test(motoClientTotalMinor);
+    const invoiceTotalMinor = recordValue(orderQuote, "totalMinor") ?? row.totalMinor;
+    const hasInvoiceTotal = typeof invoiceTotalMinor === "bigint" || (typeof invoiceTotalMinor === "string" && /^\d+$/.test(invoiceTotalMinor));
     const memberLabel = textValue(memberRows.find(item => idOf(item) === String(row.memberId ?? ""))?.name, row.memberId ? `Socio #${shortReference(String(row.memberId))}` : "—");
     return {
       ...row,
@@ -841,8 +902,16 @@ export function OperationalWorkspace(props: Props) {
       ...(pageId === "orders" ? {
         invoiceOrOrderLabel: appSheetInvoice ? textValue(recordValue(orderQuote, "invoiceNumber"), rawId ? `Factura #${reference}` : "Factura sin número") : textValue(row.idLabel, rawId ? `Pedido #${reference}` : "Pedido"),
         invoiceMemberLabel: memberLabel,
-        invoiceTotalLabel: appSheetInvoice ? "Pendiente de definición" : formatMinor(row.totalMinor, textValue(row.currency, "ARS")),
-        capturedBaseLabel: appSheetInvoice ? formatMinor(recordValue(orderQuote, "capturedBaseMinor"), textValue(recordValue(orderQuote, "currency"), "ARS")) : "—",
+        invoiceTotalLabel: appSheetInvoice
+          ? invoiceTotalKnown ? hasInvoiceTotal ? formatMinor(invoiceTotalMinor, invoiceCurrency) : "Importe conocido no disponible" : "Pendiente de definición"
+          : formatMinor(row.totalMinor, textValue(row.currency, "ARS")),
+        invoiceTotalBreakdownLabel: invoiceTotalKnown && hasInvoiceResolution
+          ? `Productos ${formatMinor(productsTotalMinor, invoiceCurrency)} · Moto ${formatMinor(motoClientTotalMinor, invoiceCurrency)}`
+          : "—",
+        invoiceTotalSourceLabel: appSheetInvoice
+          ? invoiceTotalState === "defined" ? "Definido por regla" : invoiceTotalState === "staff_confirmed" ? "Confirmado por el personal" : "Pendiente de definición"
+          : "—",
+        capturedBaseLabel: appSheetInvoice ? formatMinor(recordValue(orderQuote, "capturedBaseMinor"), invoiceCurrency) : "—",
       } : {}),
       ...(row.driverId ? { driverIdLabel: textValue(driver?.name, "Persona asignada") } : {}),
       ...(row.reporterId ? { reporterIdLabel: textValue(reporter?.name, "Persona reportante") } : {}),
@@ -1132,7 +1201,7 @@ export function OperationalWorkspace(props: Props) {
   const columnsByPage: Record<string, Array<[string, string]>> = {
     members: [["name", "Socio"], ["email", "Correo"], ["phone", "Teléfono"], ["active", "Activo"]],
     catalog: [["name", "Producto"], ["category", "Categoría"], ["unit", "Unidad"], ["active", "Activo"]],
-    orders: [["invoiceOrOrderLabel", "Factura / pedido"], ["invoiceMemberLabel", "Cliente"], ["lines", "Productos"], ["commercialState", "Estado comercial"], ["fulfillmentState", "Preparación"], ["financialState", "Cobro"], ["invoiceTotalLabel", "Total facturado"], ["capturedBaseLabel", "Importe capturado"]],
+    orders: [["invoiceOrOrderLabel", "Factura / pedido"], ["invoiceMemberLabel", "Cliente"], ["lines", "Productos"], ["commercialState", "Estado comercial"], ["fulfillmentState", "Preparación"], ["financialState", "Cobro"], ["invoiceTotalLabel", "Total facturado"], ["invoiceTotalBreakdownLabel", "Desglose confirmado"], ["invoiceTotalSourceLabel", "Origen del total"], ["capturedBaseLabel", "Importe capturado"]],
     purchases: [["id", "Compra"], ["supplierId", "Proveedor"], ["agreementDate", "Acuerdo"], ["expectedDate", "Prevista"], ["items", "Artículos"], ["totalMinor", "Total"], ["currency", "Moneda"], ["status", "Estado"]],
     routes: [["shiftDate", "Turno"], ["driverId", "Repartidor"], ["status", "Estado"], ["closedWithPending", "Cierre con pendientes"]],
     tasks: [["title", "Tarea"], ["dueDate", "Vence"], ["status", "Estado"], ["responsibleId", "Responsable"]],
@@ -1150,6 +1219,7 @@ export function OperationalWorkspace(props: Props) {
     const buttons: Array<{ label: string; onClick: () => void }> = [];
     const quote = recordValue(row, "quote");
     const isAppSheetInvoice = recordValue(quote, "source") === "appsheet-invoice";
+    const isConfirmedAppSheetInvoice = isAppSheetInvoice && row.commercialState === "confirmed";
     if (pageId === "catalog" && hasCapability(context, "stock.read")) buttons.push({ label: "Historia del producto", onClick: () => setSelectedProductId(id) });
     if (pageId === "purchases" && row.status === "draft" && hasCommand(context, "PurchaseOrderApproved")) buttons.push({ label: "Aprobar compra", onClick: () => runAction("PurchaseOrderApproved", "Revisar y aprobar la compra", fields(evidenceField("Motivo de aprobación")), v => ({ evidence: note(v) }), row, "La persona que aprobó debe ser distinta de quien creó el acuerdo.") });
     if (pageId === "purchases" && ["approved", "partially_received"].includes(String(row.status)) && hasCommand(context, "GoodsReceived")) {
@@ -1199,6 +1269,43 @@ export function OperationalWorkspace(props: Props) {
       const expectedVersion = versionFor(query.data, row, Number.NaN);
       if (!Number.isSafeInteger(expectedVersion)) { onNotice("No se pudo confirmar la versión de la preventa. Actualizá Pedidos antes de confirmarla."); return; }
       setInvoiceEditor({ mode: "confirm-preorder", order: row, expectedVersion });
+    } });
+    if (pageId === "orders" && isConfirmedAppSheetInvoice && recordValue(quote, "totalCalculationState") === "pending_definition" && hasCommand(context, "InvoiceTotalsConfirmed")) buttons.push({ label: "Confirmar total facturado", onClick: () => {
+      const currencyValue = recordValue(quote, "currency") ?? row.currency;
+      const currency = currencyValue === "ARS" || currencyValue === "USD" ? currencyValue : null;
+      if (!currency) { onNotice("No se pudo confirmar el total: la factura no tiene una moneda ARS o USD disponible."); return; }
+      const moto = objectValue(recordValue(quote, "moto"));
+      const hasMoto = Object.keys(moto).length > 0;
+      const totalFields = fields(
+        field("currency", "Moneda de la factura", "select", { required: true, defaultValue: currency, options: [{ value: currency, label: currency }], help: "Se toma de la factura y queda fija; no hay conversión de moneda." }),
+        field("productsTotal", "Total de productos confirmado", "amount", { required: true, min: "0.01", help: `Transcribí el total de productos de la factura fuente en ${currency}; no se recalculan precios por gramo ni escalas.` }),
+        ...(hasMoto ? [field("motoClientTotal", "Total de moto confirmado", "amount", { required: true, min: "0", help: `Transcribí el total de moto de la factura fuente en ${currency}; no se recalculan tarifas.` })] : []),
+        field("evidence", "Evidencia del total facturado", "textarea", { required: true, help: "Ingresá la transcripción de la factura fuente o la aceptación del cliente." }),
+      );
+      runAction("InvoiceTotalsConfirmed", "Confirmar total facturado", totalFields, values => {
+        const productsTotalMinor = amountFormToMinor(str(values, "productsTotal"));
+        if (BigInt(productsTotalMinor) <= 0n) throw new Error("El total de productos confirmado debe ser mayor que cero.");
+        const motoClientTotalMinor = hasMoto ? amountFormToMinor(str(values, "motoClientTotal")) : "0";
+        if (BigInt(motoClientTotalMinor) < 0n) throw new Error("El total de moto confirmado no puede ser negativo.");
+        return { currency, productsTotalMinor, motoClientTotalMinor, evidence: note(values) };
+      }, row, "Ingresá los importes tal como figuran en la factura fuente o fueron aceptados por el cliente. El total final es la suma de productos y moto; Bombo no recalcula precios ni tarifas.");
+    } });
+    if (pageId === "orders" && isConfirmedAppSheetInvoice && recordValue(quote, "totalCalculationState") === "staff_confirmed") buttons.push({ label: "Ver confirmación del total", onClick: () => {
+      const resolution = objectValue(recordValue(quote, "financialResolution") ?? row.financialResolution);
+      const actorId = traceText(resolution.actorId, "Persona no disponible");
+      const actor = userRows.find(person => idOf(person) === actorId) ?? peopleRows.find(person => idOf(person) === actorId);
+      const evidence = objectValue(resolution.evidence);
+      setInvoiceTotalTrace({
+        currency: textValue(recordValue(quote, "currency"), textValue(row.currency, "ARS")),
+        productsTotalMinor: resolution.productsTotalMinor,
+        motoClientTotalMinor: resolution.motoClientTotalMinor,
+        totalMinor: recordValue(quote, "totalMinor") ?? row.totalMinor,
+        evidenceNote: traceText(evidence.note, ""),
+        actorLabel: actor ? `${textValue(actor.name, actorId)} · ${actorId}` : actorId,
+        confirmedAt: traceText(resolution.confirmedAt),
+        quoteVersion: traceText(resolution.quoteVersion),
+        snapshotHash: traceText(resolution.snapshotHash),
+      });
     } });
     if (pageId === "orders" && !isAppSheetInvoice && ["draft", "preorder"].includes(String(row.commercialState)) && hasCommand(context, "OrderQuoted")) buttons.push({ label: "Cotizar", onClick: () => runAction("OrderQuoted", "Preparar cotización", fields(
       field("paymentMethod", "Medio de pago general", "select", { required: true, defaultValue: "cash", options: [{ value: "cash", label: "Efectivo" }, { value: "transfer", label: "Transferencia" }, { value: "mercado_pago", label: "Mercado Pago" }, { value: "card", label: "Tarjeta" }], help: "Se usa en productos y entrega cuando no elegís un medio específico." }),
@@ -1417,6 +1524,7 @@ export function OperationalWorkspace(props: Props) {
     {pageId === "routes" && <RoutesDetails data={query.data} context={context} runAction={runAction} deliveryPeople={deliveryPeople} catalog={catalogRows} orders={orderRows} actionsBlocked={query.loading || Boolean(query.error)} hasMore={query.hasMore} />}
     {pageId === "settlements" && <InfoBand title="Custodia y rendición"><p>Una rendición debe explicar el bruto como dinero entregado más remuneración. El pago de remuneración requiere una obligación verificada y se registra con cuentas de custodia conciliadas.</p></InfoBand>}
     {pageId === "orders" && invoiceEditor && <AppSheetInvoiceForm key={`${invoiceEditor.mode}-${idOf(invoiceEditor.order ?? {}) || "new"}`} open mode={invoiceEditor.mode} order={invoiceEditor.order} expectedVersion={invoiceEditor.expectedVersion} memberName={invoiceEditor.memberName} context={context} catalog={catalogRows} catalogLoading={catalogChoices.loading} catalogError={catalogChoices.error ?? undefined} retryCatalog={catalogChoices.retry} loadMoreCatalog={catalogChoices.loadMore} hasMoreCatalog={catalogChoices.hasMore} runCommand={runCommand} onClose={() => setInvoiceEditor(null)} onSaved={(_orderId, message) => { setInvoiceEditor(null); onRefresh(); onNotice(message); }} />}
+    {pageId === "orders" && invoiceTotalTrace && <InvoiceTotalTraceDialog trace={invoiceTotalTrace} onClose={() => setInvoiceTotalTrace(null)} />}
   </div>;
 }
 

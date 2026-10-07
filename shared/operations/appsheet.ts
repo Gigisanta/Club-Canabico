@@ -87,5 +87,7 @@ export type AppSheetInvoiceInput = z.infer<typeof appsheetInvoiceInput>;
 export function isAppSheetInvoiceTotalPending(quote: unknown): boolean {
   if (!quote || typeof quote !== "object" || Array.isArray(quote)) return false;
   const snapshot = quote as { source?: unknown; totalCalculationState?: unknown };
-  return snapshot.source === "appsheet-invoice" && snapshot.totalCalculationState !== "defined";
+  return snapshot.source === "appsheet-invoice"
+    && snapshot.totalCalculationState !== "defined"
+    && snapshot.totalCalculationState !== "staff_confirmed";
 }

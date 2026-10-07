@@ -320,7 +320,7 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
 
       const reportedCollectionId = `appsheet-reported-cash-${randomUUID()}`;
       const reportedRequest = envelope(reportedCollectionId, "CollectionReported", {
-        orderId: targetId, method: "cash", currency: "ARS", amountMinor: "500", evidence: { source: "synthetic-received-cash" },
+        orderId: targetId, method: "cash", currency: "ARS", amountMinor: "2500", evidence: { source: "synthetic-received-cash" },
       });
       const ledgerEventsBeforeReport = await db.ledgerEvent.count();
       const reported = await command(reportedRequest);
@@ -340,8 +340,13 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       assert.equal((await db.operationOrder.findUniqueOrThrow({ where: { id: targetId } })).verifiedMinor.toString(), "0");
       assert.equal(await db.commandReceipt.count({ where: { requestId: verifyRequest.requestId } }), 0);
 
+      const creditCollectionId = `appsheet-blocked-credit-report-${randomUUID()}`;
+      const creditReported = await command(envelope(creditCollectionId, "CollectionReported", {
+        orderId: targetId, method: "cash", currency: "ARS", amountMinor: "200", evidence: { source: "synthetic-pending-credit-source" },
+      }));
+      assert.equal(creditReported.body.result.effect, "reported_only");
       const creditId = `appsheet-blocked-credit-${randomUUID()}`;
-      await db.memberCredit.create({ data: { id: creditId, memberId, collectionId: reportedCollectionId, currency: "ARS", amountMinor: 200n, treatment: "member_credit" } });
+      await db.memberCredit.create({ data: { id: creditId, memberId, collectionId: creditCollectionId, currency: "ARS", amountMinor: 200n, treatment: "member_credit" } });
       await db.operationObject.create({ data: { id: creditId, kind: "credit", version: 1, createdBy: ownerId } });
       const applyCreditRequest = envelope(creditId, "MemberCreditApplied", {
         orderId: targetId, amountMinor: "100", evidence: { source: "synthetic-credit-application" },
@@ -364,15 +369,162 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       assert.equal((await db.operationOrder.findUniqueOrThrow({ where: { id: targetId } })).refundedMinor.toString(), "0");
       assert.equal(await db.commandReceipt.count({ where: { requestId: refundRequest.requestId } }), 0);
 
+      const appContext = await (await call("/operations/context")).json() as { commands: Array<{ command: string; kind: string }> };
+      assert.ok(appContext.commands.some(item => item.command === "InvoiceTotalsConfirmed" && item.kind === "order"));
+      const invalidTotals = [
+        { actor: deniedId, data: { currency: "ARS", productsTotalMinor: "1500", motoClientTotalMinor: "800", evidence: { note: "Synthetic refusal" } }, status: 403, code: "CAPABILITY_REQUIRED" },
+        { actor: ownerId, data: { currency: "USD", productsTotalMinor: "1500", motoClientTotalMinor: "800", evidence: { note: "Synthetic wrong currency" } }, status: 422, code: "INVOICE_TOTAL_CURRENCY" },
+        { actor: ownerId, data: { currency: "ARS", productsTotalMinor: "9223372036854775807", motoClientTotalMinor: "1", evidence: { note: "Synthetic overflow" } }, status: 422, code: "MONEY_RANGE" },
+        { actor: ownerId, data: { currency: "ARS", productsTotalMinor: 1500.5, motoClientTotalMinor: "800", evidence: { note: "Synthetic non-minor amount" } }, status: 400, code: undefined },
+      ] as const;
+      for (const invalid of invalidTotals) {
+        const invalidRequest = envelope(targetId, "InvoiceTotalsConfirmed", invalid.data, 1);
+        const rejected = await send(invalidRequest, invalid.actor);
+        assert.equal(rejected.response.status, invalid.status, JSON.stringify(rejected.body));
+        if (invalid.code) assert.equal(rejected.body.code, invalid.code);
+        assert.equal(await db.commandReceipt.count({ where: { requestId: invalidRequest.requestId } }), 0);
+      }
+      assert.equal((await db.operationObject.findUniqueOrThrow({ where: { id: targetId } })).version, 1);
+      const unresolvedBeforeConfirmation = await db.operationOrder.findUniqueOrThrow({ where: { id: targetId } });
+      assert.equal((unresolvedBeforeConfirmation.quote as any).totalCalculationState, "pending_definition");
+      assert.equal(unresolvedBeforeConfirmation.totalMinor.toString(), "1901");
+
+      const rowsBeforeConfirmation = await db.operationOrderLine.findMany({ where: { orderId: targetId }, orderBy: { id: "asc" } });
+      const reservationsBeforeConfirmation = await db.stockReservation.findMany({ where: { orderId: targetId }, orderBy: { id: "asc" } });
+      const deliveryCountBeforeConfirmation = await db.deliveryAssignment.count({ where: { orderId: targetId } });
+      const reservedBeforeConfirmation = (await db.stockBalance.findUniqueOrThrow({ where: { id: balanceId } })).reserved;
+      const financialResolutionRequest = envelope(targetId, "InvoiceTotalsConfirmed", {
+        currency: "ARS", productsTotalMinor: "1500", motoClientTotalMinor: "800",
+        evidence: { note: "Importes transcritos de la factura sintética revisada por el staff" },
+      }, 1);
+      const financialResolution = await command(financialResolutionRequest);
+      assert.equal(financialResolution.body.result.totalMinor, "2300");
+      assert.equal(financialResolution.body.result.totalCalculationState, "staff_confirmed");
+      assert.equal(financialResolution.body.result.totalCalculationSource, "staff_confirmation");
+      const resolution = financialResolution.body.result.financialResolution;
+      assert.deepEqual({
+        kind: resolution.kind,
+        currency: resolution.currency,
+        productsTotalMinor: resolution.productsTotalMinor,
+        motoClientTotalMinor: resolution.motoClientTotalMinor,
+        totalMinor: resolution.totalMinor,
+        evidence: resolution.evidence,
+        actorId: resolution.actorId,
+        quoteVersion: resolution.quoteVersion,
+      }, {
+        kind: "staff_confirmation", currency: "ARS", productsTotalMinor: "1500", motoClientTotalMinor: "800",
+        totalMinor: "2300", evidence: { note: "Importes transcritos de la factura sintética revisada por el staff" },
+        actorId: ownerId, quoteVersion: 1,
+      });
+      assert.match(resolution.snapshotHash, /^[a-f0-9]{64}$/);
+      assert.ok(Number.isFinite(Date.parse(resolution.confirmedAt)));
+      const resolvedDetailResponse = await call(`/operations/orders/${targetId}`);
+      assert.equal(resolvedDetailResponse.status, 200);
+      const resolvedDetail = await resolvedDetailResponse.json() as any;
+      assert.equal(resolvedDetail.order.totalMinor, "2300");
+      assert.equal(resolvedDetail.order.totalCalculationState, "staff_confirmed");
+      assert.equal(resolvedDetail.order.totalCalculationSource, "staff_confirmation");
+      assert.equal(resolvedDetail.order.financialResolution.snapshotHash, resolution.snapshotHash);
+      assert.equal(resolvedDetail.order.subtotalMinor, null);
+      assert.equal(resolvedDetail.order.subtotalCalculationState, "pending_definition");
+      assert.equal(resolvedDetail.order.quote.totalMinor, "2300");
+      assert.equal(resolvedDetail.order.quote.totalCalculationState, "staff_confirmed");
+      assert.equal(resolvedDetail.order.quote.paymentComponents.products.totalMinor, "1500");
+      assert.equal(resolvedDetail.order.quote.paymentComponents.moto.clientTotalMinor, "800");
+      assert.equal(resolvedDetail.order.quote.moto.clientTariffMinor, "700");
+      assert.equal(resolvedDetail.order.quote.moto.adminTariffMinor, "99");
+      assert.equal(resolvedDetail.order.quote.moto.totalTariffMinor, "5050");
+      assert.deepEqual(resolvedDetail.order.quote.input, unresolvedBeforeConfirmation.quote.input);
+      assert.deepEqual(resolvedDetail.order.quote.lines, unresolvedBeforeConfirmation.quote.lines);
+      assert.deepEqual(resolvedDetail.order.quote.moto, unresolvedBeforeConfirmation.quote.moto);
+      assert.deepEqual(await db.operationOrderLine.findMany({ where: { orderId: targetId }, orderBy: { id: "asc" } }), rowsBeforeConfirmation);
+      assert.deepEqual(await db.stockReservation.findMany({ where: { orderId: targetId }, orderBy: { id: "asc" } }), reservationsBeforeConfirmation);
+      assert.equal(await db.deliveryAssignment.count({ where: { orderId: targetId } }), deliveryCountBeforeConfirmation);
+      assert.equal((await db.stockBalance.findUniqueOrThrow({ where: { id: balanceId } })).reserved.toString(), reservedBeforeConfirmation.toString());
+      assert.equal(await db.ledgerEvent.count(), ledgerEventsBeforeReport);
+      assert.equal(await db.ledgerLeg.count(), ledgerLegsBefore);
+      assert.equal(await db.collectionReport.count(), collectionsBefore + 2);
+      assert.equal(await db.cashEntry.count(), cashBefore);
+
+      const staleResolution = envelope(targetId, "InvoiceTotalsConfirmed", {
+        currency: "ARS", productsTotalMinor: "1500", motoClientTotalMinor: "800", evidence: { note: "Synthetic stale attempt" },
+      }, 1);
+      const staleRejected = await send(staleResolution);
+      assert.equal(staleRejected.response.status, 409, JSON.stringify(staleRejected.body));
+      assert.equal(staleRejected.body.code, "VERSION_CONFLICT");
+      assert.equal(await db.commandReceipt.count({ where: { requestId: staleResolution.requestId } }), 0);
+      const secondResolution = envelope(targetId, "InvoiceTotalsConfirmed", {
+        currency: "ARS", productsTotalMinor: "1500", motoClientTotalMinor: "800", evidence: { note: "Synthetic second close" },
+      }, 2);
+      const secondResolutionRejected = await send(secondResolution);
+      assert.equal(secondResolutionRejected.response.status, 409, JSON.stringify(secondResolutionRejected.body));
+      assert.equal(secondResolutionRejected.body.code, "INVOICE_TOTAL_ALREADY_RESOLVED");
+      assert.equal(await db.commandReceipt.count({ where: { requestId: secondResolution.requestId } }), 0);
+      const resolutionReplay = await command(financialResolutionRequest);
+      assert.equal(resolutionReplay.body.replay, true);
+      assert.equal(await db.operationOrder.findUniqueOrThrow({ where: { id: targetId } }).then(row => row.totalMinor), 2300n);
+
+      const resolvedManifestResponse = await call(`/delivery/manifests/current?deviceId=${deviceId}`, driverId);
+      assert.equal(resolvedManifestResponse.status, 200, await resolvedManifestResponse.clone().text());
+      const resolvedManifest = await resolvedManifestResponse.json() as { assignments: Array<{ orderId: string; totalMinor: string; currency: string }> };
+      assert.deepEqual(resolvedManifest.assignments.map(item => ({ orderId: item.orderId, totalMinor: item.totalMinor, currency: item.currency })), [
+        { orderId: targetId, totalMinor: "2300", currency: "ARS" },
+      ]);
+
+      const resolutionCashId = "appsheet-resolution-cash";
+      await command(envelope(resolutionCashId, "AccountCreated", {
+        name: "Synthetic invoice cash", currency: "ARS", kind: "cash", holder: "Fixture", purpose: "AppSheet exact ledger test",
+      }));
+      await command(envelope(resolutionCashId, "AccountVerified", { evidence: { note: "Synthetic account identity review" } }, 1));
+      await command(envelope(resolutionCashId, "AccountOpeningApproved", {
+        amountMinor: "0", preparedBy: scopedId, evidence: { note: "Synthetic zero opening approved by independent staff" },
+      }, 2));
+      const verifyAfterResolutionRequest = envelope(reportedCollectionId, "CollectionVerified", {
+        accountId: resolutionCashId, evidence: { source: "synthetic-exact-ledger-after-close" },
+      }, 1);
+      const verifiedAfterResolution = await command(verifyAfterResolutionRequest);
+      assert.equal(verifiedAfterResolution.body.result.appliedMinor, "2300");
+      assert.equal(verifiedAfterResolution.body.result.excessMinor, "200");
+      const collectionLedger = await db.ledgerEvent.findFirstOrThrow({
+        where: { kind: "collection", sourceObjectId: reportedCollectionId }, include: { legs: true },
+      });
+      assert.equal(collectionLedger.legs.length, 1);
+      assert.equal(collectionLedger.legs[0]!.accountId, resolutionCashId);
+      assert.equal(collectionLedger.legs[0]!.currency, "ARS");
+      assert.equal(collectionLedger.legs[0]!.amountMinor, 2500n);
+      assert.equal((collectionLedger.metadata as any).appliedMinor, "2300");
+      assert.equal((await db.operationOrder.findUniqueOrThrow({ where: { id: targetId } })).verifiedMinor, 2300n);
+      const createdCredits = await db.memberCredit.findMany({ where: { collectionId: reportedCollectionId } });
+      assert.equal(createdCredits.length, 1);
+      assert.equal(createdCredits[0]!.id, verifiedAfterResolution.body.result.creditId);
+      assert.equal(createdCredits[0]!.amountMinor, 200n);
+      assert.equal(createdCredits[0]!.resolvedMinor, 0n);
+      const verifiedReplay = await command(verifyAfterResolutionRequest);
+      assert.equal(verifiedReplay.body.replay, true);
+      assert.equal(await db.ledgerEvent.count({ where: { kind: "collection", sourceObjectId: reportedCollectionId } }), 1);
+      assert.equal(await db.memberCredit.count({ where: { collectionId: reportedCollectionId } }), 1);
+      assert.equal((await db.operationOrder.findUniqueOrThrow({ where: { id: targetId } })).verifiedMinor, 2300n);
+
+      const genericOrderId = `appsheet-total-generic-${randomUUID()}`;
+      await command(envelope(genericOrderId, "OrderCreated", { memberId, channel: "local", currency: "ARS", address: {}, preorder: false }));
+      const genericClose = envelope(genericOrderId, "InvoiceTotalsConfirmed", {
+        currency: "ARS", productsTotalMinor: "100", motoClientTotalMinor: "0", evidence: { note: "Synthetic generic target" },
+      }, 1);
+      const genericCloseRejected = await send(genericClose);
+      assert.equal(genericCloseRejected.response.status, 409, JSON.stringify(genericCloseRejected.body));
+      assert.equal(genericCloseRejected.body.code, "INVOICE_COMMAND_MISMATCH");
+      assert.equal(await db.commandReceipt.count({ where: { requestId: genericClose.requestId } }), 0);
+
       const replay = await command(request);
       assert.equal(replay.body.replay, true);
       assert.equal(await db.operationOrder.count({ where: { id: targetId } }), 1);
       assert.equal(await db.operationOrderLine.count({ where: { orderId: targetId } }), 1);
       assert.equal(await db.deliveryAssignment.count({ where: { orderId: targetId } }), 1);
       assert.equal(await db.stockReservation.count({ where: { orderId: targetId, status: "active" } }), 1);
-      assert.deepEqual([
+      const sideEffectsBeforeInvoiceReplay = await Promise.all([
         await db.ledgerEvent.count(), await db.ledgerLeg.count(), await db.collectionReport.count(), await db.cashEntry.count(),
-      ], [ledgerEventsBefore, ledgerLegsBefore, collectionsBefore + 1, cashBefore]);
+      ]);
+      assert.deepEqual(sideEffectsBeforeInvoiceReplay, [ledgerEventsBeforeReport + 2, ledgerLegsBefore + 2, collectionsBefore + 2, cashBefore]);
     });
 
     await t.test("stock shortage rolls invoice, reservation and moto delivery back together", async () => {
@@ -500,11 +652,34 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       assert.equal(detail.reservations[0].quantity, "2");
       assert.equal(detail.deliveries.length, 0);
 
+      const invalidNoMotoClose = envelope(targetId, "InvoiceTotalsConfirmed", {
+        currency: "ARS", productsTotalMinor: "1001", motoClientTotalMinor: "1", evidence: { note: "Synthetic moto amount without moto" },
+      }, 3);
+      const noMotoRejected = await send(invalidNoMotoClose);
+      assert.equal(noMotoRejected.response.status, 422, JSON.stringify(noMotoRejected.body));
+      assert.equal(noMotoRejected.body.code, "INVOICE_MOTO_TOTAL_WITHOUT_MOTO");
+      assert.equal(await db.commandReceipt.count({ where: { requestId: invalidNoMotoClose.requestId } }), 0);
+      assert.equal((await db.operationObject.findUniqueOrThrow({ where: { id: targetId } })).version, 3);
+
+      const noMotoClose = envelope(targetId, "InvoiceTotalsConfirmed", {
+        currency: "ARS", productsTotalMinor: "1001", motoClientTotalMinor: "0", evidence: { note: "Synthetic product total confirmed by staff" },
+      }, 3);
+      const noMotoResolved = await command(noMotoClose);
+      assert.equal(noMotoResolved.body.result.totalMinor, "1001");
+      assert.equal(noMotoResolved.body.result.financialResolution.motoClientTotalMinor, "0");
+      const noMotoDetail = await (await call(`/operations/orders/${targetId}`)).json() as any;
+      assert.equal(noMotoDetail.order.totalMinor, "1001");
+      assert.equal(noMotoDetail.order.quote.paymentComponents.products.totalMinor, "1001");
+      assert.equal(noMotoDetail.order.quote.paymentComponents.moto, null);
+      assert.equal(noMotoDetail.order.quote.moto, null);
+      assert.equal(noMotoDetail.reservations.length, 1);
+      assert.equal(noMotoDetail.deliveries.length, 0);
+
       const replay = await command(confirmRequest);
       assert.equal(replay.body.replay, true);
       assert.equal(await db.deliveryAssignment.count({ where: { orderId: targetId } }), 0);
       assert.equal(await db.stockReservation.count({ where: { orderId: targetId, status: "active" } }), 1);
-      const secondConfirmation = await send(envelope(targetId, "InvoiceConfirmed", { acceptance: { reference: "second-confirmation" } }, 3));
+      const secondConfirmation = await send(envelope(targetId, "InvoiceConfirmed", { acceptance: { reference: "second-confirmation" } }, 4));
       assert.equal(secondConfirmation.response.status, 409, JSON.stringify(secondConfirmation.body));
       assert.equal(secondConfirmation.body.code, "INVOICE_NOT_PREORDER");
       assert.equal(await db.deliveryAssignment.count({ where: { orderId: targetId } }), 0);
