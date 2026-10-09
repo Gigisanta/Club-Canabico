@@ -1,5 +1,74 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import ExcelJS from "exceljs";
+import { createFinancialSourceReviewManifest, prepareFinancialSourceStage, stageFinancialSource } from "../../server/operations/financial-source-stage.js";
 import { expect, test } from "./isolated";
+
+const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
+const backupScript = join(repositoryRoot, "scripts/operations-backup.mjs");
+const sourceFixtureKey = "c".repeat(64);
+const sourcePiiSentinel = "SYNTHETIC_USER_ROW_MUST_NOT_BE_STAGED";
+
+function sourceFixtureRows(prefix: string) {
+  return [
+    ["2026-08-31", "Ingreso", "Caja sintética A", 125.5, "ARS", `${prefix}-ars-in`],
+    ["2026-08-31", "Egreso", "Caja sintética A", 25.25, "ARS", `${prefix}-ars-out`],
+    ["2026-09-01", "Ingreso", "Caja sintética USD", 10, "USD", `${prefix}-usd-in`],
+    ["2026-10-09", "Ingreso", "Caja sintética A", "30.00", "ARS", `${prefix}-future-text-amount`],
+    [null, "Ingreso", "Caja sintética A", 15, "ARS", `${prefix}-missing-date`],
+    ["2026-08-20", "Ingreso", "Caja sintética USD", "no-numérico", "USD", `${prefix}-invalid-amount`],
+    ["2026-08-22", "Ingreso", "Caja sintética A", 30, "ARS", `${prefix}-duplicate-key`],
+    ["2026-08-23", "Ingreso", "", 40, "ARS", `${prefix}-duplicate-key`],
+  ] as const;
+}
+
+async function sourceFixtureWorkbook(prefix: string) {
+  const workbook = new ExcelJS.Workbook();
+  const movements = workbook.addWorksheet("Movimiento_Nueva");
+  movements.addRow(["Fecha", "Tipo_Movimiento", "Caja", "Monto", "Tipo_Moneda", "ID_Movimiento_Unique"]);
+  for (const row of sourceFixtureRows(prefix)) movements.addRow([...row]);
+  const users = workbook.addWorksheet("T_Usuarios");
+  users.addRow(["ID_Usuario", "Nombre", "Contraseña", "Token"]);
+  users.addRow(["synthetic-user", sourcePiiSentinel, "synthetic-password", "synthetic-token"]);
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+function runSourceBackup(directory: string, databaseUrl: string, privateObjectRoot: string) {
+  return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveResult, reject) => {
+    const env: Record<string, string> = {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      NODE_ENV: "test",
+      DATABASE_URL: databaseUrl,
+      BACKUP_ENCRYPTION_KEY: sourceFixtureKey,
+      PRIVATE_OBJECT_ROOT: privateObjectRoot,
+      PRIVATE_OBJECT_PROVIDER: "local",
+      PRIVATE_S3_BUCKET: "",
+      ...(process.env.PG_BIN ? { PG_BIN: process.env.PG_BIN } : {}),
+    };
+    const child = spawn(process.execPath, [backupScript, "backup", directory], {
+      cwd: repositoryRoot,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => resolveResult({ code, stdout, stderr }));
+  });
+}
+
+function safeSourceBackupOutput(result: { stdout: string; stderr: string; databaseUrl: string }) {
+  return `${result.stdout}\n${result.stderr}`
+    .split(sourceFixtureKey).join("[synthetic fixture key]")
+    .split(result.databaseUrl).join("[isolated PostgreSQL URL redacted]")
+    .replace(/postgres(?:ql)?:\/\/[^\s"'`]+/gi, "[PostgreSQL URL redacted]");
+}
 
 test.use({ timezoneId: "Pacific/Kiritimati" });
 
@@ -134,4 +203,152 @@ test("financial statements keep an unobserved period pending and preserve local 
     viewport: { desktop: desktopWidth, mobile: mobileWidth },
     localFinanceViews: ["Resumen local", "Caja", "Planificación"],
   }, null, 2)}\n`);
+});
+
+test("financial source panel reads an isolated staged snapshot with separate ARS and USD observations", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  expect(process.env.BOMBO_E2E_ISOLATED).toBe("1");
+  const databaseURL = new URL(process.env.DATABASE_URL ?? "");
+  expect(["127.0.0.1", "localhost", "[::1]", "::1"]).toContain(databaseURL.hostname);
+  expect(databaseURL.searchParams.get("schema")).toMatch(/^bombo_e2e_[a-z0-9_]+$/i);
+  const financeQaRoot = resolve(repositoryRoot, ".local/finance-qa");
+  expect(process.env.PG_BIN && isAbsolute(process.env.PG_BIN)).toBe(true);
+  expect(process.env.E2E_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  expect(process.env.PRIVATE_OBJECT_PROVIDER).toBe("local");
+  expect(process.env.PRIVATE_S3_BUCKET ?? "").toBe("");
+
+  await mkdir(financeQaRoot, { recursive: true });
+  const temporaryRoot = await mkdtemp(join(financeQaRoot, "financial-source-browser-"));
+  const backupDirectory = join(temporaryRoot, "encrypted-backup");
+  const filename = basename(`synthetic-financial-source-${randomUUID()}.xlsx`);
+  const originalBackupEncryptionKey = process.env.BACKUP_ENCRYPTION_KEY;
+  process.env.BACKUP_ENCRYPTION_KEY = sourceFixtureKey;
+
+  try {
+    const configuredPrivateObjectRoot = process.env.PRIVATE_OBJECT_ROOT ?? "";
+    expect(isAbsolute(configuredPrivateObjectRoot)).toBe(true);
+    const privateObjectRoot = resolve(configuredPrivateObjectRoot);
+    expect(dirname(privateObjectRoot)).toBe(resolve(tmpdir()));
+    expect(basename(privateObjectRoot)).toMatch(/^bombo-e2e-private-.+/);
+    const privateObjectRootStat = await stat(privateObjectRoot);
+    expect(privateObjectRootStat.isDirectory()).toBe(true);
+    expect(privateObjectRootStat.mode & 0o777).toBe(0o700);
+    const backup = await runSourceBackup(backupDirectory, databaseURL.toString(), privateObjectRoot);
+    const safeBackupOutput = safeSourceBackupOutput({ ...backup, databaseUrl: databaseURL.toString() });
+    expect(backup.code, safeBackupOutput).toBe(0);
+    const backupSummary = JSON.parse(backup.stdout) as {
+      mode: string;
+      encrypted: boolean;
+      scope: string;
+      files: number;
+      objectReuse: { sourceObjectReads: number; reusedDocuments: number };
+    };
+    expect(backupSummary).toMatchObject({
+      mode: "backup",
+      encrypted: true,
+      scope: "confirmed-server-state-only",
+    });
+    expect(backupSummary.files).toBeGreaterThanOrEqual(1);
+    expect(backupSummary.objectReuse.sourceObjectReads).toBe(1);
+    expect(backupSummary.objectReuse.reusedDocuments).toBe(0);
+
+    const bytes = await sourceFixtureWorkbook(randomUUID());
+    const prepared = await prepareFinancialSourceStage(bytes, filename);
+    expect(prepared.snapshot.fileHash).toBe(createHash("sha256").update(bytes).digest("hex"));
+    expect(prepared.snapshot.sheets.map(sheet => sheet.name)).toEqual(["Movimiento_Nueva"]);
+    expect(JSON.stringify(prepared)).not.toContain(sourcePiiSentinel);
+    const staged = await stageFinancialSource(prepared, {
+      filename,
+      reviewManifest: createFinancialSourceReviewManifest(prepared.reconciliationManifest),
+      backupReference: backupDirectory,
+    });
+    expect(staged.status).toBe("staged");
+    expect(staged.recordCount).toBe(8);
+    expect(staged.eligibleCount).toBe(3);
+    expect(staged.excludedCount).toBe(5);
+
+    const sourcePath = "/api/reports/operations/financial-source-reconciliation";
+    const unauthenticated = await page.request.get(new URL(sourcePath, process.env.E2E_BASE_URL).toString());
+    expect(unauthenticated.status()).toBe(401);
+
+    await page.goto("/app/operations");
+    await page.getByRole("button", { name: "Explorar club de demostración" }).click();
+    await expect(page.locator(".ops-home-page")).toBeVisible();
+    const sourceResponsePromise = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return response.request().method() === "GET" && url.pathname === sourcePath;
+    });
+    await page.goto("/app/finanzas?from=2026-08-01&to=2026-10-08&currency=ARS");
+    const sourceResponse = await sourceResponsePromise;
+    expect(sourceResponse.status()).toBe(200);
+    const report = await sourceResponse.json();
+    expect(report).toMatchObject({
+      report: "operations-financial-source-reconciliation",
+      cutoffDate: "2026-10-08",
+      latestObservedDate: "2026-09-01",
+      completeness: "technical-source-reconciled",
+      sourceUnapproved: true,
+      createsBalances: false,
+      currentPeriodStatus: "unknown",
+      periods: [
+        { month: "2026-08", currency: "ARS", count: 2, inflowMinor: "12550", outflowMinor: "2525", netMovementMinor: "10025" },
+        { month: "2026-09", currency: "USD", count: 1, inflowMinor: "1000", outflowMinor: "0", netMovementMinor: "1000" },
+      ],
+    });
+    expect(report.sources).toHaveLength(1);
+    expect(report.sources[0]).toMatchObject({
+      filename,
+      status: "staged",
+      sourceReviewApproved: false,
+      loadedCount: 8,
+      eligibleCount: 3,
+      excludedCount: 5,
+      latestObservedDate: "2026-09-01",
+      technicalReconciliation: "reconciled",
+      controlComparison: { exact: true, scope: true, periods: true },
+      exclusionCounts: {
+        missingDate: 1,
+        invalidDate: 0,
+        futureDate: 1,
+        nonNumericAmount: 2,
+        negativeAmount: 0,
+        invalidMovementType: 0,
+        invalidCurrency: 0,
+        blankCashBox: 1,
+        duplicateIdentity: 2,
+      },
+    });
+    expect(JSON.stringify(report)).not.toContain(sourcePiiSentinel);
+
+    const sourceCard = page.locator(".financial-source-card");
+    const sourceSnapshot = sourceCard.locator(".financial-source-snapshot");
+    await expect(sourceSnapshot).toBeVisible();
+    await expect(sourceSnapshot.locator(".financial-source-status")).toContainText("STAGED · sin aprobación humana");
+    const periodRows = sourceSnapshot.locator(".financial-source-table tbody tr");
+    await expect(periodRows).toHaveCount(2);
+    await expect(periodRows.nth(0).locator("td")).toHaveText(["ARS", "2", "ARS 125,50", "ARS 25,25", "ARS 100,25"]);
+    await expect(periodRows.nth(1).locator("td")).toHaveText(["USD", "1", "USD 10,00", "USD 0,00", "USD 10,00"]);
+    const exclusionDetails = sourceSnapshot.locator(".financial-source-exclusions");
+    await exclusionDetails.locator("summary").click();
+    await expect(exclusionDetails.locator("li").filter({ hasText: "Identidad duplicada" }).locator("strong")).toHaveText("2");
+
+    await mkdir(join(repositoryRoot, ".local/finance-qa"), { recursive: true });
+    const desktopWidth = await page.evaluate(() => ({ viewport: window.innerWidth, document: document.documentElement.scrollWidth }));
+    expect(desktopWidth.viewport).toBe(1280);
+    expect(desktopWidth.document).toBeLessThanOrEqual(desktopWidth.viewport);
+    await sourceCard.screenshot({ path: ".local/finance-qa/financial-source-staged-desktop.png", animations: "disabled" });
+
+    await sourceCard.getByRole("button", { name: "Ver último período con datos" }).click();
+    await expect(page.getByLabel("Desde")).toHaveValue("2026-09-01");
+    await expect(page.getByLabel("Hasta")).toHaveValue("2026-09-30");
+    await page.setViewportSize({ width: 390, height: 844 });
+    const mobileWidth = await page.evaluate(() => ({ viewport: window.innerWidth, document: document.documentElement.scrollWidth }));
+    expect(mobileWidth.viewport).toBe(390);
+    expect(mobileWidth.document).toBeLessThanOrEqual(mobileWidth.viewport);
+    await sourceCard.screenshot({ path: ".local/finance-qa/financial-source-staged-mobile.png", animations: "disabled" });
+  } finally {
+    if (originalBackupEncryptionKey === undefined) delete process.env.BACKUP_ENCRYPTION_KEY;
+    else process.env.BACKUP_ENCRYPTION_KEY = originalBackupEncryptionKey;
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
 });

@@ -6,6 +6,7 @@ import type { Capability } from "../../shared/operations/contracts.js";
 import { capabilities, objectScope, OperationError, requireCapability, wire } from "./core.js";
 import { queryOperationsReport, reportTodayCivilDate, supportsReportScope, validateReportScope, type ReportScope } from "./report-queries.js";
 import { queryFinancialStatementsReport } from "./financial-report.js";
+import { parseFinancialSourceReportParams, queryFinancialSourceReconciliationReport } from "./financial-source-report.js";
 
 export const reportAreaIds = [
   "sales-revenue",
@@ -618,4 +619,18 @@ operationsReports.get("/financial-statements", async (req, res) => {
     throw new OperationError(403, "REPORT_SCOPE_UNSUPPORTED", "El informe financiero consolidado requiere alcance completo en todas sus fuentes");
   }
   res.json(wire(await queryFinancialStatementsReport(params, scope)));
+});
+
+operationsReports.get("/financial-source-reconciliation", async (req, res) => {
+  await requireCapability(db, req.user, "reports.read");
+  await requireCapability(db, req.user, "finance.read");
+  await requireCapability(db, req.user, "imports.review");
+  const today = reportTodayCivilDate();
+  const params = parseFinancialSourceReportParams(req.query, today);
+  const scope = await objectScope(db, req.user);
+  validateReportScope(scope);
+  if (Object.values(scope).some(value => value !== undefined)) {
+    throw new OperationError(403, "REPORT_SCOPE_UNSUPPORTED", "El reporte de fuentes financieras requiere alcance completo; no puede filtrar objetos individuales");
+  }
+  res.json(wire(await queryFinancialSourceReconciliationReport(params.cutoffDate, today)));
 });

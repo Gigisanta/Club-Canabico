@@ -163,6 +163,10 @@ export interface LegacyWorkbookSnapshot {
 export interface ReadLegacyWorkbookOptions {
   sourceSystem?: string;
   importerVersion?: string;
+  /** Restricts record extraction to these sheets. Unselected sheets remain unprocessed. */
+  allowedSheets?: readonly string[];
+  /** Explicit source key header overrides by sheet name. */
+  primaryKeyHeaders?: Readonly<Record<string, string>>;
 }
 
 export class LegacyWorkbookReadError extends Error {
@@ -743,11 +747,12 @@ function buildRecord(
   headerRow: number | null,
   safeColumns: Array<{ index: number; header: string | null; originalHeader: string | null }>,
   sourceCells: Map<string, SourceCellXml>,
+  primaryKeyHeaders: Readonly<Record<string, string>>,
 ): LegacySourceSnapshotRecord | null {
   const originalColumns: LegacyOriginalColumn[] = [];
   const normalizedColumns: LegacyNormalizedColumn[] = [];
   const exceptions: LegacyReaderException[] = [];
-  const sourceKeyHeader = SOURCE_KEY_HEADERS[worksheet.name];
+  const sourceKeyHeader = primaryKeyHeaders[worksheet.name] ?? SOURCE_KEY_HEADERS[worksheet.name];
   const sourceKeyMatches = safeColumns.filter((column) => column.header?.trim() === sourceKeyHeader);
   const sourceKeyColumn = sourceKeyMatches.length === 1 ? sourceKeyMatches[0] : null;
   let nonempty = false;
@@ -882,6 +887,21 @@ export async function readLegacyWorkbook(
   const bytes = Buffer.isBuffer(input) ? input : Buffer.from(input);
   const zipEntries = validateXlsxArchive(bytes);
   const sourceSheetFiles = readWorkbookSheetXml(bytes, zipEntries);
+  let allowedSheets: Set<string> | null = null;
+  if (options.allowedSheets !== undefined) {
+    if (!Array.isArray(options.allowedSheets) || options.allowedSheets.length === 0 || options.allowedSheets.length > MAX_WORKSHEETS ||
+        options.allowedSheets.some((name) => typeof name !== "string" || !name.trim() || name.length > 120))
+      fail("invalid_reader_options", "La allowlist de hojas XLSX no es válida.");
+    allowedSheets = new Set(options.allowedSheets);
+    if (allowedSheets.size !== options.allowedSheets.length || [...allowedSheets].some((name) => !sourceSheetFiles.has(name)))
+      fail("invalid_reader_options", "La allowlist contiene hojas repetidas o ausentes.");
+  }
+  const primaryKeyHeaders = options.primaryKeyHeaders ?? {};
+  for (const [sheet, header] of Object.entries(primaryKeyHeaders)) {
+    if (!sheet.trim() || !header.trim() || sheet.length > 120 || header.length > 120 || !sourceSheetFiles.has(sheet) ||
+        allowedSheets && !allowedSheets.has(sheet))
+      fail("invalid_reader_options", "La clave primaria explícita no coincide con las hojas permitidas.");
+  }
   const importerVersion = options.importerVersion?.trim() || legacyReaderVersion;
   const sourceSystem = options.sourceSystem?.trim() || "appsheet";
   if (importerVersion.length > 120 || sourceSystem.length > 120)
@@ -901,6 +921,7 @@ export async function readLegacyWorkbook(
   const records: LegacySourceSnapshotRecord[] = [];
   let totalSerializedBytes = 0;
   for (const worksheet of workbook.worksheets) {
+    if (allowedSheets && !allowedSheets.has(worksheet.name)) continue;
     if(containsRecognizableCredential(worksheet.name))fail("credential_metadata_excluded","Una hoja contiene material de autenticación en su identificador; corregí la fuente antes de importarla.");
     const sourceSheetRef = sourceSheetFiles.get(worksheet.name);
     if (!sourceSheetRef) fail("invalid_xlsx_metadata", "No se encontró la relación XML de una hoja del XLSX.");
@@ -936,7 +957,7 @@ export async function readLegacyWorkbook(
     worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
       if (rowNumber < firstDataRow) return;
       if (rowNumber > MAX_ROWS_PER_SHEET) fail("worksheet_row_limit", "Una hoja XLSX supera el límite de filas.");
-      const record = buildRecord(worksheet, row, rowNumber, fileHash, importerVersion, headerRow, safeColumns, sourceSheetXml.cells);
+      const record = buildRecord(worksheet, row, rowNumber, fileHash, importerVersion, headerRow, safeColumns, sourceSheetXml.cells, primaryKeyHeaders);
       if (!record) return;
       records.push(record);
       if (records.length > MAX_RECORDS) fail("record_count_limit", "El XLSX supera el límite de registros.");
@@ -970,7 +991,7 @@ export async function readLegacyWorkbook(
   for (const record of records) {
     if (record.treatment !== "fact_candidate" || record.sourceKey.startsWith("synthetic:")) continue;
     if ((keyCounts.get(`${record.sourceTable}\u0000${record.sourceKey}`) ?? 0) > 1) {
-      addException(record, "duplicate_source_key", "blocking", { field: SOURCE_KEY_HEADERS[record.sourceTable] ?? null });
+      addException(record, "duplicate_source_key", "blocking", { field: primaryKeyHeaders[record.sourceTable] ?? SOURCE_KEY_HEADERS[record.sourceTable] ?? null });
       refreshContentHash(record);
     }
   }

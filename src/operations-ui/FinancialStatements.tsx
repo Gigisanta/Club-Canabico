@@ -4,6 +4,7 @@ import { apiGet, hasCapability, OperationsApiError } from "./api";
 import { formatMinor } from "./money";
 import type { FinancialReportCoverage as CoverageRow, FinancialReportCurrency, FinancialReportState, FinancialStatementsReport } from "../../shared/operations/financial-report";
 import type { OperationsContext } from "./types";
+import { FinancialSourceReconciliation } from "./FinancialSourceReconciliation";
 import "./financial-statements.css";
 
 type Currency = FinancialReportCurrency;
@@ -413,6 +414,13 @@ export function FinancialStatements() {
     setSearchParams(next);
   }
 
+  function selectSourcePeriod(period: { from: string; to: string }) {
+    const next = new URLSearchParams(searchParams);
+    next.set("from", period.from);
+    next.set("to", period.to);
+    setSearchParams(next);
+  }
+
   const contextForbidden = context.error?.status === 403 || context.error?.code === "CAPABILITY_REQUIRED";
   const reportForbidden = report.error?.status === 403 || report.error?.code === "CAPABILITY_REQUIRED";
   const forbidden = contextForbidden || (context.data !== null && !canRead) || reportForbidden;
@@ -435,6 +443,14 @@ export function FinancialStatements() {
     {forbidden && <div className="financial-report-blocked" role="status"><strong>Acceso financiero no disponible</strong><p>El perfil actual necesita los permisos de lectura financiera y de informes. El servidor mantiene la autorización vigente.</p></div>}
     {loading && !forbidden && <p className="financial-report-loading" role="status">Cargando informes del período…</p>}
     {report.error && !reportForbidden && <div className="financial-report-error" role="alert"><p>{report.error.message}</p><button type="button" onClick={report.retry}>Reintentar</button></div>}
+    <FinancialSourceReconciliation
+      context={context.data}
+      contextLoading={context.loading}
+      contextError={context.error?.message ?? null}
+      contextForbidden={contextForbidden}
+      onRetryContext={context.retry}
+      onSelectPeriod={selectSourcePeriod}
+    />
     {report.data && !report.error && <>
       <p className="financial-report-period-note">Período consultado: {dateLabel(report.data.period.from)}–{dateLabel(report.data.period.to)} · corte {dateLabel(report.data.period.cutoffDate)} · moneda {report.data.currency}.</p>
       <FinancialReportScreen report={report.data} context={context.data!} />
