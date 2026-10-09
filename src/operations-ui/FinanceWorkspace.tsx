@@ -1,7 +1,10 @@
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import { z } from "zod";
+import type { DecisionInputAttestationInput } from "../../shared/operations/decision-inputs";
+import { clearPendingAttestationRequest, fingerprintAttestationPayload, readPendingAttestationRequest, writePendingAttestationRequest } from "../attestation-request";
 import { FinancialStatements } from "./FinancialStatements";
-import { hasCapability } from "./api";
+import { apiPost, hasCapability, isUncertainCommandOutcome } from "./api";
 import { DataTable, EmptyState, ErrorState, InfoBand, LoadingState, SectionHeading, StatusTag } from "./Primitives";
 import { useRemote } from "./useRemote";
 import { formatMinor } from "./money";
@@ -252,7 +255,191 @@ function ScenarioCard({ scenario }: { scenario: Scenario }) {
   </article>;
 }
 
-function ProjectionSummary({ report }: { report: ProjectionReport }) {
+function PayablesCoverageAttestation({ fromDate, throughDate, userId, onRefresh }: { fromDate: string | null; throughDate: string | null; userId: string; onRefresh: () => void }) {
+  const [from, setFrom] = useState(fromDate ?? "");
+  const [through, setThrough] = useState(throughDate ?? "");
+  const [sourceReference, setSourceReference] = useState("");
+  const [complete, setComplete] = useState(false);
+  const [humanReview, setHumanReview] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [outcomeUncertain, setOutcomeUncertain] = useState(false);
+  const [retrySamePayload, setRetrySamePayload] = useState(false);
+  const [recoveryRequired, setRecoveryRequired] = useState(false);
+  const [requestId, setRequestId] = useState<string>(() => crypto.randomUUID());
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const previousHorizon = useRef({ from: fromDate, through: throughDate });
+
+  useEffect(() => {
+    if ((!fromDate || !throughDate) && !outcomeUncertain) setComplete(false);
+  }, [fromDate, outcomeUncertain, throughDate]);
+
+  useEffect(() => {
+    if (!fromDate || !throughDate) return;
+    if (previousHorizon.current.from === fromDate && previousHorizon.current.through === throughDate) return;
+    previousHorizon.current = { from: fromDate, through: throughDate };
+    if (outcomeUncertain) {
+      setError("El horizonte del informe cambió mientras esta declaración tenía un resultado incierto. Conservé el período, la referencia y el mismo ID; confirmá la reintención idéntica antes de preparar otro período.");
+      return;
+    }
+    setFrom(fromDate);
+    setThrough(throughDate);
+    setComplete(false);
+    setHumanReview(false);
+    setRequestId(crypto.randomUUID());
+    setSaved(false);
+    setRetrySamePayload(false);
+    setError("");
+    setNotice("Cambió el horizonte: actualicé las fechas y conservé la referencia. Revisá de nuevo la fuente antes de declarar la cobertura.");
+  }, [from, fromDate, outcomeUncertain, through, throughDate]);
+
+  function changed(event: ChangeEvent<HTMLFormElement>) {
+    if (event.target instanceof HTMLInputElement && event.target.name === "retrySamePayload") return;
+    if (outcomeUncertain) return;
+    setRequestId(crypto.randomUUID());
+    setSaved(false);
+    setNotice("");
+    setError("");
+    setRetrySamePayload(false);
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setNotice("");
+    setError("");
+    let requestWasSent = false;
+    try {
+      if (!civilDate.safeParse(from).success || !civilDate.safeParse(through).success)
+        throw new Error("Indicá fechas válidas para el período.");
+      if (from > through) throw new Error("La fecha inicial debe ser anterior o igual a la final.");
+      if ((Date.parse(`${through}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000 > 730)
+        throw new Error("El período de cobertura no puede superar dos años.");
+      if (!sourceReference.trim() || sourceReference.trim().length < 3 || sourceReference.trim().length > 240)
+        throw new Error("La referencia debe tener entre 3 y 240 caracteres.");
+      if (!humanReview) throw new Error("Confirmá que revisaste el período, la cobertura y la referencia.");
+
+      const input: DecisionInputAttestationInput = {
+        domain: "payables",
+        scenario: null,
+        fromDate: from,
+        throughDate: through,
+        complete,
+        sourceReference: sourceReference.trim(),
+        requestId,
+      };
+      if (!outcomeUncertain) {
+        const pendingRead = await readPendingAttestationRequest("finance-payables", userId);
+        if (!pendingRead.ok) {
+          setError("No pude comprobar ni guardar el identificador de recuperación en esta pestaña. No envié la declaración; habilitá el almacenamiento de sesión e intentá otra vez.");
+          return;
+        }
+        const pending = pendingRead.record;
+        if (pending) {
+          const fingerprint = await fingerprintAttestationPayload(input, userId);
+          setRecoveryRequired(true);
+          if (!fingerprint || fingerprint !== pending.fingerprint) {
+            setError("Hay una declaración previa cuyo resultado no se confirmó. Reconstruí exactamente sus fechas, referencia y cobertura; no enviaré otro contenido hasta resolverla.");
+            return;
+          }
+          setRequestId(pending.requestId);
+          setOutcomeUncertain(true);
+          setRetrySamePayload(false);
+          setRecoveryRequired(false);
+          setError("Encontré un reintento pendiente para este mismo borrador. No lo envié todavía; confirmá abajo el reintento idéntico con el ID existente.");
+          return;
+        }
+        if (complete && (!fromDate || !throughDate || from !== fromDate || through !== throughDate))
+          throw new Error(fromDate && throughDate
+            ? `Para declarar completa la cobertura del horizonte, usá exactamente ${dateLabel(fromDate)}–${dateLabel(throughDate)}.`
+            : "El informe todavía no ofrece un horizonte válido para declarar cobertura completa.");
+        const fingerprint = await fingerprintAttestationPayload(input, userId);
+        if (!fingerprint) {
+          setError("No pude preparar un fingerprint seguro para recuperar esta solicitud. No envié la declaración; intentá desde una pestaña con Web Crypto habilitado.");
+          return;
+        }
+        if (!await writePendingAttestationRequest("finance-payables", userId, { requestId, fingerprint })) {
+          setError("No pude guardar el ID de recuperación en esta pestaña. No envié la declaración; habilitá el almacenamiento de sesión e intentá otra vez.");
+          return;
+        }
+      }
+      let receipt: unknown;
+      try {
+        requestWasSent = true;
+        receipt = await apiPost<unknown>("/api/decision-inputs/attestations", input);
+      } catch (cause) {
+        if (isUncertainCommandOutcome(cause)) {
+          setOutcomeUncertain(true);
+          setRetrySamePayload(false);
+          setRecoveryRequired(false);
+          setError("El servidor no confirmó el resultado. Conservé los datos y el mismo ID; podés confirmar abajo un reintento idéntico para recuperar el comprobante sin duplicar la declaración.");
+          onRefresh();
+          return;
+        }
+        throw cause;
+      }
+      if (!receipt || typeof receipt !== "object" || typeof (receipt as { id?: unknown }).id !== "string" || !(receipt as { id: string }).id.trim() ||
+          (receipt as { id: string }).id !== requestId || (receipt as { complete?: unknown }).complete !== complete) {
+        setOutcomeUncertain(true);
+        setRetrySamePayload(false);
+        setRecoveryRequired(false);
+        setError("El comprobante no coincide con esta declaración. Conservé los datos y el mismo ID; podés confirmar abajo un reintento idéntico para recuperar el comprobante.");
+        onRefresh();
+        return;
+      }
+      await clearPendingAttestationRequest("finance-payables", userId, requestId);
+      setOutcomeUncertain(false);
+      setRetrySamePayload(false);
+      setRecoveryRequired(false);
+      setRequestId(crypto.randomUUID());
+      const horizonChanged = Boolean(fromDate && throughDate && (from !== fromDate || through !== throughDate));
+      if (horizonChanged && fromDate && throughDate) {
+        setFrom(fromDate);
+        setThrough(throughDate);
+        setComplete(false);
+        setHumanReview(false);
+        setSaved(false);
+        setNotice(`La declaración anterior se confirmó. El informe ahora usa ${dateLabel(fromDate)}–${dateLabel(throughDate)}; conservé la referencia y actualicé las fechas. Revisá de nuevo la fuente antes de otra declaración.`);
+      } else {
+        setSaved(true);
+        setNotice(complete
+          ? "Declaración completa registrada. Documenta la cobertura declarada; no verifica la fuente ni aprueba automáticamente las cifras del informe."
+          : "Declaración parcial registrada como la última revisión. No certifica cobertura completa ni aprueba automáticamente las cifras del informe.");
+      }
+      onRefresh();
+    } catch (cause) {
+      if (requestWasSent) {
+        await clearPendingAttestationRequest("finance-payables", userId, requestId);
+        setRecoveryRequired(false);
+      }
+      setOutcomeUncertain(false);
+      setRetrySamePayload(false);
+      setError(cause instanceof Error ? cause.message : "No se pudo registrar la atestación.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <section className="ops-sheet" aria-labelledby="finance-payables-attestation-title">
+    <div className="ops-sheet-head"><div><span className="ops-kicker">Declaración manual · sin crear obligaciones</span><h3 id="finance-payables-attestation-title">Documentar cobertura de obligaciones</h3></div></div>
+    <p className="ops-small-note">Revisá la fuente real que cubre los vencimientos del horizonte y anotá una referencia descriptiva. El formulario no importa, verifica ni crea obligaciones; la declaración documenta cobertura, pero no verifica la fuente ni aprueba automáticamente las cifras del informe. El servidor exige rol de propietario o administrador. No ingreses claves ni tokens.</p>
+    <form className="ops-form-grid finance-attestation-form" aria-busy={saving} onSubmit={(event) => void submit(event)} onChange={changed}>
+      <label className="ops-field"><span>Desde · inicio del horizonte de 13 semanas</span><input type="date" value={from} disabled={saving || outcomeUncertain} onChange={event => setFrom(event.target.value)} required /></label>
+      <label className="ops-field"><span>Hasta · cierre del horizonte de 13 semanas</span><input type="date" value={through} disabled={saving || outcomeUncertain} onChange={event => setThrough(event.target.value)} required /></label>
+      <label className="ops-field"><span>Referencia humana de la fuente</span><input type="text" value={sourceReference} maxLength={240} disabled={saving || outcomeUncertain} onChange={event => setSourceReference(event.target.value)} placeholder="Planilla de vencimientos · corte y responsable…" required /><small>Usá un nombre o referencia verificable que cubra el período completo.</small></label>
+      <label className="ops-field ops-field-check"><input type="checkbox" checked={complete} disabled={saving || outcomeUncertain || !fromDate || !throughDate} onChange={event => setComplete(event.target.checked)} /><span>Declaro que esta fuente incluye todas las obligaciones entre las fechas indicadas.</span></label>
+      <label className="ops-field ops-field-check"><input type="checkbox" checked={humanReview} disabled={saving || outcomeUncertain} onChange={event => setHumanReview(event.target.checked)} required /><span>Revisé el período y la fuente citada.</span></label>
+      {outcomeUncertain && <label className="ops-field ops-field-check"><input type="checkbox" name="retrySamePayload" checked={retrySamePayload} disabled={saving} onChange={event => setRetrySamePayload(event.target.checked)} /><span>Confirmo reintentar exactamente el mismo período, referencia y declaración con el mismo ID.</span></label>}
+      {recoveryRequired && !outcomeUncertain && <p className="ops-inline-error finance-attestation-message" role="status">Hay una declaración pendiente de recuperar. Reconstruí el borrador original; se comparará sin guardar el texto y se bloqueará cualquier payload distinto.</p>}
+      {error && <p className="ops-inline-error finance-attestation-message" role="alert">{error}</p>}
+      {notice && <p className="ops-small-note finance-attestation-message" role="status">{notice}</p>}
+      <button className="ops-button finance-attestation-submit" type="submit" disabled={saving || saved || (outcomeUncertain && !retrySamePayload)}>{saving ? "Guardando…" : saved ? "Atestación registrada" : outcomeUncertain ? "Reintentar la misma declaración" : "Guardar declaración de cobertura"}</button>
+    </form>
+  </section>;
+}
+
+function ProjectionSummaryContent({ report }: { report: ProjectionReport }) {
   const metrics = report.metrics;
   const complete = metrics.sourceCoverage === "complete" && metrics.payableSummaryComplete && metrics.weekly !== null;
   return <section className="finance-projection-panel" aria-labelledby="finance-projection-title">
@@ -293,9 +480,17 @@ function ProjectionSummary({ report }: { report: ProjectionReport }) {
   </section>;
 }
 
-export function FinanceWorkspace({ context, refreshKey }: WorkspaceProps) {
+function ProjectionSummary({ report, attestation }: { report: ProjectionReport | null; attestation: ReactNode }) {
+  return <>
+    {report ? <ProjectionSummaryContent report={report} /> : null}
+    <div className="finance-attestation-slot">{attestation}</div>
+  </>;
+}
+
+export function FinanceWorkspace({ context, refreshKey, onRefresh }: WorkspaceProps) {
   const [searchParams] = useSearchParams();
   const allowed = hasCapability(context, "finance.read") && hasCapability(context, "reports.read");
+  const canAttestPayables = context.canManageDecisionInputs === true;
   const today = todayInReportTimeZone();
   const selectedDate = searchParams.get("to") ?? today;
   const validDate = civilDate.safeParse(selectedDate).success && selectedDate <= today;
@@ -305,6 +500,9 @@ export function FinanceWorkspace({ context, refreshKey }: WorkspaceProps) {
   const resource = useRemote<unknown>(summaryPath, refreshKey);
   const parsed = resource.data === null ? null : reportResponse.safeParse(resource.data);
   const validReport = parsed?.success ? parsed.data.summary : null;
+  const attestation = canAttestPayables
+    ? <PayablesCoverageAttestation fromDate={validReport?.metrics.horizon.from ?? null} throughDate={validReport?.metrics.horizon.through ?? null} userId={context.userId} onRefresh={onRefresh} />
+    : <p className="ops-small-note">La lectura del informe sigue disponible. Solo un propietario o administrador puede registrar esta declaración.</p>;
 
   const links = <nav className="financial-workspace-nav" aria-label="Herramientas financieras">
     {hasCapability(context, "finance.read") && <SectionLink section="payables" label="Obligaciones" searchParams={searchParams} />}
@@ -322,6 +520,6 @@ export function FinanceWorkspace({ context, refreshKey }: WorkspaceProps) {
     <div className="finance-projection-heading"><SectionHeading eyebrow="Informe del servidor · separado de los resultados históricos" title="Caja proyectada y obligaciones" detail="Horizonte de 13 semanas anclado a la fecha elegida arriba; escenarios ARS y USD por separado." /></div>
     {reportError(summaryPath, resource.data, resource.loading, resource.error, resource.retry)}
     {resource.data !== null && parsed && !parsed.success && <ErrorState message="La respuesta del informe no coincide con el formato esperado. No se muestran cifras parciales; reintentá para obtener una respuesta válida." retry={resource.retry} />}
-    {validReport && <ProjectionSummary report={validReport} />}
+    <ProjectionSummary report={validReport} attestation={attestation} />
   </div>;
 }

@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { atomic, db, getSettings } from "./db.js";
 import { businessDate } from "../shared/domain.js";
 import { HttpError } from "./validation.js";
 import { hasSensitiveFinancialReference, safeFinancialReference } from "./operations/financial-reference.js";
+import { decisionInputAttestationDomains } from "../shared/operations/decision-inputs.js";
 
 export const decisionInputs = Router();
 const int64Min = -(2n ** 63n);
@@ -217,13 +219,41 @@ decisionInputs.post("/decision-inputs/cash-plans", async (req, res) => {
 
 decisionInputs.post("/decision-inputs/attestations", async (req, res) => {
   manager(req.user.role);
-  const input = z.object({ domain: z.enum(["delivery_sales", "cash_plan"]), scenario: scenario.nullable(),
+  const input = z.object({ requestId: z.uuid().optional(), domain: z.enum(decisionInputAttestationDomains), scenario: scenario.nullable(),
     fromDate: date, throughDate: date, complete: z.boolean(), sourceReference }).strict().parse(req.body);
   if (input.fromDate > input.throughDate) throw new HttpError(400, "El inicio debe preceder el cierre");
   if ((dbDate(input.throughDate).getTime() - dbDate(input.fromDate).getTime()) / 86_400_000 > 730)
     throw new HttpError(400, "Certificá períodos de hasta dos años");
-  if ((input.domain === "delivery_sales") !== (input.scenario === null))
-    throw new HttpError(400, "El escenario solo corresponde al plan de caja");
+  if ((input.domain === "cash_plan") !== (input.scenario !== null))
+    throw new HttpError(400, "El escenario solo corresponde al plan de caja; delivery y obligaciones no llevan escenario");
+  const rowId = input.requestId ?? randomUUID();
+  const matchesExisting = (existing: {
+    id: string;
+    domain: string;
+    scenario: string | null;
+    fromDate: Date;
+    throughDate: Date;
+    complete: boolean;
+    sourceReference: string;
+    confirmedByUserId: string;
+  }) => existing.id === rowId && existing.domain === input.domain && existing.scenario === input.scenario &&
+    iso(existing.fromDate) === input.fromDate && iso(existing.throughDate) === input.throughDate &&
+    existing.complete === input.complete && existing.sourceReference === input.sourceReference &&
+    existing.confirmedByUserId === req.user.id;
+  const receipt = (existing: { id: string; complete: boolean }) => ({ id: existing.id, complete: existing.complete });
+  const findExisting = (tx: Pick<Prisma.TransactionClient, "decisionInputAttestation">) => tx.decisionInputAttestation.findUnique({
+    where: { id: rowId },
+    select: { id: true, domain: true, scenario: true, fromDate: true, throughDate: true,
+      complete: true, sourceReference: true, confirmedByUserId: true },
+  });
+  if (input.requestId) {
+    const existing = await findExisting(db);
+    if (existing) {
+      if (!matchesExisting(existing)) throw new HttpError(409, "La solicitud ya existe con otros datos");
+      res.status(201).json(receipt(existing));
+      return;
+    }
+  }
   const today = businessDate(await getSettings());
   if (input.domain === "delivery_sales") {
     if (input.throughDate > today) throw new HttpError(400, "No se puede certificar historia futura");
@@ -238,17 +268,40 @@ decisionInputs.post("/decision-inputs/attestations", async (req, res) => {
           iso(batch.reconciliation.coverageThrough) < input.throughDate || iso(batch.cutoffDate) < input.throughDate)
         throw new HttpError(400, "La cobertura completa requiere un lote delivery conciliado con rango validado (batch:<id>)");
     }
-  } else if (input.fromDate <= today) {
+  } else if (input.domain === "cash_plan" && input.fromDate <= today) {
     throw new HttpError(400, "El plan de caja certificado debe empezar después de hoy");
   }
-  const rowId = randomUUID();
-  await atomic(async (tx) => {
-    await tx.$executeRaw`INSERT INTO "DecisionInputAttestation" (id, domain, scenario, "fromDate", "throughDate", complete, "sourceReference", "confirmedByUserId")
-      VALUES (${rowId}, ${input.domain}, ${input.scenario}, ${input.fromDate}::date, ${input.throughDate}::date,
-        ${input.complete}, ${input.sourceReference}, ${req.user.id})`;
-    await tx.sensitiveAccessAudit.create({ data: { userId: req.user.id, area: "data_coverage", action: "attest" } });
-  });
-  res.status(201).json({ id: rowId, complete: input.complete });
+  let result: { id: string; complete: boolean };
+  try {
+    result = await atomic(async (tx) => {
+      if (input.requestId) {
+        // Serialize retries that reuse a client-generated id. The primary key remains the final guard.
+        await tx.$queryRaw<Array<{ locked: number }>>`SELECT 1 AS locked
+          FROM (SELECT pg_advisory_xact_lock(hashtextextended(${rowId}, 0))) AS request_lock`;
+        const existing = await findExisting(tx);
+        if (existing) {
+          if (!matchesExisting(existing)) throw new HttpError(409, "La solicitud ya existe con otros datos");
+          return receipt(existing);
+        }
+      }
+      await tx.decisionInputAttestation.create({
+        data: { id: rowId, domain: input.domain, scenario: input.scenario, fromDate: dbDate(input.fromDate),
+          throughDate: dbDate(input.throughDate), complete: input.complete, sourceReference: input.sourceReference,
+          confirmedByUserId: req.user.id },
+      });
+      await tx.sensitiveAccessAudit.create({ data: { userId: req.user.id, area: "data_coverage", action: "attest" } });
+      return { id: rowId, complete: input.complete };
+    });
+  } catch (error) {
+    // Serializable snapshots can predate a transaction waiting on the advisory lock. If
+    // the winning insert then raises P2002, resolve only this request id after rollback.
+    if (!input.requestId || !(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") throw error;
+    const existing = await findExisting(db);
+    if (!existing) throw error;
+    if (!matchesExisting(existing)) throw new HttpError(409, "La solicitud ya existe con otros datos");
+    result = receipt(existing);
+  }
+  res.status(201).json(result);
 });
 
 for (const [type, table] of [

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { isTechnicalLegacySource } from "../../shared/operations/source-control";
+import { cutoverGateIds } from "../../shared/operations/contracts";
 import { SourcesWorkspace } from "./SourcesWorkspace";
 import { FinanceWorkspace } from "./FinanceWorkspace";
 import { apiGet, apiPost, hasCapability, hasCommand, OperationsApiError, recordValue, responseItems, responseVersion, textValue } from "./api";
@@ -975,6 +976,46 @@ export function OperationalWorkspace(props: Props) {
   const approvedPromotions = rowsOf(pricing.data, "promotions").filter(row => row.status === "approved" && (hasCapability(context, "prices.approve") || Object.keys(recordValue(row.definition, "eligibility") as object ?? {}).length === 0));
   const accessData = pageId === "access" ? query.data : access.data;
   const userRows = rowsOf(accessData, "users").filter(user => user.active !== false);
+  const gateRowsById = new Map<string, Row | null>();
+  for (const gate of rowsOf(gates.data, "gates")) {
+    const gateId = idOf(gate);
+    if (!gateId || !(cutoverGateIds as readonly string[]).includes(gateId)) continue;
+    gateRowsById.set(gateId, gateRowsById.has(gateId) ? null : gate);
+  }
+  const activeGateUserIds = new Set(rowsOf(access.data, "users")
+    .filter(user => user.active === true)
+    .map(idOf)
+    .filter(Boolean));
+  const approvedGateCount = cutoverGateIds.filter(gateId => gateRowsById.get(gateId)?.status === "approved").length;
+  const gatesHaveIndependentActiveReview = cutoverGateIds.every(gateId => {
+    const gate = gateRowsById.get(gateId);
+    const authorId = typeof gate?.approvedBy === "string" ? gate.approvedBy : "";
+    const reviewerId = typeof gate?.reviewedBy === "string" ? gate.reviewedBy : "";
+    return gate?.status === "approved" && authorId.length > 0 && reviewerId.length > 0
+      && authorId !== reviewerId && activeGateUserIds.has(authorId) && activeGateUserIds.has(reviewerId);
+  });
+  const authorityRow = recordValue(gates.data, "authority");
+  const serverAuthorityMode = authorityRow === null ? "shadow"
+    : typeof recordValue(authorityRow, "mode") === "string" ? String(recordValue(authorityRow, "mode")) : "unknown";
+  const operationalApprovalConfigured = context.operationalApprovalConfigured === true;
+  const authorityActivationBlocker = !hasCapability(context, "cutover.approve") ? "Tu perfil no tiene permiso para activar la autoridad."
+    : !hasCommand(context, "AuthorityActivated") ? "El servidor no ofrece la acción de activación para esta sesión."
+    : context.rehearsal ? "La sesión está marcada como ensayo; no se puede activar autoridad real desde aquí."
+    : !operationalApprovalConfigured ? "El servidor aún no está habilitado para activar autoridad y aceptar escrituras reales."
+    : context.authority.mode !== "shadow" ? "El contexto no informa autoridad en sombra; actualizá la vista para confirmar el estado vigente."
+    : !hasCapability(context, "access.manage") ? "Tu perfil no permite comprobar si las personas autoras y revisoras siguen activas; se necesita acceso a la gestión de usuarios."
+    : gates.loading || query.loading || access.loading ? "Esperá a que terminen de cargar las habilitaciones y las personas activas."
+    : gates.error || query.error ? "No se pudo consultar el estado actual de las habilitaciones; reintentá la consulta."
+    : access.error ? "No se pudo comprobar el estado activo de las personas; reintentá la consulta de accesos."
+    : !gates.data || !query.data ? "No hay una respuesta actual del servidor para validar la autoridad."
+    : !access.data ? "No hay una lista actual de personas para validar autores y revisores."
+    : serverAuthorityMode === "active" ? "La autoridad ya figura activa en el servidor."
+    : serverAuthorityMode !== "shadow" ? "El estado de autoridad no se pudo confirmar como sombra."
+    : approvedGateCount !== cutoverGateIds.length ? `Hay ${approvedGateCount} de ${cutoverGateIds.length} controles aprobados; el servidor exige que estén aprobados todos.`
+    : !gatesHaveIndependentActiveReview ? "Cada control debe conservar una persona autora y otra revisora, distintas y activas."
+    : null;
+  const canActivateAuthority = pageId === "gates"
+    && authorityActivationBlocker === null;
   const profileValues = recordValue(query.data, "profiles");
   const profileOptions = Array.isArray(profileValues) ? profileValues.filter((profile): profile is string => typeof profile === "string").map(profile => ({ value: profile, label: profile.replaceAll("_", " ") })) : [];
   const documentRows = rowsOf(documents.data).filter(document => document.sensitivity !== "clinical");
@@ -1000,7 +1041,7 @@ export function OperationalWorkspace(props: Props) {
   };
 
   const version = (row: Row, fallback = Number.NaN) => versionFor(query.data, row, fallback);
-  const runAction = (command: string, title: string, fieldsIn: ActionField[], build: (values: Record<string, string | boolean>) => JsonRecord, row?: Row, description?: string, create = false, actionHint?: string) => {
+  const runAction = (command: string, title: string, fieldsIn: ActionField[], build: (values: Record<string, string | boolean>) => JsonRecord, row?: Row, description?: string, create = false, actionHint?: string, options: { targetId?: string; requestIdIsTarget?: boolean } = {}) => {
     if (!hasCommand(context, command)) return;
     if (query.loading || query.error) { onNotice("Esperá a que termine la actualización antes de registrar otro cambio."); return; }
     const expectedVersion = row ? version(row) : create ? 0 : undefined;
@@ -1008,8 +1049,19 @@ export function OperationalWorkspace(props: Props) {
       onNotice(`Acción bloqueada: GET ${spec.path ?? "de esta sección"} no devuelve una versión para ${idOf(row)}. El API debe exponer versions[${idOf(row)}].`);
       return;
     }
-    openAction(action(command, title, fieldsIn, build, row ? idOf(row) : undefined, expectedVersion, create, actionHint ?? description));
+    openAction(action(command, title, fieldsIn, build, row ? idOf(row) : options.targetId, expectedVersion, options.requestIdIsTarget ?? create, actionHint ?? description));
   };
+  const activateAuthority = () => runAction(
+    "AuthorityActivated",
+    "Activar autoridad del circuito",
+    fields(evidenceField("Evidencia humana explícita de la decisión de activar autoridad")),
+    values => ({ evidence: note(values) }),
+    undefined,
+    "El servidor volverá a validar la configuración operativa, los 14 controles aprobados y las personas autoras y revisoras activas. La autoridad sólo cambia después de guardar el comando y su comprobante.",
+    true,
+    undefined,
+    { targetId: "operations", requestIdIsTarget: false },
+  );
   const reconcileAccount = (account: Row) => runAction("AccountReconciled", "Registrar arqueo de cuenta", fields(
     field("date", "Fecha del arqueo", "date", { required: true, defaultValue: localDate() }),
     field("counted", "Saldo contado", "amount", { required: true, help: `Importe expresado en ${textValue(account.currency)}.` }),
@@ -1642,7 +1694,7 @@ export function OperationalWorkspace(props: Props) {
         {needsCatalogChoices && catalogChoices.error && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={catalogChoices.retry}>Reintentar catálogo</button>}
       </InfoBand>}
     </>}
-    {pageId === "gates" && <InfoBand tone="warning" title="El cambio de sistema requiere revisión"><p>Cada habilitación requiere evidencia y la revisión de dos personas distintas. Registrar estas revisiones no activa el reemplazo del sistema anterior.</p></InfoBand>}
+    {pageId === "gates" && <InfoBand tone="warning" title="Activar autoridad exige una revisión completa"><p>El servidor exige los 14 controles aprobados, cada uno con autor y revisor distintos y activos, además de la habilitación del servidor para operar. La activación requiere evidencia humana explícita y el servidor vuelve a validar esas condiciones al registrar el cambio.</p></InfoBand>}
     {pageId === "accounts" && <InfoBand title="Saldo desconocido hasta una apertura conciliada"><p>Crear o verificar la titularidad no asigna saldo. Efectivo reportado se verifica en caja o custodia; el depósito bancario es una transferencia independiente.</p></InfoBand>}
     {pageId === "collections" && <InfoBand title="Reporte y verificación son pasos separados"><p>Un cobro reportado no modifica una cuenta. Verificá la recepción en caja/custodia para efectivo o en banco para transferencia, Mercado Pago o tarjeta.</p></InfoBand>}
     {pageId === "payables" && <InfoBand title="Devengamiento y clasificación antes del objetivo"><p>Indicá el mes YYYY-MM al que corresponde cada obligación. Un gasto operativo requiere clasificación variable o fija y verificación; si falta cualquiera de esos datos, la contribución frente al objetivo queda desconocida o sin avance.</p>{pendingManagementPayables.length > 0 && <p>{pendingManagementPayables.length} obligaciones variables o gastos operativos visibles siguen pendientes de verificación, período o clasificación.</p>}</InfoBand>}
@@ -1651,7 +1703,25 @@ export function OperationalWorkspace(props: Props) {
     {pageId === "members" && <div className="ops-list-controls"><label className="ops-list-filter"><span>Buscar socio</span><input type="search" value={memberSearch} onChange={event => setMemberSearch(event.target.value)} placeholder="Nombre, correo o teléfono" /></label>{memberSearch && <button type="button" className="ops-button ops-button-quiet" onClick={() => setMemberSearch("")}>Borrar búsqueda</button>}<p className="ops-list-filter-count" role="status">La búsqueda consulta nombre, correo y teléfono de los socios dentro del alcance del perfil.</p></div>}
     {pageId === "access" && profileOptions.length === 0 && hasCommand(context, "AccessGranted") && <InfoBand tone="warning" title="No se pudieron cargar los perfiles vigentes"><p>La lista de perfiles debe venir del servidor para poder conceder acceso. Actualizá Accesos y verificá la respuesta publicada antes de asignar un perfil.</p></InfoBand>}
     {pageId === "access" && <InfoBand title="La certificación del dispositivo requiere una prueba humana"><p>Probá manualmente la persistencia y el reinicio antes de registrar el resultado. La consola sólo guarda la evidencia y no certifica el dispositivo de forma automática.</p></InfoBand>}
-    {pageId === "gates" && audit.error && <InfoBand tone="info" title="Auditoría"><p>El historial general requiere acceso.manage. {audit.error}</p></InfoBand>}
+    {pageId === "gates" && audit.error && <InfoBand tone="info" title="Auditoría"><p>El historial general requiere permisos de gestión de accesos. {audit.error}</p></InfoBand>}
+    {pageId === "gates" && <section className="ops-sheet" aria-label="Activación de autoridad">
+      <SectionHeading eyebrow="Autoridad del circuito" title="Activar autoridad" detail="La acción queda disponible sólo cuando el servidor confirma todos los requisitos vigentes." />
+      {gates.loading && <LoadingState label="Consultando estado de autoridad…" />}
+      {gates.error && <ErrorState message={`No se pudo confirmar el estado vigente de la autoridad. ${gates.error}`} retry={gates.retry} />}
+      {!gates.loading && !gates.error && gates.data && serverAuthorityMode === "active" && <InfoBand title="La autoridad ya figura activa en el servidor"><p>Estado leído desde la respuesta vigente de Habilitación y auditoría. Actualizá la vista para volver a consultar el registro guardado.</p></InfoBand>}
+      {!gates.loading && !gates.error && gates.data && serverAuthorityMode !== "active" && <>
+        <p><StatusTag tone={approvedGateCount === cutoverGateIds.length ? "good" : "warn"}>{approvedGateCount} de {cutoverGateIds.length} controles aprobados</StatusTag></p>
+        {access.loading && <LoadingState label="Comprobando si autores y revisores siguen activos…" />}
+        {access.error && <ErrorState message={`No se pudo comprobar el estado activo de autores y revisores. ${access.error}`} retry={access.retry} />}
+        {!canActivateAuthority && <InfoBand tone="warning" title="Activación pausada"><p>{authorityActivationBlocker ?? "Actualizá el estado de autoridad antes de continuar."}</p></InfoBand>}
+        {canActivateAuthority && <div className="ops-heading-action"><ActionButton onClick={activateAuthority}>Activar autoridad</ActionButton></div>}
+      </>}
+      <InfoBand tone={operationalApprovalConfigured ? "info" : "warning"} title="Habilitación del servidor para escrituras reales">
+        <p>{operationalApprovalConfigured
+          ? "El servidor confirma que está habilitado para operar. Las escrituras reales también requieren que la autoridad quede activa y que cada comando supere sus validaciones."
+          : "El servidor aún no está habilitado para activar autoridad y aceptar escrituras reales. Esta pantalla no cambia esa habilitación."}</p>
+      </InfoBand>
+    </section>}
     {pageId === "gates" && query.data && <ReplacementReadiness context={context} gates={rowsOf(gates.data, "gates")} stale={gates.loading || Boolean(gates.error)} />}
     {pageId === "accounts" && query.data && <AccountSetup context={context} snapshot={query.data} loading={query.loading} snapshotError={query.error} runCommand={runCommand} onRefresh={onRefresh} onNotice={onNotice} />}
     {needsCatalogChoices && catalogChoices.loading && !catalogChoices.data && <LoadingState label="Cargando productos para los selectores…" />}

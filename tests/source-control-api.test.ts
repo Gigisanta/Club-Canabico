@@ -77,17 +77,23 @@ test("source-control HTTP search, privacy and audited follow-up preserve the imm
 
     const ids = {
       reviewer: `source-reviewer-${randomUUID()}`,
+      financeAdmin: `source-finance-admin-${randomUUID()}`,
       clinical: `source-clinical-${randomUUID()}`,
       viewer: `source-viewer-${randomUUID()}`,
       scoped: `source-scoped-reviewer-${randomUUID()}`,
+      disabled: `source-disabled-reviewer-${randomUUID()}`,
+      malformedScope: `source-malformed-scope-${randomUUID()}`,
     };
     const password = await bcrypt.hash(passwordText, 4);
-    for (const [id, role] of [[ids.reviewer, "admin"], [ids.clinical, "admin"], [ids.viewer, "viewer"], [ids.scoped, "admin"]] as const) {
+    for (const [id, role] of [[ids.reviewer, "admin"], [ids.financeAdmin, "admin"], [ids.clinical, "admin"], [ids.viewer, "viewer"], [ids.scoped, "admin"], [ids.disabled, "admin"], [ids.malformedScope, "admin"]] as const) {
       await db.user.create({ data: { id, name: id, email: `${id}@source-control.test`, password, role } });
     }
     await db.operationAccess.create({ data: { userId: ids.reviewer, profile: "finance", capabilities: ["imports.review", "finance.read", "reports.read"] } });
+    await db.operationAccess.create({ data: { userId: ids.financeAdmin, profile: "finance", capabilities: ["imports.review", "finance.read", "reports.read"] } });
     await db.operationAccess.create({ data: { userId: ids.clinical, profile: "clinical", capabilities: ["imports.review", "clinical.read"] } });
     await db.operationAccess.create({ data: { userId: ids.scoped, profile: "finance", capabilities: ["imports.review"], scope: { memberIds: [], accountIds: [], custodianIds: [], locationIds: [] } } });
+    await db.operationAccess.create({ data: { userId: ids.disabled, profile: "finance", capabilities: ["imports.review", "finance.read"], enabled: false } });
+    await db.operationAccess.create({ data: { userId: ids.malformedScope, profile: "finance", capabilities: ["imports.review", "finance.read"], scope: { accountIds: "not-an-array" } } });
 
     const snapshotId = `source-control-${randomUUID()}`;
     const fileHash = hash(`${snapshotId}\0file`);
@@ -245,9 +251,54 @@ test("source-control HTTP search, privacy and audited follow-up preserve the imm
     }
 
     await login(ids.reviewer);
+    await login(ids.financeAdmin);
     await login(ids.clinical);
     await login(ids.viewer);
     await login(ids.scoped);
+    await login(ids.disabled);
+    await login(ids.malformedScope);
+
+    const [managerContextResponse, clinicalContextResponse, scopedContextResponse, disabledContextResponse, malformedScopeContextResponse] = await Promise.all([
+      call("/operations/context", ids.reviewer),
+      call("/operations/context", ids.clinical),
+      call("/operations/context", ids.scoped),
+      call("/operations/context", ids.disabled),
+      call("/operations/context", ids.malformedScope),
+    ]);
+    assert.equal(managerContextResponse.status, 200);
+    assert.equal(clinicalContextResponse.status, 200);
+    assert.equal(scopedContextResponse.status, 200);
+    assert.equal(disabledContextResponse.status, 200);
+    assert.equal(malformedScopeContextResponse.status, 200);
+    assert.equal((await managerContextResponse.json() as { canManageDecisionInputs: boolean }).canManageDecisionInputs, true,
+      "an unscoped finance manager is told that manual decision-input declarations are available");
+    assert.equal((await clinicalContextResponse.json() as { canManageDecisionInputs: boolean }).canManageDecisionInputs, false,
+      "a clinical profile is not shown the financial declaration action");
+    assert.equal((await scopedContextResponse.json() as { canManageDecisionInputs: boolean }).canManageDecisionInputs, false,
+      "a scoped finance manager is not shown an action the unpartitioned endpoint rejects");
+    assert.equal((await disabledContextResponse.json() as { canManageDecisionInputs: boolean }).canManageDecisionInputs, false,
+      "a disabled grant is not shown an action the endpoint rejects");
+    assert.equal((await malformedScopeContextResponse.json() as { canManageDecisionInputs: boolean }).canManageDecisionInputs, false,
+      "a malformed nonempty object scope is not treated as global access");
+
+    const malformedScopeInput = {
+      requestId: randomUUID(),
+      domain: "payables",
+      scenario: null,
+      fromDate: "2026-10-05",
+      throughDate: "2027-01-03",
+      complete: true,
+      sourceReference: "Synthetic malformed-scope request must not create coverage",
+    } as const;
+    const malformedScopeAttestationsBefore = await db.decisionInputAttestation.count();
+    const malformedScopeAuditsBefore = await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } });
+    const malformedScopeResponse = await call("/decision-inputs/attestations", ids.malformedScope, malformedScopeInput);
+    assert.equal(malformedScopeResponse.status, 403, await malformedScopeResponse.clone().text(),
+      "a manager with malformed scope is rejected before either shadow writes or retirement rules apply");
+    assert.equal(await db.decisionInputAttestation.count(), malformedScopeAttestationsBefore,
+      "a malformed scope creates no attestation");
+    assert.equal(await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } }), malformedScopeAuditsBefore,
+      "a malformed scope creates no coverage audit");
 
     const attestationCredentialCanary = "Bearer synthetic.attestation.credential.canary.with.extra.parts";
     const signedUrlCanary = "https://storage.example.test/archive.xlsx?X-Amz-Credential=synthetic%2Fscope&X-Amz-Signature=synthetic-signature";
@@ -294,6 +345,174 @@ test("source-control HTTP search, privacy and audited follow-up preserve the imm
     const obligationsSummaryBody = JSON.parse(obligationsSummaryText) as { summary: { metrics: { attestation: { present: boolean; sourceReference?: string } } } };
     assert.equal(obligationsSummaryBody.summary.metrics.attestation.present, false,
       "a cash-plan attestation does not masquerade as completeness evidence for the 13-week payables report");
+
+    const elapsedCashPlanInput = {
+      requestId: randomUUID(),
+      domain: "cash_plan",
+      scenario: "base",
+      fromDate: "2026-01-01",
+      throughDate: "2026-01-07",
+      complete: true,
+      sourceReference: "Synthetic cash plan declared before its start date",
+    } as const;
+    await db.decisionInputAttestation.create({ data: {
+      id: elapsedCashPlanInput.requestId,
+      domain: elapsedCashPlanInput.domain,
+      scenario: elapsedCashPlanInput.scenario,
+      fromDate: new Date(`${elapsedCashPlanInput.fromDate}T00:00:00.000Z`),
+      throughDate: new Date(`${elapsedCashPlanInput.throughDate}T00:00:00.000Z`),
+      complete: elapsedCashPlanInput.complete,
+      sourceReference: elapsedCashPlanInput.sourceReference,
+      confirmedByUserId: ids.reviewer,
+    } });
+    const attestationsBeforeElapsedReplay = await db.decisionInputAttestation.count();
+    const auditsBeforeElapsedReplay = await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } });
+    const elapsedCashPlanReplay = await call("/decision-inputs/attestations", ids.reviewer, elapsedCashPlanInput);
+    assert.equal(elapsedCashPlanReplay.status, 201, await elapsedCashPlanReplay.clone().text(),
+      "an exact retry remains successful after its originally future cash-plan period has elapsed");
+    assert.deepEqual(await elapsedCashPlanReplay.json(), { id: elapsedCashPlanInput.requestId, complete: true });
+    const mismatchedElapsedCashPlanReplay = await call("/decision-inputs/attestations", ids.reviewer, {
+      ...elapsedCashPlanInput,
+      complete: false,
+    });
+    assert.equal(mismatchedElapsedCashPlanReplay.status, 409,
+      "a stale idempotency key with different data conflicts before the current-date rule");
+    const mismatchedElapsedBody = await mismatchedElapsedCashPlanReplay.text();
+    assert.ok(!mismatchedElapsedBody.includes(elapsedCashPlanInput.requestId));
+    assert.doesNotMatch(mismatchedElapsedBody, /Synthetic cash plan declared/);
+    const newElapsedCashPlanRequest = await call("/decision-inputs/attestations", ids.reviewer, {
+      ...elapsedCashPlanInput,
+      requestId: randomUUID(),
+    });
+    assert.equal(newElapsedCashPlanRequest.status, 400, "a new cash-plan declaration for an elapsed period remains invalid");
+    assert.equal(await db.decisionInputAttestation.count(), attestationsBeforeElapsedReplay,
+      "elapsed replay and rejected new declaration add no attestation rows");
+    assert.equal(await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } }), auditsBeforeElapsedReplay,
+      "elapsed replay adds no audit and rejected new declaration adds none");
+
+    const attestationsBeforePayablesPost = await db.decisionInputAttestation.count();
+    const attestationAuditsBeforePayablesPost = await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } });
+    const payablesAttestationInput = {
+      requestId: randomUUID(),
+      domain: "payables",
+      scenario: null,
+      fromDate: "2026-10-05",
+      throughDate: "2027-01-03",
+      complete: true,
+      sourceReference: "Synthetic manual obligations schedule checked for the stated period",
+    } as const;
+    const [createdPayablesAttestation, concurrentPayablesRetry] = await Promise.all([
+      call("/decision-inputs/attestations", ids.reviewer, payablesAttestationInput),
+      call("/decision-inputs/attestations", ids.reviewer, payablesAttestationInput),
+    ]);
+    assert.equal(createdPayablesAttestation.status, 201, await createdPayablesAttestation.clone().text());
+    assert.equal(concurrentPayablesRetry.status, 201, await concurrentPayablesRetry.clone().text());
+    const createdReceipt = await createdPayablesAttestation.json() as { id: string; complete: boolean };
+    const retryReceipt = await concurrentPayablesRetry.json() as { id: string; complete: boolean };
+    assert.deepEqual(createdReceipt, { id: payablesAttestationInput.requestId, complete: true });
+    assert.deepEqual(retryReceipt, createdReceipt, "concurrent retries receive the same idempotent receipt");
+    const laterPayablesRetry = await call("/decision-inputs/attestations", ids.reviewer, payablesAttestationInput);
+    assert.equal(laterPayablesRetry.status, 201, await laterPayablesRetry.clone().text());
+    assert.deepEqual(await laterPayablesRetry.json(), createdReceipt, "a later retry returns the original receipt");
+    const persistedPayablesAttestation = await db.decisionInputAttestation.findUniqueOrThrow({
+      where: { id: payablesAttestationInput.requestId },
+    });
+    assert.equal(persistedPayablesAttestation.complete, true);
+    assert.equal(persistedPayablesAttestation.confirmedByUserId, ids.reviewer);
+    assert.equal(persistedPayablesAttestation.fromDate.toISOString().slice(0, 10), payablesAttestationInput.fromDate);
+    assert.equal(persistedPayablesAttestation.throughDate.toISOString().slice(0, 10), payablesAttestationInput.throughDate);
+    assert.equal(await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } }), attestationAuditsBeforePayablesPost + 1,
+      "concurrent retries persist one manual coverage declaration and one audit entry");
+    const attestationsBeforeMismatchedRetry = await db.decisionInputAttestation.count();
+    const auditsBeforeMismatchedRetry = await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } });
+    const mismatchedPayablesRetry = await call("/decision-inputs/attestations", ids.reviewer, {
+      ...payablesAttestationInput,
+      complete: false,
+    });
+    assert.equal(mismatchedPayablesRetry.status, 409, "reusing an idempotency key with different coverage data conflicts");
+    const mismatchedPayablesRetryBody = await mismatchedPayablesRetry.text();
+    assert.doesNotMatch(mismatchedPayablesRetryBody, /Synthetic manual obligations schedule/,
+      "a key conflict does not disclose the stored reference or receipt id");
+    assert.ok(!mismatchedPayablesRetryBody.includes(payablesAttestationInput.requestId));
+    const crossActorRetry = await call("/decision-inputs/attestations", ids.financeAdmin, payablesAttestationInput);
+    assert.equal(crossActorRetry.status, 409, "a different manager cannot replay another actor's keyed declaration");
+    const crossActorRetryBody = await crossActorRetry.text();
+    assert.doesNotMatch(crossActorRetryBody, /Synthetic manual obligations schedule/,
+      "a cross-actor conflict does not disclose the stored reference or receipt id");
+    assert.ok(!crossActorRetryBody.includes(payablesAttestationInput.requestId));
+    const unauthorizedRetry = await call("/decision-inputs/attestations", ids.viewer, payablesAttestationInput);
+    assert.equal(unauthorizedRetry.status, 403, "an unauthorized role cannot replay a stored keyed declaration");
+    const unauthorizedRetryBody = await unauthorizedRetry.text();
+    assert.ok(!unauthorizedRetryBody.includes(payablesAttestationInput.requestId));
+    assert.doesNotMatch(unauthorizedRetryBody, /Synthetic manual obligations schedule/);
+    assert.equal(await db.decisionInputAttestation.count(), attestationsBeforeMismatchedRetry,
+      "mismatched, cross-actor or unauthorized retries create no declaration");
+    assert.equal(await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } }), auditsBeforeMismatchedRetry,
+      "mismatched, cross-actor or unauthorized retries create no audit entry");
+    const coveredObligationsSummary = await call("/reports/operations/summary?area=obligations-13-weeks&to=2026-10-09");
+    assert.equal(coveredObligationsSummary.status, 200, await coveredObligationsSummary.clone().text());
+    const coveredSummaryBody = await coveredObligationsSummary.json() as { summary: { metrics: { sourceCoverage: string; attestation: { present: boolean; sourceReference?: string; fromDate?: string; throughDate?: string } } } };
+    assert.equal(coveredSummaryBody.summary.metrics.sourceCoverage, "complete");
+    assert.equal(coveredSummaryBody.summary.metrics.attestation.present, true,
+      "the 13-week obligations report recognizes a complete manual payables attestation covering its Monday-to-Sunday horizon");
+    assert.equal(coveredSummaryBody.summary.metrics.attestation.sourceReference, payablesAttestationInput.sourceReference);
+    assert.equal(coveredSummaryBody.summary.metrics.attestation.fromDate, payablesAttestationInput.fromDate,
+      "DATE attestation bounds are serialized without a timezone shift");
+    assert.equal(coveredSummaryBody.summary.metrics.attestation.throughDate, payablesAttestationInput.throughDate,
+      "the closing DATE attestation bound is serialized without a timezone shift");
+
+    const partialPayablesAttestationInput = {
+      ...payablesAttestationInput,
+      requestId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      complete: false,
+    } as const;
+    const partialPayablesAttestation = await call("/decision-inputs/attestations", ids.reviewer, partialPayablesAttestationInput);
+    assert.equal(partialPayablesAttestation.status, 201, await partialPayablesAttestation.clone().text());
+    assert.equal(await db.decisionInputAttestation.count(), attestationsBeforePayablesPost + 2,
+      "a newer partial declaration is stored separately from the earlier complete one");
+    assert.equal(await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } }), attestationAuditsBeforePayablesPost + 2,
+      "the partial replacement declaration is audited");
+    const afterPartialPayablesSummary = await call("/reports/operations/summary?area=obligations-13-weeks&to=2026-10-09");
+    assert.equal(afterPartialPayablesSummary.status, 200, await afterPartialPayablesSummary.clone().text());
+    const afterPartialSummaryBody = await afterPartialPayablesSummary.json() as { summary: { metrics: { sourceCoverage: string; attestation: { present: boolean } } } };
+    assert.equal(afterPartialSummaryBody.summary.metrics.attestation.present, false,
+      "a newer incomplete declaration revokes the earlier complete attestation for the same horizon");
+    assert.equal(afterPartialSummaryBody.summary.metrics.sourceCoverage, "partial",
+      "the report labels a partial latest declaration as partial coverage");
+
+    const attestationsBeforeInvalidScenario = await db.decisionInputAttestation.count();
+    const attestationAuditsBeforeInvalidScenario = await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } });
+    const invalidPayablesScenario = await call("/decision-inputs/attestations", ids.reviewer, {
+      ...payablesAttestationInput,
+      scenario: "base",
+    });
+    assert.equal(invalidPayablesScenario.status, 400, "payables coverage must not be scoped to a cash-plan scenario");
+    assert.match((await invalidPayablesScenario.json()).error, /escenario/i,
+      "the rejected payables scenario reaches the explicit domain guard");
+    assert.equal(await db.decisionInputAttestation.count(), attestationsBeforeInvalidScenario,
+      "rejected payables scenario creates no attestation");
+    assert.equal(await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } }), attestationAuditsBeforeInvalidScenario,
+      "rejected payables scenario creates no coverage audit entry");
+
+    const attestationsBeforeRollback = await db.decisionInputAttestation.count();
+    const attestationAuditsBeforeRollback = await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } });
+    await db.$executeRawUnsafe(`CREATE FUNCTION "${schema}".reject_coverage_audit() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN IF NEW.area = 'data_coverage' AND NEW.action = 'attest' THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'synthetic late coverage audit rejection';
+      END IF; RETURN NEW; END; $$`);
+    await db.$executeRawUnsafe(`CREATE TRIGGER reject_coverage_audit BEFORE INSERT ON "${schema}"."SensitiveAccessAudit"
+      FOR EACH ROW EXECUTE FUNCTION "${schema}".reject_coverage_audit()`);
+    const failedPayablesAttestation = await call("/decision-inputs/attestations", ids.reviewer, {
+      ...payablesAttestationInput,
+      requestId: randomUUID(),
+    });
+    assert.equal(failedPayablesAttestation.status, 500, "a late audit failure rejects the manual attestation write");
+    assert.equal(await db.decisionInputAttestation.count(), attestationsBeforeRollback,
+      "a late audit failure rolls back only the attempted attestation row");
+    assert.equal(await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } }), attestationAuditsBeforeRollback,
+      "a late audit failure leaves no partial coverage audit row");
+    await db.$executeRawUnsafe(`DROP TRIGGER reject_coverage_audit ON "${schema}"."SensitiveAccessAudit"`);
+    await db.$executeRawUnsafe(`DROP FUNCTION "${schema}".reject_coverage_audit()`);
 
     const attestationsBeforeRejectedPost = await db.decisionInputAttestation.count();
     const attestationAuditsBeforeRejectedPost = await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } });
@@ -646,6 +865,65 @@ test("source-control HTTP search, privacy and audited follow-up preserve the imm
       ledgerLegs: await db.ledgerLeg.count(),
       stockFacts: await db.stockFact.count(),
     }, canonicalBefore, "source follow-up creates no canonical facts, identities, publications, ledger entries or stock movements");
+
+    await db.operationAuthority.update({ where: { id: "operations" }, data: { mode: "active" } });
+    const activePayablesInput = {
+      requestId: randomUUID(),
+      domain: "payables",
+      scenario: null,
+      fromDate: "2026-10-05",
+      throughDate: "2027-01-03",
+      complete: true,
+      sourceReference: "Synthetic active-authority obligations coverage checked for the stated period",
+    } as const;
+    const activeAttestationsBefore = await db.decisionInputAttestation.count();
+    const activeAttestationAuditsBefore = await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } });
+    const activePayablesResponse = await call("/decision-inputs/attestations", ids.reviewer, activePayablesInput);
+    assert.equal(activePayablesResponse.status, 201, await activePayablesResponse.clone().text(),
+      "manual coverage metadata remains writable after authority cutover");
+    assert.deepEqual(await activePayablesResponse.json(), { id: activePayablesInput.requestId, complete: true });
+    assert.equal(await db.decisionInputAttestation.count(), activeAttestationsBefore + 1,
+      "the active-authority coverage request persists exactly one attestation");
+    assert.equal(await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } }), activeAttestationAuditsBefore + 1,
+      "the active-authority coverage request writes exactly one audit record");
+
+    const cashPlanEventsBefore = await db.decisionCashPlanEvent.count();
+    const cashPlanAuditsBefore = await db.sensitiveAccessAudit.count({ where: { area: "cash_plan_event", action: "create" } });
+    const retiredCashPlanResponse = await call("/decision-inputs/cash-plans", ids.reviewer, {
+      scenario: "base",
+      date: "2999-12-31",
+      account: "synthetic-cash-account",
+      category: "sale",
+      amountCents: "100",
+      sourceReference: "Synthetic cash-plan entry that must remain retired after cutover",
+    });
+    assert.equal(retiredCashPlanResponse.status, 410, await retiredCashPlanResponse.clone().text(),
+      "the metadata exception does not reopen the legacy cash-plan writer");
+    assert.equal(await db.decisionCashPlanEvent.count(), cashPlanEventsBefore,
+      "the retired cash-plan request creates no cash-plan event");
+    assert.equal(await db.sensitiveAccessAudit.count({ where: { area: "cash_plan_event", action: "create" } }), cashPlanAuditsBefore,
+      "the retired cash-plan request creates no cash-plan audit");
+
+    const rejectedActiveAttestationsBefore = await db.decisionInputAttestation.count();
+    const rejectedActiveAuditsBefore = await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } });
+    const [scopedActiveResponse, clinicalActiveResponse, disabledActiveResponse, malformedScopeActiveResponse] = await Promise.all([
+      call("/decision-inputs/attestations", ids.scoped, { ...activePayablesInput, requestId: randomUUID() }),
+      call("/decision-inputs/attestations", ids.clinical, { ...activePayablesInput, requestId: randomUUID() }),
+      call("/decision-inputs/attestations", ids.disabled, { ...activePayablesInput, requestId: randomUUID() }),
+      call("/decision-inputs/attestations", ids.malformedScope, { ...activePayablesInput, requestId: randomUUID() }),
+    ]);
+    assert.equal(scopedActiveResponse.status, 403, await scopedActiveResponse.clone().text(),
+      "an object-scoped finance manager cannot use the unpartitioned metadata endpoint after cutover");
+    assert.equal(clinicalActiveResponse.status, 403, await clinicalActiveResponse.clone().text(),
+      "a clinical-profile manager cannot use the financial metadata endpoint after cutover");
+    assert.equal(disabledActiveResponse.status, 403, await disabledActiveResponse.clone().text(),
+      "a disabled manager grant cannot use the financial metadata endpoint after cutover");
+    assert.equal(malformedScopeActiveResponse.status, 403, await malformedScopeActiveResponse.clone().text(),
+      "a malformed manager scope remains rejected after cutover rather than surfacing as a retired-writer error");
+    assert.equal(await db.decisionInputAttestation.count(), rejectedActiveAttestationsBefore,
+      "scoped, clinical, disabled and malformed-scope rejections create no attestation");
+    assert.equal(await db.sensitiveAccessAudit.count({ where: { area: "data_coverage", action: "attest" } }), rejectedActiveAuditsBefore,
+      "scoped, clinical, disabled and malformed-scope rejections create no coverage audit");
   } finally {
     try {
       if (server) await new Promise<void>((resolve, reject) => server!.close(error => error ? reject(error) : resolve()));

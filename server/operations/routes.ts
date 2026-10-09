@@ -24,7 +24,7 @@ operationsRoutes.get("/context",async(req,res)=>{
   db.operationAuthority.findUnique({where:{id:"operations"}}),
  ]);
  const snapshot=buildOperationAccessSnapshot(req.user,grant),caps=snapshot.capabilities;
- res.json({userId:req.user.id,profile:snapshot.profile,isOwner:snapshot.isOwner,capabilities:caps,rehearsal:process.env.DEMO_MODE==="true"||process.env.NODE_ENV==="test"||process.env.OPERATIONAL_REHEARSAL==="true",authority:{mode:authority?.mode??"shadow",epoch:authority?.epoch??1,firstRealWriteAt:authority?.firstRealWriteAt??null},timeZone:"America/Argentina/Buenos_Aires",commands:[...commandSpecs].filter(([,s])=>!s.internal&&caps.includes(s.capability)).map(([command,s])=>({command,kind:s.kind,create:Boolean(s.create)}))});
+ res.json({userId:req.user.id,profile:snapshot.profile,isOwner:snapshot.isOwner,canManageDecisionInputs:snapshot.canManageDecisionInputs,operationalApprovalConfigured:process.env.CLUB_OPERATIONS_APPROVED==="true",capabilities:caps,rehearsal:process.env.DEMO_MODE==="true"||process.env.NODE_ENV==="test"||process.env.OPERATIONAL_REHEARSAL==="true",authority:{mode:authority?.mode??"shadow",epoch:authority?.epoch??1,firstRealWriteAt:authority?.firstRealWriteAt??null},timeZone:"America/Argentina/Buenos_Aires",commands:[...commandSpecs].filter(([,s])=>!s.internal&&caps.includes(s.capability)).map(([command,s])=>({command,kind:s.kind,create:Boolean(s.create)}))});
 });
 operationsRoutes.post("/commands",async(req,res)=>{
  const envelope=envelopeSchema.parse(req.body);

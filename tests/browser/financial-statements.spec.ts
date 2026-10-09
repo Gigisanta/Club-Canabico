@@ -352,3 +352,234 @@ test("financial source panel reads an isolated staged snapshot with separate ARS
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+test("finance workspace records manual payables coverage and keeps a reader without the form", async ({ page }) => {
+  expect(process.env.BOMBO_E2E_ISOLATED).toBe("1");
+  const databaseURL = new URL(process.env.DATABASE_URL ?? "");
+  expect(["127.0.0.1", "localhost", "[::1]", "::1"]).toContain(databaseURL.hostname);
+  expect(databaseURL.searchParams.get("schema")).toMatch(/^bombo_e2e_[a-z0-9_]+$/i);
+  expect(process.env.E2E_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  await page.setViewportSize({ width: 1280, height: 900 });
+
+  const isProjectionReport = (response: import("@playwright/test").Response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET"
+      && url.pathname === "/api/reports/operations/summary"
+      && url.searchParams.get("area") === "obligations-13-weeks";
+  };
+  async function switchDemoActor(id: "owner" | "viewer" | "gio") {
+    const response = await page.request.post("/api/auth/demo", {
+      data: { id },
+      headers: { Origin: new URL(page.url()).origin },
+    });
+    expect(response.status(), await response.text()).toBe(200);
+  }
+
+  await page.goto("/app/operations");
+  await page.getByRole("button", { name: "Explorar club de demostración" }).click();
+  await expect(page.locator(".ops-home-page")).toBeVisible();
+
+  // Give a non-admin demo viewer finance/report read access in the isolated fixture.
+  // The finance profile includes write capabilities; role-based attestation control must still hide the form.
+  await switchDemoActor("owner");
+  const accessGrant = await page.request.post("/api/operations/commands", {
+    data: {
+      schemaVersion: 1,
+      requestId: randomUUID(),
+      targetId: randomUUID(),
+      expectedVersion: 0,
+      occurredAt: new Date().toISOString(),
+      command: "AccessGranted",
+      data: { userId: "viewer", profile: "finance", additional: [], scope: {} },
+    },
+    headers: { Origin: new URL(page.url()).origin },
+  });
+  expect(accessGrant.status(), await accessGrant.text()).toBe(200);
+
+  const ownerReportPromise = page.waitForResponse(isProjectionReport);
+  await page.goto("/app/operations?section=finance");
+  await expect(page.getByRole("heading", { name: "Documentar cobertura de obligaciones" })).toBeVisible();
+  expect((await ownerReportPromise).status()).toBe(200);
+
+  const viewerAttestationPosts: string[] = [];
+  page.on("request", request => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/decision-inputs/attestations")
+      viewerAttestationPosts.push(request.url());
+  });
+  await switchDemoActor("viewer");
+  const viewerReportPromise = page.waitForResponse(isProjectionReport);
+  await page.goto("/app/operations?section=finance");
+  await expect(page.getByRole("heading", { name: "Obligaciones verificadas y pendientes" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Documentar cobertura de obligaciones" })).toHaveCount(0);
+  await expect(page.getByText("La lectura del informe sigue disponible. Solo un propietario o administrador puede registrar esta declaración.", { exact: true })).toBeVisible();
+  const viewerReportResponse = await viewerReportPromise;
+  expect(viewerReportResponse.status()).toBe(200);
+  expect(viewerAttestationPosts).toHaveLength(0);
+
+  await switchDemoActor("gio");
+  const initialReportPromise = page.waitForResponse(isProjectionReport);
+  await page.goto("/app/operations?section=finance");
+  const initialReportResponse = await initialReportPromise;
+  expect(initialReportResponse.status()).toBe(200);
+  const initialReport = await initialReportResponse.json() as {
+    summary: { metrics: { horizon: { from: string; through: string } } };
+  };
+  const horizon = initialReport.summary.metrics.horizon;
+  const shiftedHorizonAnchor = new Date(`${horizon.from}T00:00:00Z`);
+  shiftedHorizonAnchor.setUTCDate(shiftedHorizonAnchor.getUTCDate() - 7);
+  const shiftedSelectedDate = shiftedHorizonAnchor.toISOString().slice(0, 10);
+
+  const fromField = page.getByLabel("Desde · inicio del horizonte de 13 semanas", { exact: true });
+  const throughField = page.getByLabel("Hasta · cierre del horizonte de 13 semanas", { exact: true });
+  const sourceField = page.getByRole("textbox", { name: /^Referencia humana de la fuente/ });
+  const completeCheckbox = page.getByLabel("Declaro que esta fuente incluye todas las obligaciones entre las fechas indicadas.", { exact: true });
+  const reviewCheckbox = page.getByLabel("Revisé el período y la fuente citada.", { exact: true });
+  const coverageForm = page.locator(".finance-attestation-form");
+  await expect(page.getByRole("heading", { name: "Documentar cobertura de obligaciones" })).toBeVisible();
+  await expect(fromField).toHaveValue(horizon.from);
+  await expect(throughField).toHaveValue(horizon.through);
+  const draftReference = `Borrador de vencimientos pendiente de nueva revisión ${randomUUID()}`;
+  await sourceField.fill(draftReference);
+  await completeCheckbox.check();
+  await reviewCheckbox.check();
+
+  const shiftedReportPromise = page.waitForResponse(response => isProjectionReport(response)
+    && new URL(response.url()).searchParams.get("to") === shiftedSelectedDate);
+  await page.evaluate(date => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("to", date);
+    window.history.pushState(window.history.state, "", url);
+    window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+  }, shiftedSelectedDate);
+  const shiftedReportResponse = await shiftedReportPromise;
+  expect(shiftedReportResponse.status()).toBe(200);
+  const shiftedReport = await shiftedReportResponse.json() as {
+    summary: { metrics: { horizon: { from: string; through: string } } };
+  };
+  const currentHorizon = shiftedReport.summary.metrics.horizon;
+  expect(currentHorizon).not.toEqual(horizon);
+  await expect(fromField).toHaveValue(currentHorizon.from);
+  await expect(throughField).toHaveValue(currentHorizon.through);
+  await expect(sourceField).toHaveValue(draftReference);
+  await expect(completeCheckbox).not.toBeChecked();
+  await expect(reviewCheckbox).not.toBeChecked();
+  await expect(coverageForm.getByRole("status")).toContainText("Cambió el horizonte: actualicé las fechas y conservé la referencia.");
+
+  await completeCheckbox.check();
+  await reviewCheckbox.check();
+
+  const rejectedReference = "Bearer SYNTHETIC_FINANCE_COVERAGE_CANARY_123";
+  await sourceField.fill(rejectedReference);
+  const rejectedPostPromise = page.waitForResponse(response => response.request().method() === "POST"
+    && new URL(response.url()).pathname === "/api/decision-inputs/attestations");
+  await page.getByRole("button", { name: "Guardar declaración de cobertura", exact: true }).click();
+  const rejectedPost = await rejectedPostPromise;
+  expect(rejectedPost.status()).toBe(400);
+  expect(rejectedPost.request().postDataJSON()).toMatchObject({
+    domain: "payables",
+    scenario: null,
+    fromDate: currentHorizon.from,
+    throughDate: currentHorizon.through,
+    complete: true,
+    sourceReference: rejectedReference,
+  });
+  await expect(coverageForm.getByRole("alert")).toBeVisible();
+  await expect(fromField).toHaveValue(currentHorizon.from);
+  await expect(throughField).toHaveValue(currentHorizon.through);
+  await expect(sourceField).toHaveValue(rejectedReference);
+  await expect(completeCheckbox).toBeChecked();
+  await expect(reviewCheckbox).toBeChecked();
+
+  const sourceReference = `Planilla sintética de vencimientos verificada en E2E ${randomUUID()}`;
+  await sourceField.fill(sourceReference);
+  const clientAttestationPayloads: Record<string, unknown>[] = [];
+  page.on("request", request => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/decision-inputs/attestations")
+      clientAttestationPayloads.push(request.postDataJSON() as Record<string, unknown>);
+  });
+  let committedResponse: { status: number; receipt: { id: string; complete: boolean } } | null = null;
+  let firstRequestIntercepted = false;
+  await page.route("**/api/decision-inputs/attestations", async route => {
+    const payload = route.request().postDataJSON() as Record<string, unknown>;
+    if (!firstRequestIntercepted && payload.sourceReference === sourceReference) {
+      firstRequestIntercepted = true;
+      const actualResponse = await route.fetch();
+      committedResponse = {
+        status: actualResponse.status(),
+        receipt: await actualResponse.json() as { id: string; complete: boolean },
+      };
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ message: "synthetic response interruption after server commit" }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+  const uncertainPostPromise = page.waitForResponse(response => response.request().method() === "POST"
+    && new URL(response.url()).pathname === "/api/decision-inputs/attestations"
+    && response.request().postDataJSON().sourceReference === sourceReference);
+  const uncertainReportPromise = page.waitForResponse(isProjectionReport);
+  await page.getByRole("button", { name: "Guardar declaración de cobertura", exact: true }).click();
+  const [uncertainPost, uncertainRefreshResponse] = await Promise.all([uncertainPostPromise, uncertainReportPromise]);
+  expect(uncertainPost.status()).toBe(503);
+  expect(uncertainRefreshResponse.status()).toBe(200);
+  expect(committedResponse?.status).toBe(201);
+  const firstCommitReceipt = committedResponse?.receipt;
+  expect(firstCommitReceipt?.complete).toBe(true);
+  const retryCheckbox = page.getByLabel("Confirmo reintentar exactamente el mismo período, referencia y declaración con el mismo ID.", { exact: true });
+  await expect(coverageForm.getByRole("alert")).toContainText("Conservé los datos y el mismo ID");
+  await expect(fromField).toHaveValue(currentHorizon.from);
+  await expect(throughField).toHaveValue(currentHorizon.through);
+  await expect(sourceField).toHaveValue(sourceReference);
+  await expect(completeCheckbox).toBeChecked();
+  await expect(reviewCheckbox).toBeChecked();
+  await expect(fromField).toBeDisabled();
+  await expect(throughField).toBeDisabled();
+  await expect(sourceField).toBeDisabled();
+  await expect(retryCheckbox).not.toBeChecked();
+  const retryButton = page.getByRole("button", { name: "Reintentar la misma declaración", exact: true });
+  await expect(retryButton).toBeDisabled();
+
+  await retryCheckbox.check();
+  const replayPromise = page.waitForResponse(response => response.request().method() === "POST"
+    && new URL(response.url()).pathname === "/api/decision-inputs/attestations"
+    && response.request().postDataJSON().sourceReference === sourceReference);
+  const refreshedReportPromise = page.waitForResponse(isProjectionReport);
+  await retryButton.click();
+  const [replayResponse, refreshedReportResponse] = await Promise.all([replayPromise, refreshedReportPromise]);
+  expect(replayResponse.status()).toBe(201);
+  const replayReceipt = await replayResponse.json() as { id: string; complete: boolean };
+  expect(replayReceipt.complete).toBe(true);
+
+  const submittedCoverage = replayResponse.request().postDataJSON() as Record<string, unknown>;
+  expect(submittedCoverage).toMatchObject({
+    domain: "payables",
+    scenario: null,
+    fromDate: currentHorizon.from,
+    throughDate: currentHorizon.through,
+    complete: true,
+    sourceReference,
+  });
+  expect(submittedCoverage.requestId).toEqual(expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i));
+  expect(firstCommitReceipt?.id).toBe(submittedCoverage.requestId);
+  expect(replayReceipt.id).toBe(submittedCoverage.requestId);
+  const sameDeclarationAttempts = clientAttestationPayloads.filter(payload => payload.sourceReference === sourceReference);
+  expect(sameDeclarationAttempts).toHaveLength(2);
+  expect(sameDeclarationAttempts[1]).toEqual(sameDeclarationAttempts[0]);
+
+  expect(refreshedReportResponse.status()).toBe(200);
+  const refreshedReport = await refreshedReportResponse.json() as {
+    summary: { metrics: { attestation: { present: boolean; sourceReference?: string; fromDate?: string; throughDate?: string } } };
+  };
+  expect(refreshedReport.summary.metrics.attestation).toMatchObject({
+    present: true,
+    sourceReference,
+    fromDate: currentHorizon.from,
+    throughDate: currentHorizon.through,
+  });
+  await expect(page.locator(".finance-projection-coverage-grid")).toContainText("Informada");
+  await expect(page.locator(".finance-projection-coverage-grid")).toContainText(sourceReference);
+  await expect(coverageForm.getByRole("status")).toContainText("Declaración completa registrada.");
+});

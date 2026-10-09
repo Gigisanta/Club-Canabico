@@ -245,11 +245,20 @@ export default function OperationsConsole({ onExit, exitLabel = "Volver al panel
           : context.authority.mode !== "active" && <div className="ops-shadow-strip"><span aria-hidden="true">●</span> Las ventas y los movimientos operativos requieren habilitación. Podés gestionar los datos y controles disponibles para tu perfil.</div>}
         <main className="ops-content" id="operations-main" tabIndex={-1}>
           {error && <ErrorState message={`No pudimos actualizar el acceso. ${error}`} retry={() => void reloadContext()} />}
-          {page && <OperationalWorkspace key={page.id} pageId={page.id} context={context} refreshKey={refreshKey} runCommand={runCommand} openAction={openAction} onNotice={showNotice} onRefresh={() => setRefreshKey(key => key + 1)} />}
+          {page && <OperationalWorkspace key={page.id} pageId={page.id} context={context} refreshKey={refreshKey} runCommand={runCommand} openAction={openAction} onNotice={showNotice} onRefresh={() => {
+            setRefreshKey(key => key + 1);
+            if (page.id === "gates") void reloadContext();
+          }} />}
         </main>
         {notice && <div className="ops-toast" role="status" aria-live="polite"><span aria-hidden="true">✓</span>{notice}<button onClick={() => setNotice("")} aria-label="Cerrar aviso">×</button></div>}
       </div>
-      {action && <CommandDialog action={action} runCommand={runCommand} onClose={() => setAction(null)} onSuccess={message => { setAction(null); showNotice(message); setRefreshKey(key => key + 1); }} />}
+      {action && <CommandDialog action={action} runCommand={runCommand} onClose={() => setAction(null)} onSuccess={message => {
+        const completedAuthorityActivation = action.command === "AuthorityActivated";
+        setAction(null);
+        showNotice(message);
+        setRefreshKey(key => key + 1);
+        if (completedAuthorityActivation) void reloadContext();
+      }} />}
     </div>
   );
 }

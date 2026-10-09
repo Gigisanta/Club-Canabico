@@ -2753,7 +2753,7 @@ async function obligationsThirteenWeeks(range: ReportDateRange) {
     reportDb().operationAccount.count({ where: { active: true } }),
     reportDb().operationAccount.findMany({ where: { active: true }, select: { id: true, kind: true, currency: true, custodianId: true, verified: true, openingApprovedBy: true }, orderBy: [{ kind: "asc" }, { currency: "asc" }, { id: "asc" }], take: REPORT_ROW_LIMIT }),
     reportDb().ledgerLeg.groupBy({ by: ["accountId", "currency"], where: { event: { occurredAt: beforeHorizon } }, _sum: { amountMinor: true } }),
-    reportDb().decisionInputAttestation.findFirst({ where: { domain: "payables", scenario: null, complete: true, fromDate: { lte: new Date(`${firstWeekStart}T00:00:00.000Z`) }, throughDate: { gte: new Date(`${lastWeekEnd}T00:00:00.000Z`) } }, select: { id: true, sourceReference: true, fromDate: true, throughDate: true, confirmedAt: true }, orderBy: { confirmedAt: "desc" } }),
+    reportDb().decisionInputAttestation.findFirst({ where: { domain: "payables", scenario: null, fromDate: { lte: new Date(`${firstWeekStart}T00:00:00.000Z`) }, throughDate: { gte: new Date(`${lastWeekEnd}T00:00:00.000Z`) } }, select: { id: true, complete: true, sourceReference: true, fromDate: true, throughDate: true, confirmedAt: true }, orderBy: [{ confirmedAt: "desc" }, { complete: "asc" }, { id: "desc" }] }),
   ]);
   const payableRowsComplete = payables.length === payableCount;
   const payableSummary = payableSummaryRows[0];
@@ -2772,7 +2772,8 @@ async function obligationsThirteenWeeks(range: ReportDateRange) {
       AND r."accountId" IN (${Prisma.join(reconciliationIds)})
     ORDER BY r."accountId" ASC, r."date" DESC, r."createdAt" DESC, r."id" DESC
   `) : [];
-  const sourceCoverage = attestation && payableSummaryComplete ? "complete" as const : payableCount ? "partial" as const : "unknown" as const;
+  const sourceCoverage = attestation?.complete && payableSummaryComplete ? "complete" as const
+    : attestation || payableCount ? "partial" as const : "unknown" as const;
   const aggregate = aggregateThirteenWeekObligations(firstWeekStart, [], sourceCoverage);
   const weeklyGroupsByStart = new Map<string, typeof payableWeekGroups>();
   for (const row of payableWeekGroups) {
@@ -2868,7 +2869,7 @@ async function obligationsThirteenWeeks(range: ReportDateRange) {
   return queryEnvelope("obligations-13-weeks", range, {
     horizon: { from: firstWeekStart, through: lastWeekEnd, weeks: 13 },
     sourceCoverage: aggregate.sourceCoverage,
-    attestation: attestation ? { present: true, sourceReference: safeFinancialReference(attestation.sourceReference), fromDate: civilDateAt(attestation.fromDate), throughDate: civilDateAt(attestation.throughDate), confirmedAt: attestation.confirmedAt.toISOString() } : { present: false },
+    attestation: attestation?.complete ? { present: true, sourceReference: safeFinancialReference(attestation.sourceReference), fromDate: attestation.fromDate.toISOString().slice(0, 10), throughDate: attestation.throughDate.toISOString().slice(0, 10), confirmedAt: attestation.confirmedAt.toISOString() } : { present: false },
     weekly: payableSummaryComplete ? weeklySummary : null,
     payableSummaryComplete,
     invalidPayableDateCount: payableInvalidDateCount,
