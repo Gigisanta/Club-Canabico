@@ -122,6 +122,7 @@ function methodLabel(method: string) {
     "delivered-net-product-lines": "productos netos entregados",
     "actual-lot-cost": "costo real de lotes asignados",
     "approved-accrued-operating-costs": "costos operativos aprobados por devengamiento",
+    "verified-variable-and-fixed-operating-payables-by-accrual-month": "gastos operativos fijos y variables verificados por mes de devengamiento",
     "recognized-delivery-and-surcharge": "entrega y recargos reconocidos",
     "exact-minor-units": "cálculo exacto en unidades menores",
     "club-ledger-events-by-kind": "movimientos del libro del club, separados por tipo",
