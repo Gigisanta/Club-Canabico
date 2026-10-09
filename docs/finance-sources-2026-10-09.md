@@ -1,12 +1,12 @@
 # Fuentes financieras y control de origen
 
-Actualizado el 9 de octubre de 2026. Separa las observaciones de los archivos de los datos que Bombo reconoce como negocio canónico. Los snapshots técnicos no son aprobaciones y no se deben sumar como si fueran hechos de contabilidad.
+Actualizado el 9 de octubre de 2026 después del despliegue promovido y de la consulta de producción posterior. Separa las observaciones de los archivos de los datos que Bombo reconoce como negocio canónico. Los snapshots técnicos no son aprobaciones y no se deben sumar como si fueran hechos de contabilidad.
 
 ## Estado observado en producción
 
-Una consulta de producción en transacción `READ ONLY` terminó el 9 de octubre a las 13:06:59 UTC (`readOnly=true`). Confirmó un archivo empresarial con 17.695 registros y 4.395 excepciones; la fuente financiera tiene 3.693 registros. El control independiente de negocio y los 22 controles financieros por mes y moneda coincidieron exactamente.
+La consulta completa posterior a la promoción, en transacción `READ ONLY`, terminó el 9 de octubre a las 14:06:15.858 UTC (`readOnly=true`). Confirmó que se conservan 17.695 registros empresariales, 4.395 excepciones y 3.693 observaciones financieras. El control independiente de negocio y los 22 controles financieros por mes y moneda coincidieron exactamente.
 
-En la misma consulta, catálogo, proveedores, ubicaciones, cuentas canónicas, aperturas, saldos de stock, movimientos de libro, hechos y publicaciones históricos y cobertura aprobada estaban en cero. La lectura no modificó la base ni las fuentes. La ausencia de registros en esas tablas no demuestra que el negocio no haya operado; significa que no están asentados allí con evidencia canónica.
+En la misma consulta, catálogo, proveedores, ubicaciones, cuentas canónicas, aperturas, conciliaciones de cuenta, saldos de stock, movimientos de libro, hechos y publicaciones históricos y cobertura aprobada estaban en cero. La autoridad seguía en `shadow` y la aprobación operativa desactivada. La lectura no modificó la base ni las fuentes. La ausencia de registros en esas tablas no demuestra que el negocio no haya operado; significa que no están asentados allí con evidencia canónica.
 
 ## Fuente financiera del XLSX
 
@@ -30,9 +30,9 @@ Las filas siguen siendo evidencia fuente. No crean socios activos, productos, ve
 
 ## Revisión y seguimiento en la UI
 
-En el worktree se está preparando el recorrido **Datos cargados** (`/app/operations?section=sources`) para buscar fuentes, revisar tablas y filas, paginar excepciones y registrar seguimiento auditable separado. También está el recorrido **Finanzas** (`/app/operations?section=finance`) para las vistas financieras. El seguimiento sólo agrega un evento/objeto nuevo con responsable, estado y nota: no edita el XLSX ni sus filas, no aprueba ni resuelve la fuente y no publica operaciones canónicas.
+En producción están disponibles **[Datos cargados](https://bombo.maat.work/app/operations?section=sources)** para buscar fuentes, revisar tablas y filas, paginar excepciones y registrar seguimiento auditable separado, y **[Finanzas](https://bombo.maat.work/app/finanzas)** para las vistas financieras. El seguimiento sólo agrega un registro nuevo con responsable, estado y nota: no edita el XLSX ni sus filas, no aprueba ni resuelve la fuente y no publica operaciones canónicas.
 
-Estos cambios de interfaz/API aún no pasaron QA final ni están desplegados. La producción comprobada sigue en `dpl_BY98m5SQNsPRqGvrKFdiDsZ3yKvn` (`cf6124e`). La navegación de esta sección es una ruta del código en preparación, no una pantalla que ya se pueda dar por disponible en el dominio.
+La release promovida es `dpl_2nmY3CSW2fziPES1hVdtVwNusowk`, con runtime commit `58373c1228c5412638ee78ca28639b587b9c76ed`. La inspección de Vercel resolvió explícitamente el dominio de producción a ese mismo deployment en estado `READY`. Su URL de etapa es [bombo-9ya2skcy2-giolivos-projects.vercel.app](https://bombo-9ya2skcy2-giolivos-projects.vercel.app). La comprobación pública de `https://bombo.maat.work` el 9 de octubre a las 14:02:04.203 UTC identificó ese release: 288 archivos, 287 idénticos al preparado; la única diferencia fue `vercel.json` con los campos exactos agregados por la CLI de Vercel. Huella remota `4d0ae81d2d92a876039bd50aef7305ac1df1189a1f832dadb40f45ec15878b43`, Node 24.21, `demo: false`; siete rutas privadas devolvieron `401` y `no-store` sin sesión.
 
 La UI financiera debe distinguir períodos incompletos y saldos ausentes como pendientes. Los movimientos observados del XLSX pueden apoyar el análisis del archivo, pero no autorizan por sí solos una proyección completa ni se deben presentar como saldo inicial o conciliación bancaria.
 
@@ -44,6 +44,14 @@ Las búsquedas acotadas en el Drive conectado no devolvieron archivos de definic
 
 ## Evidencia técnica y límites
 
-La preparación y aplicación real de ambas fuentes tuvieron manifiestos y backups previos; los backups y sus claves permanecen fuera de Git. Las verificaciones de código y navegador aprobadas para el release `cf6124e` corresponden al código que ya estaba publicado, con PostgreSQL 18 descartable y datos sintéticos. Ese CI aprobó 298 pruebas de código, 57 recorridos de navegador y 13 controles offline, más typecheck, build, restore e imágenes de contingencia/backup. No prueba los nuevos recorridos de fuentes/finanzas del worktree ni aceptación autenticada con una cuenta humana en producción.
+`npm run check` local terminó con typecheck/build y 296 pruebas aprobadas; una prueba de restauración se omitió porque requiere opt-in local. Huella del build final: `a4182137a316bc3f29340ee0b396fee73da6ba93a16819c2a779f86ba4129777`. Los recorridos de navegador afectados (nueve existentes y el nuevo de fuentes) pasaron; el caso nuevo confirmó el uso de búsqueda/paginación y seguimiento, y la vista financiera se verificó a 390 px sin desbordamiento, con trece semanas en ARS/USD y saldos pendientes cuando falta una apertura. La revisión independiente cerró con cero defectos.
+
+Los CI del [PR 37939766654](https://github.com/Gigisanta/Club-Canabico/actions/runs/37939766654) y del [push 37939758869](https://github.com/Gigisanta/Club-Canabico/actions/runs/37939758869) terminaron en `SUCCESS`. El run del PR pasó con 299 pruebas de código, cero omisiones y cero fallos, 58 recorridos de navegador, 13 controles offline, restore e imágenes de contingencia/backup.
+
+La comprobación pública sin sesión validó el release y las rutas privadas. El navegador real abrió `/app/finanzas` y llegó a la pantalla de acceso; no había sesión autenticada, así que la aceptación de punta a punta con una cuenta humana en producción sigue pendiente. No se ingresaron credenciales.
+
+Las métricas no implican cierre completo. El estado de resultados operativo usa entregas, costos de lote y gastos canónicos; las observaciones del XLSX no se toman como ventas. El flujo requiere aperturas de cuenta y cierres conciliados. La vista de trece semanas contiene sólo obligaciones/supuestos registrados, sin ingresos ni saldo final proyectados. La cobertura completa de vencimientos sigue pendiente: el esquema actual no admite la constancia `payables` que consulta el reporte. El contexto sigue en `shadow`, sin datos canónicos y con activación operativa pendiente.
+
+La preparación y aplicación real de ambas fuentes tuvieron manifiestos y backups previos; los backups y sus claves permanecen fuera de Git. La evidencia de CI anterior corresponde al release previo, y no sustituye la evidencia nueva indicada arriba.
 
 La última lectura de producción indicada al inicio sólo consultó conteos y controles agregados en modo lectura. No consultó ni reproduce filas privadas en este documento. Para la preparación financiera y el contexto de la reunión, ver [Finanzas para Tiziano](finance-meeting-2026-10-09.md). El alcance empresarial, los controles manuales y el corte pendiente están en [Migración AppSheet](appsheet-migration-2026-10-09.md).
