@@ -2067,13 +2067,13 @@ async function existingHistorySnapshotMatches(
     sourceRow: record.sourceRow, fileHash: record.fileHash, contentHash: record.contentHash, importerVersion: record.importerVersion,
     original: JSON.parse(record.originalText), normalized: JSON.parse(record.normalizedText), treatment: record.treatment,
   })).sort(compareHistoryRowId);
-  const actualFacts = storedFacts.map((fact) => compactPersistedFact({
+  const actualFacts = [...storedFacts].sort(compareHistoryRowId).map((fact) => compactPersistedFact({
     id: fact.id, snapshotId: fact.snapshotId, sourceRecordId: fact.sourceRecordId, sourceTable: fact.sourceTable, sourceKey: fact.sourceKey,
     sourceRow: fact.sourceRow, sourceHash: fact.sourceHash, mappingId: fact.mappingId, kind: fact.kind, occurredOn: fact.occurredOn,
     dateState: fact.dateState, currency: fact.currency, currencyState: fact.currencyState, unit: fact.unit, unitState: fact.unitState,
     amountMinor: fact.amountMinor, amountState: fact.amountState, quantity: fact.quantity, quantityState: fact.quantityState,
     attributes: fact.attributes, createdBy: fact.createdBy,
-  })).sort(compareHistoryRowId);
+  }));
   const actualExceptions = storedExceptions.map((exception) => ({
     id: exception.id, sourceRecordId: exception.sourceRecordId, kind: exception.kind, severity: exception.severity,
     description: exception.description, resolution: exception.resolution, status: exception.status,
