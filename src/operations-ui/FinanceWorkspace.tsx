@@ -80,7 +80,7 @@ const accountEvidence = z.object({
   reconciledThrough: civilDate.nullable(),
 });
 
-const custodyEvidence = accountEvidence.extend({
+const custodyEvidence = accountEvidence.omit({ kind: true }).extend({
   custodianId: z.string().nullable(),
   excludedFromClubSpendableCash: z.literal(true),
 });
