@@ -75,6 +75,29 @@ type CatalogSkuFields = {
   minQuantity: string;
   minVarieties: number;
 };
+type CatalogSku = CatalogSkuFields & { active: boolean; lots: StockLot[] };
+
+function catalogSkuSnapshot(sku: CatalogSku) {
+  return {
+    ...sku,
+    lots: sku.lots
+      .map(lot => ({ ...lot, balances: [...lot.balances].sort((left, right) => left.id.localeCompare(right.id)) }))
+      .sort((left, right) => left.id.localeCompare(right.id)),
+  };
+}
+
+function gramsInMilliunits(value: unknown): bigint {
+  expect(typeof value).toBe("string");
+  const decimal = value as string;
+  expect(decimal).toMatch(/^\d+(?:\.\d+)?$/);
+  const [whole, fraction = ""] = decimal.split(".");
+  expect(fraction.slice(3), `gram quantity ${decimal} has no nonzero precision below 0.001`).toMatch(/^0*$/);
+  return BigInt(whole!) * 1000n + BigInt(fraction.slice(0, 3).padEnd(3, "0"));
+}
+
+function expectGrams(actual: unknown, expected: string) {
+  expect(gramsInMilliunits(actual)).toBe(gramsInMilliunits(expected));
+}
 
 async function login(page: Page) {
   await page.goto("/app/operations");
@@ -517,40 +540,50 @@ test("a catalog failure blocks receiving only the pending line after another SKU
 
 test("a confirmed reservation remains preparable by lot after its SKU is deactivated", async ({ page }) => {
   await login(page);
-  const owner = await getOperation<{ rehearsal: boolean; authority: { mode: string } }>(page, "context");
+  const owner = await getOperation<{ userId: string; rehearsal: boolean; authority: { mode: string } }>(page, "context");
   expect(owner.rehearsal).toBe(true);
   expect(owner.authority.mode).toBe("shadow");
 
   const appOrigin = new URL(page.url()).origin;
-  const skuId = "ops-sku-b";
+  const seedSkuId = "ops-sku-b";
   const catalogBefore = await getOperation<{
-    items: Array<{ id: string; code: string; name: string; variety: string; category: string; unit: string; active: boolean; minQuantity: string; minVarieties: number; lots: StockLot[] }>;
+    items: CatalogSku[];
     versions: Record<string, number>;
   }>(page, "catalog");
-  const sku = catalogBefore.items.find(item => item.id === skuId);
-  expect(sku?.active).toBe(true);
-  expect(sku).toBeDefined();
-  const seededBalance = sku!.lots.flatMap(lot => lot.balances.map(balance => ({ lot, balance })))
-    .find(({ balance }) => balance.locationId === "ops-warehouse");
+  const seedSku = catalogBefore.items.find(item => item.id === seedSkuId);
+  expect(seedSku?.active).toBe(true);
+  expect(seedSku).toBeDefined();
+  const seedSkuSnapshot = catalogSkuSnapshot(seedSku!);
+  const seedSkuVersion = catalogBefore.versions[seedSkuId];
+  expect(Number.isInteger(seedSkuVersion)).toBe(true);
+  const seedInventoryBefore = inventoryReportSnapshot(await getInventoryReport(page))
+    .filter(balance => balance.skuId === seedSkuId);
+  expect(seedInventoryBefore.length).toBeGreaterThan(0);
+  const seededBalance = seedSku!.lots.flatMap(lot => lot.balances.map(balance => ({ lot, balance })))
+    .find(({ lot, balance }) => balance.locationId === "ops-warehouse" && lot.label === "Etiqueta repetida de ensayo");
   expect(seededBalance).toBeDefined();
-  const { lot: seededLot, balance: seededStock } = seededBalance!;
+  const { lot: sharedSeedLot, balance: sharedSeedBalance } = seededBalance!;
+  const seedBalanceRow = seedInventoryBefore.filter(balance =>
+    balance.lotId === sharedSeedLot.id && balance.locationId === sharedSeedBalance.locationId
+      && balance.custodianId === sharedSeedBalance.custodianId,
+  );
+  expect(seedBalanceRow).toHaveLength(1);
+  const inventoryBefore = seedBalanceRow[0]!;
+  expectGrams(sharedSeedBalance.quantity, inventoryBefore.balanceQuantity);
+  expectGrams(sharedSeedBalance.reserved, inventoryBefore.reservedQuantity);
+  expect(gramsInMilliunits(inventoryBefore.availableQuantity)).toBe(
+    gramsInMilliunits(inventoryBefore.balanceQuantity) - gramsInMilliunits(inventoryBefore.reservedQuantity),
+  );
 
-  const inventoryBalance = (report: InventoryReport) => {
-    const found = report.summary.metrics.current.availableBalancesByLotLocationCustodian.find(balance =>
-      balance.lotId === seededLot.id && balance.skuId === skuId && balance.locationId === seededStock.locationId
-        && balance.custodianId === seededStock.custodianId,
-    );
-    expect(found, `balance visible for lot ${seededLot.id}`).toBeDefined();
-    return found!;
+  const assertSeedSkuUnchanged = async (report: InventoryReport) => {
+    const currentCatalog = await getOperation<{ items: CatalogSku[]; versions: Record<string, number> }>(page, "catalog");
+    const currentSeedSku = currentCatalog.items.find(item => item.id === seedSkuId);
+    expect(currentSeedSku).toBeDefined();
+    expect(catalogSkuSnapshot(currentSeedSku!)).toEqual(seedSkuSnapshot);
+    expect(currentCatalog.versions[seedSkuId]).toBe(seedSkuVersion);
+    expect(inventoryReportSnapshot(report).filter(balance => balance.skuId === seedSkuId)).toEqual(seedInventoryBefore);
   };
-  const inventoryBefore = inventoryBalance(await getInventoryReport(page));
-  const quantityBefore = Number(inventoryBefore.balanceQuantity);
-  const reservedBefore = Number(inventoryBefore.reservedQuantity);
-  expect(quantityBefore).toBeGreaterThanOrEqual(5);
-  expect(Number(inventoryBefore.availableQuantity)).toBe(quantityBefore - reservedBefore);
 
-  const orderId = randomUUID();
-  const lineId = randomUUID();
   const postCommand = async (command: string, targetId: string, expectedVersion: number, data: Record<string, unknown>) => {
     const response = await page.request.post("/api/operations/commands", {
       headers: { Origin: appOrigin },
@@ -561,48 +594,122 @@ test("a confirmed reservation remains preparable by lot after its SKU is deactiv
     return body as { version: number; result: Record<string, any> };
   };
 
-  const created = await postCommand("OrderCreated", orderId, 0, {
-    memberId: "ops-member",
-    channel: "local",
-    currency: "ARS",
-  });
-  expect(created.result.order).toMatchObject({ id: orderId, commercialState: "draft" });
-  const quoted = await postCommand("OrderQuoted", orderId, created.version, {
-    currency: "ARS",
-    paymentMethod: "cash",
-    items: [{ id: lineId, skuId, quantity: "5", policyId: "ops-policy", scale: "escala-5" }],
-    deliveryPolicyEvidence: { approvedPolicyIds: ["ops-policy"] },
-  });
-  const confirmed = await postCommand("OrderConfirmed", orderId, quoted.version, {
-    quoteVersion: 1,
-    acceptance: { note: "Aceptación sintética para validar preparación." },
-  });
-  expect(confirmed.result.commercialState).toBe("confirmed");
-
-  const reservedDetail = await getOperation<OrderDetail>(page, `orders/${orderId}`);
-  expect(reservedDetail.order).toMatchObject({ id: orderId, commercialState: "confirmed", fulfillmentState: "unprepared" });
-  expect(reservedDetail.reservations).toContainEqual(expect.objectContaining({
-    lineId,
-    balanceId: seededStock.id,
-    quantity: "5",
-    balance: {
-      id: seededStock.id,
-      lotId: seededLot.id,
-      skuId,
-      skuName: sku!.name,
-      unit: "g",
-      lotLabel: seededLot.label,
-    },
-  }));
-  const inventoryReserved = inventoryBalance(await getInventoryReport(page));
-  expect(Number(inventoryReserved.balanceQuantity)).toBe(quantityBefore);
-  expect(Number(inventoryReserved.reservedQuantity)).toBe(reservedBefore + 5);
-  expect(Number(inventoryReserved.availableQuantity)).toBe(Number(inventoryBefore.availableQuantity) - 5);
-
+  const skuId = randomUUID();
+  const skuCode = `E2E-${skuId.replaceAll("-", "").toUpperCase()}`;
+  const skuName = `SKU E2E ${skuId}`;
+  const skuVariety = `Variedad E2E ${skuId}`;
+  let sku: CatalogSkuFields | null = null;
   let skuDeactivationAttempted = false;
   try {
+    const createdSku = await postCommand("CatalogSkuCreated", skuId, 0, {
+      code: skuCode,
+      name: skuName,
+      variety: skuVariety,
+      category: seedSku!.category,
+      unit: seedSku!.unit,
+      minQuantity: seedSku!.minQuantity,
+      minVarieties: seedSku!.minVarieties,
+      evidence: { reference: `e2e-own-sku-${randomUUID()}`, scope: "synthetic rehearsal fixture" },
+    });
+    sku = createdSku.result.sku as CatalogSkuFields;
+    expect(createdSku.version).toBe(1);
+    expect(sku).toMatchObject({ id: skuId, code: skuCode, name: skuName, variety: skuVariety, active: true });
+    const catalogAfterCreate = await getOperation<{ items: CatalogSku[]; versions: Record<string, number> }>(page, "catalog");
+    const createdCatalogSku = catalogAfterCreate.items.find(item => item.id === skuId);
+    expect(createdCatalogSku).toMatchObject({ ...sku, active: true });
+    const skuVersion = catalogAfterCreate.versions[skuId];
+    expect(Number.isInteger(skuVersion)).toBe(true);
+    await assertSeedSkuUnchanged(await getInventoryReport(page));
+
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires" }).format(new Date());
+    const ownLotId = randomUUID();
+    const ownLotLabel = `E2E lote propio ${randomUUID().slice(0, 8)}`;
+    const openingEvidence = `e2e-own-reservation-stock-${randomUUID()}`;
+    const opening = await postCommand("StockOpeningRecorded", ownLotId, 0, {
+      skuId,
+      label: ownLotLabel,
+      quantity: "5",
+      unitCost: "2000",
+      costCurrency: "ARS",
+      receivedDate: today,
+      locationId: sharedSeedBalance.locationId,
+      custodianId: owner.userId,
+      preparedBy: "ops-stock",
+      evidence: { reference: openingEvidence, scope: "synthetic rehearsal fixture" },
+    });
+    expect(opening.result.lot).toMatchObject({ id: ownLotId, label: ownLotLabel, skuId });
+    const ownStock = opening.result.balance as StockBalance;
+    expect(ownStock).toMatchObject({ id: expect.any(String), quantity: "5.000", reserved: "0.000", locationId: sharedSeedBalance.locationId, custodianId: owner.userId });
+    expect(opening.result.opening).toMatchObject({ preparedBy: "ops-stock", approvedBy: owner.userId });
+    expectGrams(opening.result.opening.quantity, "5");
+
+    const ownInventoryBalance = (report: InventoryReport) => {
+      const matchingBalances = report.summary.metrics.current.availableBalancesByLotLocationCustodian.filter(balance =>
+        balance.lotId === ownLotId && balance.skuId === skuId && balance.locationId === sharedSeedBalance.locationId
+          && balance.custodianId === owner.userId,
+      );
+      expect(matchingBalances, `synthetic balance visible for lot ${ownLotId}`).toHaveLength(1);
+      return matchingBalances[0]!;
+    };
+    const inventoryAfterOpening = await getInventoryReport(page);
+    const ownInventoryBefore = ownInventoryBalance(inventoryAfterOpening);
+    expect(ownInventoryBefore).toMatchObject({ lotId: ownLotId, lotLabel: ownLotLabel, skuId, locationId: sharedSeedBalance.locationId, custodianId: owner.userId, unit: "g" });
+    expectGrams(ownInventoryBefore.balanceQuantity, "5");
+    expectGrams(ownInventoryBefore.reservedQuantity, "0");
+    expectGrams(ownInventoryBefore.availableQuantity, "5");
+    await assertSeedSkuUnchanged(inventoryAfterOpening);
+
+    const orderId = randomUUID();
+    const lineId = randomUUID();
+
+    const created = await postCommand("OrderCreated", orderId, 0, {
+      memberId: "ops-member",
+      channel: "local",
+      currency: "ARS",
+    });
+    expect(created.result.order).toMatchObject({ id: orderId, commercialState: "draft" });
+    const quoted = await postCommand("OrderQuoted", orderId, created.version, {
+      currency: "ARS",
+      paymentMethod: "cash",
+      items: [{ id: lineId, skuId, quantity: "5", manualUnitPrice: "5500", manualReason: "Precio manual sintético para aislar la reserva." }],
+    });
+    const confirmed = await postCommand("OrderConfirmed", orderId, quoted.version, {
+      quoteVersion: 1,
+      acceptance: { note: "Aceptación sintética para validar preparación." },
+    });
+    expect(confirmed.result.commercialState).toBe("confirmed");
+
+    const reservedDetail = await getOperation<OrderDetail>(page, `orders/${orderId}`);
+    expect(reservedDetail.order).toMatchObject({ id: orderId, commercialState: "confirmed", fulfillmentState: "unprepared" });
+    expect(reservedDetail.order.lines).toHaveLength(1);
+    expectGrams(reservedDetail.order.lines[0]!.requested, "5");
+    expectGrams(reservedDetail.order.lines[0]!.prepared, "0");
+    expectGrams(reservedDetail.order.lines[0]!.delivered, "0");
+    expect(reservedDetail.reservations).toHaveLength(1);
+    const reservation = reservedDetail.reservations[0]!;
+    expect(reservation).toMatchObject({
+      lineId,
+      balanceId: ownStock.id,
+      balance: {
+        id: ownStock.id,
+        lotId: ownLotId,
+        skuId,
+        skuName: sku!.name,
+        unit: "g",
+        lotLabel: ownLotLabel,
+      },
+    });
+    expectGrams(reservation.quantity, "5");
+    expectGrams(reservation.consumed, "0");
+    const inventoryReserved = await getInventoryReport(page);
+    await assertSeedSkuUnchanged(inventoryReserved);
+    const ownInventoryReserved = ownInventoryBalance(inventoryReserved);
+    expectGrams(ownInventoryReserved.balanceQuantity, "5");
+    expectGrams(ownInventoryReserved.reservedQuantity, "5");
+    expectGrams(ownInventoryReserved.availableQuantity, "0");
+
     skuDeactivationAttempted = true;
-    const deactivated = await postCommand("CatalogSkuUpdated", skuId, catalogBefore.versions[skuId], {
+    const deactivated = await postCommand("CatalogSkuUpdated", skuId, skuVersion, {
       code: sku!.code,
       name: sku!.name,
       variety: sku!.variety,
@@ -611,22 +718,26 @@ test("a confirmed reservation remains preparable by lot after its SKU is deactiv
       minQuantity: sku!.minQuantity,
       minVarieties: sku!.minVarieties,
       active: false,
-      evidence: { reference: "e2e-inactive-sku-reservation", scope: "synthetic rehearsal fixture" },
+      evidence: { reference: `e2e-inactive-sku-reservation-${randomUUID()}`, scope: "synthetic rehearsal fixture" },
     });
     expect(deactivated.result.sku).toMatchObject({ id: skuId, active: false });
+    expect(deactivated.version).toBe(skuVersion + 1);
 
     const inactiveCatalog = await getOperation<{ items: Array<{ id: string; active: boolean }> }>(page, "catalog");
     expect(inactiveCatalog.items.some(item => item.id === skuId)).toBe(false);
     const inactiveDetail = await getOperation<OrderDetail>(page, `orders/${orderId}`);
     expect(inactiveDetail.order.lines).toHaveLength(1);
     expect(inactiveDetail.order.lines[0]).toMatchObject({ id: lineId, skuId, skuName: sku!.name, unit: "g" });
+    expectGrams(inactiveDetail.order.lines[0]!.requested, "5");
+    expectGrams(inactiveDetail.order.lines[0]!.prepared, "0");
+    expectGrams(inactiveDetail.order.lines[0]!.delivered, "0");
     expect(inactiveDetail.reservations[0]?.balance).toMatchObject({
-      id: seededStock.id,
-      lotId: seededLot.id,
+      id: ownStock.id,
+      lotId: ownLotId,
       skuId,
       skuName: sku!.name,
       unit: "g",
-      lotLabel: seededLot.label,
+      lotLabel: ownLotLabel,
     });
 
     await page.goto("/app/operations?section=orders");
@@ -638,7 +749,7 @@ test("a confirmed reservation remains preparable by lot after its SKU is deactiv
     await page.route(`**${detailPath}`, async route => {
       const response = await route.fetch();
       const body = await response.json();
-      expect(body.reservations?.[0]?.balance).toMatchObject({ id: seededStock.id, skuId });
+      expect(body.reservations?.[0]?.balance).toMatchObject({ id: ownStock.id, skuId });
       body.reservations[0].balance = null;
       await route.fulfill({ response, json: body });
     });
@@ -646,7 +757,9 @@ test("a confirmed reservation remains preparable by lot after its SKU is deactiv
     await orderRow.getByRole("button", { name: "Preparar por lote", exact: true }).click();
     await expect(page.getByText("La preparación queda pausada", { exact: false })).toBeVisible();
     expect(commandPosts.envelopes.filter(envelope => envelope.command === "OrderPrepared")).toHaveLength(0);
-    expect(inventoryBalance(await getInventoryReport(page))).toEqual(inventoryReserved);
+    const inventoryAfterBlockedPrepare = await getInventoryReport(page);
+    await assertSeedSkuUnchanged(inventoryAfterBlockedPrepare);
+    expect(ownInventoryBalance(inventoryAfterBlockedPrepare)).toEqual(ownInventoryReserved);
     const unchangedAfterBlock = await getOperation<OrderDetail>(page, `orders/${orderId}`);
     expect(unchangedAfterBlock.order.fulfillmentState).toBe("unprepared");
     expect(unchangedAfterBlock.allocations).toHaveLength(0);
@@ -654,15 +767,15 @@ test("a confirmed reservation remains preparable by lot after its SKU is deactiv
 
     await orderRow.getByRole("button", { name: "Preparar por lote", exact: true }).click();
     const dialog = page.getByRole("dialog");
-    await expect(dialog.getByLabel(`Cantidad reservada · ${sku!.name} · ${seededLot.label}`)).toHaveValue("5");
+    await expect(dialog.getByLabel(`Cantidad reservada · ${sku!.name} · ${ownLotLabel}`)).toHaveValue("5");
     await expect(dialog.getByLabel(`Peso real · ${sku!.name}`, { exact: true })).toHaveValue("5");
     await dialog.getByLabel("Evidencia de preparación").fill("Preparación sintética sobre la reserva confirmada.");
     const prepared = await submitCommand(page, "OrderPrepared", "Revisar y registrar");
     expect(prepared.envelope.targetId).toBe(orderId);
     expect(prepared.envelope.data.allocations).toEqual([{
       lineId,
-      lotId: seededLot.id,
-      balanceId: seededStock.id,
+      lotId: ownLotId,
+      balanceId: ownStock.id,
       requestedQuantity: "5",
       actualQuantity: "5",
     }]);
@@ -671,22 +784,35 @@ test("a confirmed reservation remains preparable by lot after its SKU is deactiv
 
     const preparedDetail = await getOperation<OrderDetail>(page, `orders/${orderId}`);
     expect(preparedDetail.order).toMatchObject({ fulfillmentState: "prepared" });
+    expect(preparedDetail.order.lines).toHaveLength(1);
     expect(preparedDetail.order.lines[0]?.skuName).toBe(sku!.name);
-    expect(Number(preparedDetail.order.lines.find(line => line.id === lineId)?.prepared)).toBe(5);
-    expect(preparedDetail.allocations).toContainEqual(expect.objectContaining({
+    const preparedLine = preparedDetail.order.lines.find(line => line.id === lineId);
+    expect(preparedLine).toBeDefined();
+    expectGrams(preparedLine!.requested, "5");
+    expectGrams(preparedLine!.prepared, "5");
+    expectGrams(preparedLine!.delivered, "0");
+    expect(preparedDetail.allocations).toHaveLength(1);
+    const preparedAllocation = preparedDetail.allocations[0]!;
+    expect(preparedAllocation).toMatchObject({
       lineId,
-      lotId: seededLot.id,
-      balanceId: seededStock.id,
-      requestedQuantity: "5",
-      actualQuantity: "5",
+      lotId: ownLotId,
+      balanceId: ownStock.id,
       state: "prepared",
-    }));
+    });
+    expectGrams(preparedAllocation.requestedQuantity, "5");
+    expectGrams(preparedAllocation.actualQuantity, "5");
+    expectGrams(preparedAllocation.deliveredQuantity, "0");
     expect(preparedDetail.reservations).toHaveLength(0);
     expect(preparedDetail.version).toBe(prepared.envelope.expectedVersion + 1);
-    const inventoryPrepared = inventoryBalance(await getInventoryReport(page));
-    expect(Number(inventoryPrepared.balanceQuantity)).toBe(quantityBefore - 5);
-    expect(Number(inventoryPrepared.reservedQuantity)).toBe(reservedBefore);
-    expect(Number(inventoryPrepared.availableQuantity)).toBe(Number(inventoryReserved.availableQuantity));
+    const inventoryPrepared = await getInventoryReport(page);
+    await assertSeedSkuUnchanged(inventoryPrepared);
+    const ownInventoryPrepared = ownInventoryBalance(inventoryPrepared);
+    expectGrams(ownInventoryPrepared.balanceQuantity, "0");
+    expectGrams(ownInventoryPrepared.reservedQuantity, "0");
+    expectGrams(ownInventoryPrepared.availableQuantity, "0");
+    expect(gramsInMilliunits(ownInventoryPrepared.balanceQuantity)).toBe(
+      gramsInMilliunits(ownInventoryBefore.balanceQuantity) - 5000n,
+    );
 
     const ordersBeforePickupResponse = page.waitForResponse(response =>
       new URL(response.url()).pathname === "/api/operations/orders" && response.request().method() === "GET" && response.status() === 200,
@@ -707,9 +833,9 @@ test("a confirmed reservation remains preparable by lot after its SKU is deactiv
     expect(orderBeforePickup).toMatchObject({ id: orderId, channel: "local", commercialState: "confirmed", fulfillmentState: "prepared" });
     expect(orderBeforePickup?.lines).toHaveLength(1);
     expect(orderBeforePickup?.lines[0]).toMatchObject({ id: lineId, skuId, skuName: sku!.name, unit: "g" });
-    expect(Number(orderBeforePickup?.lines[0]?.requested)).toBe(5);
-    expect(Number(orderBeforePickup?.lines[0]?.prepared)).toBe(5);
-    expect(Number(orderBeforePickup?.lines[0]?.delivered)).toBe(0);
+    expectGrams(orderBeforePickup!.lines[0]!.requested, "5");
+    expectGrams(orderBeforePickup!.lines[0]!.prepared, "5");
+    expectGrams(orderBeforePickup!.lines[0]!.delivered, "0");
     const pickupVersionBefore = ordersBeforePickup.versions[orderId];
     expect(pickupVersionBefore).toBe(preparedDetail.version);
 
@@ -731,11 +857,14 @@ test("a confirmed reservation remains preparable by lot after its SKU is deactiv
       data: { lines: [{ lineId, quantity: "5", actualQuantity: "5" }] },
     });
     expect(pickupCommandPosts.envelopes.filter(envelope => envelope.command === "LocalPickupCompleted")).toHaveLength(1);
-    expect(pickup.body.result.result).toMatchObject({
+    const pickupResult = pickup.body.result.result as { orderId: string; fulfillmentState: string; lines: Array<{ lineId: string; deliveredQuantity: string }> };
+    expect(pickupResult).toMatchObject({
       orderId,
       fulfillmentState: "delivered",
-      lines: [expect.objectContaining({ lineId, deliveredQuantity: "5.000" })],
+      lines: [expect.objectContaining({ lineId })],
     });
+    expect(pickupResult.lines).toHaveLength(1);
+    expectGrams(pickupResult.lines[0]!.deliveredQuantity, "5");
     expect(pickup.body.version).toBe(pickupVersionBefore + 1);
 
     const pickedUpDetail = await getOperation<OrderDetail>(page, `orders/${orderId}`);
@@ -743,19 +872,30 @@ test("a confirmed reservation remains preparable by lot after its SKU is deactiv
     expect(pickedUpDetail.order).toMatchObject({ id: orderId, fulfillmentState: "delivered" });
     expect(pickedUpDetail.order.lines).toHaveLength(1);
     expect(pickedUpDetail.order.lines[0]).toMatchObject({ id: lineId, skuId, skuName: sku!.name, unit: "g" });
-    expect(Number(pickedUpDetail.order.lines[0]?.prepared)).toBe(5);
-    expect(Number(pickedUpDetail.order.lines[0]?.delivered)).toBe(5);
+    expectGrams(pickedUpDetail.order.lines[0]!.requested, "5");
+    expectGrams(pickedUpDetail.order.lines[0]!.prepared, "5");
+    expectGrams(pickedUpDetail.order.lines[0]!.delivered, "5");
     expect(pickedUpDetail.allocations).toHaveLength(1);
-    expect(pickedUpDetail.allocations[0]).toMatchObject({
+    const pickedUpAllocation = pickedUpDetail.allocations[0]!;
+    expect(pickedUpAllocation).toMatchObject({
       lineId,
-      lotId: seededLot.id,
-      balanceId: seededStock.id,
+      lotId: ownLotId,
+      balanceId: ownStock.id,
       state: "delivered",
     });
-    expect(Number(pickedUpDetail.allocations[0]?.deliveredQuantity)).toBe(5);
+    expectGrams(pickedUpAllocation.requestedQuantity, "5");
+    expectGrams(pickedUpAllocation.actualQuantity, "5");
+    expectGrams(pickedUpAllocation.deliveredQuantity, "5");
+    const inventoryAfterPickup = await getInventoryReport(page);
+    await assertSeedSkuUnchanged(inventoryAfterPickup);
+    expect(ownInventoryBalance(inventoryAfterPickup)).toEqual(ownInventoryPrepared);
   } finally {
-    if (skuDeactivationAttempted) {
-      await restoreActiveSku(page, sku!, "e2e-restore-sku-b-after-local-pickup");
+    try {
+      if (skuDeactivationAttempted && sku) {
+        await restoreActiveSku(page, sku, `e2e-restore-own-sku-${skuId}`);
+      }
+    } finally {
+      await assertSeedSkuUnchanged(await getInventoryReport(page));
     }
   }
 });

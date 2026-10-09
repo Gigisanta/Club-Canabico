@@ -106,8 +106,8 @@ test("local pre-order keeps its approved price while physical extra and partial 
   for (const [quantity, physical] of [["2", "2,014"], ["3", "3,021"]]) {
     await row.getByRole("button", { name: "Completar retiro", exact: true }).click();
     dialog = page.getByRole("dialog");
-    await dialog.getByLabel("Cantidad entregada · Variedad B", { exact: true }).fill(quantity!);
-    await dialog.getByLabel("Cantidad física · Variedad B", { exact: true }).fill(physical!);
+    await dialog.getByLabel("Cantidad entregada · renglón 1: Variedad B", { exact: true }).fill(quantity!);
+    await dialog.getByLabel("Cantidad física · renglón 1: Variedad B", { exact: true }).fill(physical!);
     await dialog.getByLabel("Evidencia del retiro").fill("Retiro parcial sintético, sin volver a descontar stock.");
     // Delay the real refreshed read: the committed pickup must disable stale actions
     // until the server's next version and remaining quantities reach the screen.
