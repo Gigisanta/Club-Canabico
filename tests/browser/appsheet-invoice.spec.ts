@@ -1,4 +1,4 @@
-import type { Page, Request } from "@playwright/test";
+import type { Page, Request, Route } from "@playwright/test";
 import { expect, test } from "./isolated";
 
 type CommandEnvelope = {
@@ -89,7 +89,7 @@ async function addMoto(page: Page, invoice: ReturnType<Page["getByTestId"]>, val
   adminTariff: string;
   totalTariff: string;
   notes: string;
-}) {
+}, inspect?: (moto: ReturnType<Page["getByTestId"]>) => Promise<void>) {
   await invoice.getByTestId("appsheet-add-moto").click();
   const moto = page.getByTestId("appsheet-moto-dialog");
   await expect(moto).toBeVisible();
@@ -101,6 +101,7 @@ async function addMoto(page: Page, invoice: ReturnType<Page["getByTestId"]>, val
   await field(moto, "moto-adminTariff").fill(values.adminTariff);
   await field(moto, "moto-totalTariff").fill(values.totalTariff);
   await field(moto, "moto-notes").fill(values.notes);
+  if (inspect) await inspect(moto);
   await moto.getByRole("button", { name: "Añadir viaje en moto", exact: true }).click();
   await expect(moto).toHaveCount(0);
 }
@@ -111,6 +112,21 @@ async function getJson(page: Page, path: string) {
     throw new Error(`${path}: ${await response.text()}`);
   }
   return response.json();
+}
+
+async function fulfillCatalogAvailability(route: Route, availability: (skuId: string) => string | undefined) {
+  const response = await route.fetch();
+  if (response.status() !== 200) return route.fulfill({ response });
+  const body = await response.json() as { items?: Array<Record<string, unknown>> };
+  const items = (body.items ?? []).map(item => {
+    const appSheet = item.appSheet && typeof item.appSheet === "object" && !Array.isArray(item.appSheet)
+      ? item.appSheet as Record<string, unknown>
+      : {};
+    const { availability: _previous, ...rest } = appSheet;
+    const nextAvailability = availability(String(item.id));
+    return { ...item, appSheet: nextAvailability === undefined ? rest : { ...rest, availability: nextAvailability } };
+  });
+  return route.fulfill({ response, json: { ...body, items } });
 }
 
 async function financeSnapshot(page: Page) {
@@ -231,7 +247,13 @@ test("AppSheet invoice retries the save, confirms an independent total, and sett
     totalTariff: "39.00",
     notes: "Moto sintética: tarifa de administración conservada aparte.",
   };
-  await addMoto(page, invoice, moto);
+  await addMoto(page, invoice, moto, async dialog => {
+    await expect(field(dialog, "moto-transfer")).toHaveValue("Pendiente de definición");
+    await expect(field(dialog, "moto-subtotal")).toHaveValue("Pendiente de definición");
+  });
+  await expect(invoice.getByTestId("appsheet-moto-transfer-preview")).toHaveText("Pendiente de definición");
+  await expect(invoice.getByTestId("appsheet-moto-subtotal-preview")).toHaveText("Pendiente de definición");
+  await expect(invoice.getByTestId("appsheet-total-preview")).toHaveText("Pendiente de definición");
 
   const envelopes: CommandEnvelope[] = [];
   let committed: Record<string, unknown> | undefined;
@@ -719,6 +741,231 @@ test("an unverified member rejection retains the invoice draft for a corrected r
   expect(detail.deliveries).toHaveLength(0);
 });
 
+test("a synthetic replacement-profile preview calculates product and moto transfers independently", async ({ page }) => {
+  await page.route("**/api/operations/context", async route => {
+    const response = await route.fetch();
+    if (response.status() !== 200) return route.fulfill({ response });
+    const context = await response.json();
+    return route.fulfill({ response, json: {
+      ...context,
+      authority: { ...context.authority, cutoverProfile: "appsheet-replacement" },
+    } });
+  });
+  const commandPosts: Request[] = [];
+  page.on("request", request => { if (isCommand(request)) commandPosts.push(request); });
+  await enterOrders(page);
+  const invoice = await openInvoice(page);
+  await selectMember(invoice, "ops-member", "Socio de ensayo");
+
+  // An incomplete replacement invoice has no product formula yet, but selecting a
+  // payment method must leave the form usable instead of dereferencing a missing preview.
+  await field(invoice, "productPaymentMethod").selectOption("transfer");
+  await expect(invoice).toBeVisible();
+  await expect(field(invoice, "productTransfer")).toHaveValue("Pendiente de definición");
+
+  await enableMoto(invoice);
+  const moto = page.getByTestId("appsheet-moto-dialog");
+  await expect(moto).toBeVisible();
+  await field(moto, "moto-deliveryDate").fill("2026-10-06");
+  await field(moto, "moto-paymentMethod").selectOption("transfer");
+  await field(moto, "moto-serviceType").selectOption("CABA");
+  await field(moto, "moto-destination").fill("Destino sintético de preview");
+  await field(moto, "moto-clientTariff").fill("25.00");
+  await field(moto, "moto-adminTariff").fill("17.00");
+  await field(moto, "moto-totalTariff").fill("42.00");
+  await field(moto, "moto-notes").fill("Preview sintético sin escritura.");
+  await expect(field(moto, "moto-transfer")).toHaveValue("ARS 1,25");
+  await expect(field(moto, "moto-subtotal")).toHaveValue("ARS 26,25");
+  await field(moto, "moto-clientTariff").fill("-1.00");
+  await expect(field(moto, "moto-transfer")).toHaveValue("Pendiente de definición");
+  await expect(field(moto, "moto-subtotal")).toHaveValue("Pendiente de definición");
+  await field(moto, "moto-clientTariff").fill("25.00");
+  await expect(field(moto, "moto-transfer")).toHaveValue("ARS 1,25");
+
+  await field(moto, "moto-paymentMethod").selectOption("mercado_pago");
+  await expect(field(moto, "moto-transfer")).toHaveValue("ARS 1,25");
+  await expect(field(moto, "moto-subtotal")).toHaveValue("ARS 26,25");
+  await field(moto, "moto-paymentMethod").selectOption("cash");
+  await expect(field(moto, "moto-transfer")).toHaveValue("ARS 0,00");
+  await expect(field(moto, "moto-subtotal")).toHaveValue("ARS 25,00");
+  await field(moto, "moto-paymentMethod").selectOption("transfer");
+
+  await moto.getByRole("button", { name: "Añadir viaje en moto", exact: true }).click();
+  await expect(moto).toHaveCount(0);
+  await expect(invoice.getByTestId("appsheet-moto-transfer-preview")).toContainText("1,25");
+  await expect(invoice.getByTestId("appsheet-moto-subtotal-preview")).toContainText("26,25");
+  await expect(invoice.getByTestId("appsheet-total-preview")).toHaveText("Pendiente de definición");
+  await expect(field(invoice, "productTransfer")).toHaveValue("Pendiente de definición");
+
+  await addProduct(page, invoice, {
+    date: "2026-10-05",
+    skuId: "ops-sku-c",
+    scale: "Precio_5_Gramos",
+    quantity: "3",
+    total: "12.01",
+  });
+
+  await expect(invoice.getByTestId("appsheet-product-transfer-preview")).toContainText("0,60");
+  await expect(invoice.getByTestId("appsheet-moto-transfer-preview")).toContainText("1,25");
+  await expect(invoice.getByTestId("appsheet-moto-subtotal-preview")).toContainText("26,25");
+  await expect(invoice.getByTestId("appsheet-total-preview")).toContainText("38,86");
+  await invoice.getByRole("button", { name: "Cancelar", exact: true }).click();
+  await expect(invoice).toHaveCount(0);
+  expect(commandPosts).toHaveLength(0);
+});
+
+test("replacement invoice enforces AppSheet quantity bounds and exact catalog availability without writing", async ({ page }) => {
+  await page.route("**/api/operations/context", async route => {
+    const response = await route.fetch();
+    if (response.status() !== 200) return route.fulfill({ response });
+    const context = await response.json();
+    return route.fulfill({ response, json: {
+      ...context,
+      authority: { ...context.authority, cutoverProfile: "appsheet-replacement" },
+    } });
+  });
+  await page.route("**/api/operations/catalog**", route => fulfillCatalogAvailability(route, skuId => {
+    if (skuId === "ops-sku-c") return "Sí";
+    if (skuId === "ops-sku-a") return "NO";
+    return undefined;
+  }));
+  const commandPosts: Request[] = [];
+  page.on("request", request => { if (isCommand(request)) commandPosts.push(request); });
+  await enterOrders(page);
+  const invoice = await openInvoice(page);
+  await selectMember(invoice, "ops-member", "Socio de ensayo");
+  await invoice.getByTestId("appsheet-add-product").click();
+
+  const product = page.getByTestId("appsheet-product-dialog");
+  const sku = field(product, "line-skuId");
+  const skuOptions = await sku.locator("option").evaluateAll(options => options.map(option => (option as HTMLOptionElement).value));
+  expect(skuOptions).toContain("ops-sku-c");
+  expect(skuOptions).not.toContain("ops-sku-a");
+  expect(skuOptions).not.toContain("ops-sku-b");
+  await sku.selectOption("ops-sku-c");
+  await field(product, "line-date").fill("2026-10-05");
+  await field(product, "line-scale").selectOption("Precio_5_Gramos");
+  await field(product, "line-total").fill("5.00");
+
+  const quantity = field(product, "line-quantity");
+  await expect(quantity).toHaveAttribute("type", "number");
+  await expect(quantity).toHaveAttribute("min", "1");
+  await expect(quantity).toHaveAttribute("max", "99");
+  await expect(quantity).toHaveAttribute("step", "any");
+  await expect(product.getByText("1–99 gramos, hasta tres decimales.", { exact: true })).toBeVisible();
+  for (const outOfRange of ["0.999", "99.001"]) {
+    await quantity.fill(outOfRange);
+    expect(await quantity.evaluate(element => (element as HTMLInputElement).checkValidity())).toBe(false);
+    await product.getByRole("button", { name: "Añadir producto", exact: true }).click();
+    await expect(product.getByRole("alert")).toContainText("1 y 99");
+    await expect(quantity).toHaveValue(outOfRange);
+  }
+
+  await quantity.fill("1.2345");
+  await product.getByRole("button", { name: "Añadir producto", exact: true }).click();
+  await expect(product.getByRole("alert")).toContainText("hasta tres decimales");
+  await expect(quantity).toHaveValue("1.2345");
+  await quantity.fill("1");
+  await product.getByRole("button", { name: "Añadir producto", exact: true }).click();
+  await expect(product).toHaveCount(0);
+  await expect(invoice.locator(".appsheet-dialog-lines li")).toHaveCount(1);
+
+  await invoice.getByTestId("appsheet-add-product").click();
+  const upperBoundary = page.getByTestId("appsheet-product-dialog");
+  await field(upperBoundary, "line-skuId").selectOption("ops-sku-c");
+  await field(upperBoundary, "line-date").fill("2026-10-05");
+  await field(upperBoundary, "line-scale").selectOption("Precio_5_Gramos");
+  await field(upperBoundary, "line-quantity").fill("99");
+  await field(upperBoundary, "line-total").fill("5.00");
+  await upperBoundary.getByRole("button", { name: "Añadir producto", exact: true }).click();
+  await expect(upperBoundary).toHaveCount(0);
+  await expect(invoice.locator(".appsheet-dialog-lines li")).toHaveCount(2);
+  await invoice.getByRole("button", { name: "Cancelar", exact: true }).click();
+  await expect(invoice).toHaveCount(0);
+  expect(commandPosts).toHaveLength(0);
+});
+
+test("a catalog SKU that disappears after selection stays in the invoice draft and blocks save", async ({ page }) => {
+  await page.route("**/api/operations/context", async route => {
+    const response = await route.fetch();
+    if (response.status() !== 200) return route.fulfill({ response });
+    const context = await response.json();
+    return route.fulfill({ response, json: {
+      ...context,
+      authority: { ...context.authority, cutoverProfile: "appsheet-replacement" },
+    } });
+  });
+  let skuCAvailability = "Sí";
+  let catalogReads = 0;
+  await page.route("**/api/operations/catalog**", async route => {
+    catalogReads += 1;
+    return fulfillCatalogAvailability(route, skuId => skuId === "ops-sku-c" ? skuCAvailability : "NO");
+  });
+  const commandPosts: Request[] = [];
+  page.on("request", request => { if (isCommand(request)) commandPosts.push(request); });
+  await enterOrders(page);
+  const invoice = await openInvoice(page);
+  await selectMember(invoice, "ops-member", "Socio de ensayo");
+  await addProduct(page, invoice, {
+    date: "2026-10-05",
+    skuId: "ops-sku-c",
+    scale: "Precio_5_Gramos",
+    quantity: "3",
+    total: "12.01",
+  });
+  expect(catalogReads).toBeGreaterThan(0);
+  skuCAvailability = "NO";
+  const refreshedCatalog = page.waitForResponse(response => response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/catalog" && catalogReads > 1);
+  await page.locator(".ops-header-actions button").filter({ hasText: "Actualizar" }).evaluate(element => {
+    element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+  });
+  await refreshedCatalog;
+  await expect(invoice.locator(".appsheet-subtle-error[role='alert']")).toContainText("ya no está disponible");
+
+  await invoice.getByTestId("appsheet-save-invoice").click();
+  await expect(invoice.locator(".ops-inline-error[role='alert']")).toContainText("eligí una variedad disponible");
+  await expect(invoice.locator(".appsheet-dialog-lines li")).toHaveCount(1);
+  await expect(invoice.locator(".appsheet-dialog-lines li")).toContainText("3 g");
+  expect(commandPosts).toHaveLength(0);
+  await invoice.getByRole("button", { name: "Cancelar", exact: true }).click();
+  await expect(invoice).toHaveCount(0);
+});
+
+test("legacy invoice keeps the not-NO catalog rule and positive sub-gram quantities", async ({ page }) => {
+  await page.route("**/api/operations/context", async route => {
+    const response = await route.fetch();
+    if (response.status() !== 200) return route.fulfill({ response });
+    const context = await response.json();
+    return route.fulfill({ response, json: {
+      ...context,
+      authority: { ...context.authority, cutoverProfile: "legacy" },
+    } });
+  });
+  await page.route("**/api/operations/catalog**", route => fulfillCatalogAvailability(route, skuId => skuId === "ops-sku-c" ? undefined : "NO"));
+  const commandPosts: Request[] = [];
+  page.on("request", request => { if (isCommand(request)) commandPosts.push(request); });
+  await enterOrders(page);
+  const invoice = await openInvoice(page);
+  await selectMember(invoice, "ops-member", "Socio de ensayo");
+  await invoice.getByTestId("appsheet-add-product").click();
+  const product = page.getByTestId("appsheet-product-dialog");
+  const quantity = field(product, "line-quantity");
+  await expect(quantity).toHaveAttribute("type", "text");
+  await expect(field(product, "line-skuId").locator('option[value="ops-sku-c"]')).toHaveCount(1);
+  await field(product, "line-skuId").selectOption("ops-sku-c");
+  await field(product, "line-date").fill("2026-10-05");
+  await field(product, "line-scale").selectOption("Precio_5_Gramos");
+  await quantity.fill("0.5");
+  await field(product, "line-total").fill("5.00");
+  await product.getByRole("button", { name: "Añadir producto", exact: true }).click();
+  await expect(product).toHaveCount(0);
+  await expect(invoice.locator(".appsheet-dialog-lines li")).toHaveCount(1);
+  await expect(invoice.locator(".appsheet-dialog-lines li")).toContainText("0.5 g");
+  await invoice.getByRole("button", { name: "Cancelar", exact: true }).click();
+  await expect(invoice).toHaveCount(0);
+  expect(commandPosts).toHaveLength(0);
+});
+
 test("an empty AppSheet preorder shell can be completed and reserved through one InvoiceUpdated save", async ({ page }) => {
   await enterOrders(page);
   const financeBefore = await financeSnapshot(page);
@@ -770,6 +1017,23 @@ test("an empty AppSheet preorder shell can be completed and reserved through one
     total: "12.01",
   });
 
+  const acceptance = field(editor, "acceptance");
+  await expect(acceptance).toBeVisible();
+  await expect(acceptance).toHaveAttribute("required", "");
+  await expect(editor.getByTestId("appsheet-save-invoice")).toBeDisabled();
+  expect(await getJson(page, `orders/${encodeURIComponent(shellId)}`)).toMatchObject({
+    order: { commercialState: "preorder" },
+    reservations: [],
+    deliveries: [],
+  });
+  const acceptanceNote = "El cliente aceptó esta factura y el envío según los importes mostrados.";
+  await acceptance.fill(acceptanceNote);
+  await field(editor, "note").fill("Aclaración editada después de la aceptación.");
+  await expect(acceptance).toHaveValue("");
+  await expect(editor.getByTestId("appsheet-save-invoice")).toBeDisabled();
+  await acceptance.fill(acceptanceNote);
+  await expect(editor.getByTestId("appsheet-save-invoice")).toBeEnabled();
+
   const updateRefresh = page.waitForResponse(response =>
     response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/orders",
   );
@@ -787,6 +1051,7 @@ test("an empty AppSheet preorder shell can be completed and reserved through one
     memberId: "ops-member",
     invoiceDate,
     preorder: false,
+    acceptance: { note: acceptanceNote },
     lines: [{ skuId: "ops-sku-c", scale: "Precio_5_Gramos", quantity: "3", totalMinor: "1201" }],
   });
   expect(updatedBody.result).toMatchObject({ orderId: shellId, commercialState: "confirmed", quoteFrozen: true });
@@ -795,7 +1060,7 @@ test("an empty AppSheet preorder shell can be completed and reserved through one
   expect(refreshedOrders.items.filter((item: { id: string }) => item.id === shellId)).toHaveLength(1);
   await expect(editor).toHaveCount(0);
   const confirmed = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
-  expect(confirmed.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "confirmed", totalMinor: null, capturedBaseMinor: "1201" });
+  expect(confirmed.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "confirmed", totalMinor: null, capturedBaseMinor: "1201", quote: { acceptance: { note: acceptanceNote } } });
   expect(confirmed.order.quote.lines).toHaveLength(1);
   expect(confirmed.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201" });
   expect(confirmed.reservations).toHaveLength(1);

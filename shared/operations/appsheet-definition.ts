@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const APPSHEET_DEFINITION_SCHEMA_VERSION = 1 as const;
-export const APPSHEET_DEFINITION_PARSER_VERSION = "bombo-appsheet-definition/1.1.0";
+export const APPSHEET_DEFINITION_PARSER_VERSION = "bombo-appsheet-definition/1.2.0";
 
 export const APPSHEET_DEFINITION_CATEGORIES = [
   "tables",

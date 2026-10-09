@@ -476,7 +476,7 @@ const qualifierSemantics: Record<string, string> = {
 };
 
 function qualifierValue(value: unknown): string {
-  if (value === null) return "null";
+  if (value === null) return "";
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return canonicalJson(value);
@@ -560,6 +560,9 @@ function parsePropertyTable(
       if (!semantic) continue;
       const projected = makeField(key, qualifierValue(raw), rowId, contextTable);
       projected.field.semanticKey = semantic;
+      // A present JSON null is an observed absence of a rule, not the
+      // expression "null". Keep the complete qualifier JSON in its source field.
+      if (raw === null && !projected.redacted) projected.field.value = null;
       fields.push(projected.field);
       if (projected.redacted) redactedFieldCount++;
     }
@@ -795,6 +798,41 @@ function metadataValue(nodes: HtmlElement[], matcher: RegExp): string | null {
   return value ? value.slice(0, 1_000) : null;
 }
 
+/** AppSheet's generated document puts app properties before its object sections. */
+function applicationHeaderProperty(
+  nodes: HtmlElement[],
+  property: "ShortName" | "Version",
+  addEvidence: ReturnType<typeof evidenceFactory>,
+  warnings: string[],
+): string | null {
+  const objectClasses = new Set(["tableSection", "schemaSection", "sliceSection", "viewSection", "formatRulesSection", "actionsSection"]);
+  const firstObject = nodes.find((node) => node.tag === "section" && tableClasses(node).some((name) => objectClasses.has(name)));
+  const values = nodes.filter((node) => node.tag === "tr" && (!firstObject || node.offset < firstObject.offset))
+    .flatMap((row) => {
+      const cells = directElements(row).filter((node) => node.tag === "td" || node.tag === "th");
+      if (cells.length !== 2) return [];
+      const label = descendantsOfType(cells[0]!, "label").find((node) => node.attrs.for === property);
+      if (!label) return [];
+      const value = normalizedText(cells[1]!);
+      if (!value || containsRecognizableCredential(value)) return [];
+      return [{ row, value }];
+    });
+  const unique = [...new Set(values.map(({ value }) => value))];
+  if (unique.length > 1) {
+    warnings.push(`application_header_ambiguous:${property}`);
+    return null;
+  }
+  const match = values[0];
+  if (!match) return null;
+  if (match.value.length > (property === "Version" ? 200 : 1_000) ||
+      (property === "Version" && !/^\d+(?:\.\d+)+$/.test(match.value))) {
+    warnings.push(`application_header_invalid:${property}`);
+    return null;
+  }
+  addEvidence("row", match.row, ["Application"], property === "Version" ? "Application version" : "Application short name");
+  return match.value;
+}
+
 const processStateNamespacePattern = /^\/ProcessStateTables\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i;
 
 function resolveAppIdentity(
@@ -970,7 +1008,9 @@ export function parseAppSheetDefinitionHtml(html: string, options: { expectedApp
   const applicationName = applicationNameValue && !containsRecognizableCredential(applicationNameValue) ? applicationNameValue : null;
   const pageTitle = documentNodes.find((node) => node.tag === "title");
   const visibleTitle = pageTitle ? normalizedText(pageTitle) : null;
-  const appName = applicationName ?? (visibleTitle && !/appsheet|application documentation|documentation/i.test(visibleTitle) && !containsRecognizableCredential(visibleTitle) ? visibleTitle : null);
+  const headerName = applicationHeaderProperty(documentNodes, "ShortName", addEvidence, warnings);
+  const appVersion = applicationHeaderProperty(documentNodes, "Version", addEvidence, warnings);
+  const appName = applicationName ?? headerName ?? (visibleTitle && !/appsheet|application documentation|documentation/i.test(visibleTitle) && !containsRecognizableCredential(visibleTitle) ? visibleTitle : null);
 
   const coverage = APPSHEET_DEFINITION_CATEGORIES.map((category) => {
     let records = sectionRecords(category);
@@ -1007,7 +1047,7 @@ export function parseAppSheetDefinitionHtml(html: string, options: { expectedApp
     schemaVersion: APPSHEET_DEFINITION_SCHEMA_VERSION,
     parserVersion: APPSHEET_DEFINITION_PARSER_VERSION,
     source: { sha256: sourceHash, byteLength, encoding: "utf-8" as const },
-    app: { id: appId, name: appName, version: null, deploymentState: null, generatedAt: null, identity: appIdentity.identity },
+    app: { id: appId, name: appName, version: appVersion, deploymentState: null, generatedAt: null, identity: appIdentity.identity },
     declaredCounts,
     observedCounts,
     descriptorSha256: "",

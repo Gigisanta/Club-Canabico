@@ -1,10 +1,13 @@
 import { roundHalfUp } from "./exact.js";
 import { businessTimeZone, type Currency } from "./contracts.js";
+import type { AppSheetPaymentMethod } from "./appsheet.js";
 
-export const APPSHEET_INVOICE_RULE_VERSION = "appsheet-invoice-rules/v1" as const;
+export const APPSHEET_INVOICE_RULE_VERSION_V1 = "appsheet-invoice-rules/v1" as const;
+export const APPSHEET_INVOICE_RULE_VERSION = "appsheet-invoice-rules/v2" as const;
+export type AppSheetInvoiceRuleVersion = typeof APPSHEET_INVOICE_RULE_VERSION | typeof APPSHEET_INVOICE_RULE_VERSION_V1;
 
-/** Exact source expressions captured from C_Facturacion_Schema and its Form Saved action. */
-export const APPSHEET_INVOICE_SOURCE_EXPRESSIONS = Object.freeze({
+/** Exact expressions captured before the Moto transfer formula was implemented. */
+export const APPSHEET_INVOICE_SOURCE_EXPRESSIONS_V1 = Object.freeze({
   invoiceNumberInitialValue: `=CONCATENATE(\n  YEAR(TODAY()),\n  "|FA0",\n  RIGHT(\n    "00" & ("" & [Id_Oculto]),\n    4\n  )\n)`,
   invoiceNumberResetOnEdit: "No",
   hiddenIdAppFormula: "=MAX(SELECT(C_Facturacion[Id_Oculto], TRUE)) + 1",
@@ -28,8 +31,46 @@ export const APPSHEET_INVOICE_SOURCE_EXPRESSIONS = Object.freeze({
   ]),
 });
 
+/** Exact AppSheet source rules, including when and where each Moto value is recalculated. */
+export const APPSHEET_INVOICE_SOURCE_EXPRESSIONS = Object.freeze({
+  ...APPSHEET_INVOICE_SOURCE_EXPRESSIONS_V1,
+  motoTransfer: Object.freeze({
+    column: "Transferencia_moto",
+    type: "Price",
+    formulaProperty: "Initial value",
+    expression: `=IF(\n  IN([Forma_pago_Moto], {"Transferencia", "Mercado Pago"}),\n  ([Tarifa_Moto_Cliente] * 0.05),\n  0\n)`,
+    resetOnEdit: "Yes",
+    editableIf: "=FALSE",
+    virtualColumn: false,
+    editableInitialValue: true,
+  }),
+  motoClientSubtotal: Object.freeze({
+    column: "Subtotal_Cliente_Moto",
+    type: "Price",
+    formulaProperty: "Initial value",
+    expression: "=[Tarifa_Moto_Cliente]+[Transferencia_moto]",
+    resetOnEdit: "Yes",
+    editableIf: "=FALSE",
+    virtualColumn: false,
+    editableInitialValue: true,
+  }),
+});
+
 export const APPSHEET_TRANSFER_ROUNDING_POLICY = "half_up_to_minor_unit" as const;
 const TRANSFER_RATE_DENOMINATOR = 20n;
+
+export interface AppSheetTransferCalculation {
+  formula: string;
+  applied: boolean;
+  rateNumerator: "1" | "0";
+  rateDenominator: "20" | "1";
+  exactMinorNumerator: string;
+  exactMinorDenominator: string;
+  subcentRemainderNumerator: string;
+  roundedMinor: string;
+  roundingPolicy: typeof APPSHEET_TRANSFER_ROUNDING_POLICY;
+  currency: Currency;
+}
 
 export interface AppSheetInvoiceFinancials {
   subtotalMinor: bigint;
@@ -37,59 +78,70 @@ export interface AppSheetInvoiceFinancials {
   transferTotalMinor: bigint;
   clientTariffMinor: bigint;
   totalMinor: bigint;
-  transferCalculation: {
-    formula: string;
-    applied: boolean;
-    rateNumerator: "1" | "0";
-    rateDenominator: "20" | "1";
-    exactMinorNumerator: string;
-    exactMinorDenominator: string;
-    subcentRemainderNumerator: string;
-    roundedMinor: string;
-    roundingPolicy: typeof APPSHEET_TRANSFER_ROUNDING_POLICY;
-    currency: Currency;
-  };
+  transferCalculation: AppSheetTransferCalculation;
+  motoTransferMinor: bigint | null;
+  motoClientSubtotalMinor: bigint | null;
+  motoTransferCalculation: AppSheetTransferCalculation | null;
 }
 
-/**
- * AppSheet stores Transferencia as an Initial Value, then its Form Saved
- * Recalcular_Factura action recomputes it from the product subtotal and method.
- * Bombo explicitly rounds the exact 5% rational amount to its minor unit with
- * half-up rounding; source values and this policy stay separately traceable.
- */
-export function calculateAppSheetInvoiceFinancials(input: {
-  subtotalMinor: bigint;
-  clientTariffMinor: bigint;
-  paymentMethod: "cash" | "transfer" | "mercado_pago" | "card";
-  currency: Currency;
-}): AppSheetInvoiceFinancials {
-  const { subtotalMinor, clientTariffMinor, paymentMethod, currency } = input;
-  if (subtotalMinor < 0n || clientTariffMinor < 0n) throw new RangeError("AppSheet invoice amounts cannot be negative");
+function calculateTransfer(baseMinor: bigint, paymentMethod: AppSheetPaymentMethod, formula: string, currency: Currency) {
   const applied = paymentMethod === "transfer" || paymentMethod === "mercado_pago";
-  const numerator = applied ? subtotalMinor : 0n;
+  const numerator = applied ? baseMinor : 0n;
   const denominator = applied ? TRANSFER_RATE_DENOMINATOR : 1n;
   const transferMinor = applied ? roundHalfUp(numerator, denominator) : 0n;
-  const transferTotalMinor = subtotalMinor + transferMinor;
-  const totalMinor = transferTotalMinor + clientTariffMinor;
-  const subcentRemainder = applied ? numerator % denominator : 0n;
   return {
-    subtotalMinor,
     transferMinor,
-    transferTotalMinor,
-    clientTariffMinor,
-    totalMinor,
-    transferCalculation: {
-      formula: APPSHEET_INVOICE_SOURCE_EXPRESSIONS.transferInitialValue,
+    calculation: {
+      formula,
       applied,
       rateNumerator: applied ? "1" : "0",
       rateDenominator: applied ? "20" : "1",
       exactMinorNumerator: numerator.toString(),
       exactMinorDenominator: denominator.toString(),
-      subcentRemainderNumerator: subcentRemainder.toString(),
+      subcentRemainderNumerator: applied ? (numerator % denominator).toString() : "0",
       roundedMinor: transferMinor.toString(),
       roundingPolicy: APPSHEET_TRANSFER_ROUNDING_POLICY,
       currency,
-    },
+    } satisfies AppSheetTransferCalculation,
+  };
+}
+
+/**
+ * AppSheet stores Transferencia values as Initial Values, then Recalcular_Factura
+ * recomputes the product fee on products and the Moto fee on its own tariff.
+ * v1 remains available only to reproduce already-saved snapshots; new operations
+ * use v2, with half-up rounding to a currency minor unit and independent methods.
+ */
+export function calculateAppSheetInvoiceFinancials(input: {
+  subtotalMinor: bigint;
+  clientTariffMinor: bigint;
+  paymentMethod: AppSheetPaymentMethod;
+  currency: Currency;
+  moto?: { paymentMethod: AppSheetPaymentMethod };
+}, options: { ruleVersion?: AppSheetInvoiceRuleVersion } = {}): AppSheetInvoiceFinancials {
+  const { subtotalMinor, clientTariffMinor, paymentMethod, currency } = input;
+  const ruleVersion = options.ruleVersion ?? APPSHEET_INVOICE_RULE_VERSION;
+  if (subtotalMinor < 0n || clientTariffMinor < 0n) throw new RangeError("AppSheet invoice amounts cannot be negative");
+
+  const product = calculateTransfer(subtotalMinor, paymentMethod, APPSHEET_INVOICE_SOURCE_EXPRESSIONS_V1.transferInitialValue, currency);
+  const transferTotalMinor = subtotalMinor + product.transferMinor;
+  const moto = ruleVersion === APPSHEET_INVOICE_RULE_VERSION && input.moto
+    ? calculateTransfer(clientTariffMinor, input.moto.paymentMethod, APPSHEET_INVOICE_SOURCE_EXPRESSIONS.motoTransfer.expression, currency)
+    : null;
+  const motoTransferMinor = moto?.transferMinor ?? null;
+  const motoClientSubtotalMinor = moto ? clientTariffMinor + moto.transferMinor : null;
+  const totalMinor = transferTotalMinor + (motoClientSubtotalMinor ?? clientTariffMinor);
+
+  return {
+    subtotalMinor,
+    transferMinor: product.transferMinor,
+    transferTotalMinor,
+    clientTariffMinor,
+    totalMinor,
+    transferCalculation: product.calculation,
+    motoTransferMinor,
+    motoClientSubtotalMinor,
+    motoTransferCalculation: moto?.calculation ?? null,
   };
 }
 

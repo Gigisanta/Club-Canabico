@@ -19,6 +19,7 @@ import {
 } from "../server/operations/appsheet-history.js";
 import { APPSHEET_HISTORY_IMPORTER_VERSION } from "../shared/operations/appsheet-history.js";
 import { requireAppSheetTechnicalReview } from "../shared/operations/appsheet-review.js";
+import { appSheetDatabaseDestinationIdentity } from "../server/operations/appsheet-database-target.js";
 import { verifyBackupReference } from "../server/operations/financial-source-stage.js";
 
 const PRIVATE_DIR = ".local/appsheet-real-20261009";
@@ -41,8 +42,10 @@ export function appSheetHistoryCliUsage(): string {
     "Uso: tsx scripts/appsheet-history.ts [--capture-dir <directorio privado>] [--definition <inventario privado>] [--allow-staged-delta]",
     "       [--apply --target isolated|production --actor-id <admin existente> --review <JSON privado> --backup-reference <respaldo verificado>]",
     "Preview es el modo predeterminado y no requiere ni abre una base de datos.",
+    "Si el target ya está configurado, preview muestra su fingerprint no secreto para preparar una revisión v2.",
     "La captura actual es preliminar: requiere --allow-staged-delta y nunca habilita corte ni publicación.",
-    "Apply requiere una revisión técnica independiente vinculada al commit limpio y un respaldo verificado del destino.",
+    "Apply requiere una revisión técnica independiente vinculada al commit, target y fingerprint no secreto de la base/schema; v1 sólo vale en isolated.",
+    "El destino se identifica sin credenciales ni opciones TLS; no se imprime la URL de conexión.",
   ].join("\n");
 }
 
@@ -189,10 +192,16 @@ export async function runAppSheetHistoryCli(args: string[], workingDirectory = p
     const capture = await loadAppSheetHistoryCapture(options.captureDirectory, { allowStagedDelta: options.allowStagedDelta });
     const definition = await loadAppSheetHistoryDefinition(definitionPath);
     const prepared = prepareAppSheetHistoryProjection(capture, definition);
+    const configuredTargetUrl = options.target === "isolated" ? process.env.TEST_DATABASE_URL : process.env.DATABASE_URL;
+    const previewDestinationIdentity = configuredTargetUrl
+      ? appSheetDatabaseDestinationIdentity(options.target === "isolated" ? "isolated-test" : "production", selectedDatabaseUrl(options.target))
+      : null;
     const report = {
       ...appSheetHistoryProjectionReport(prepared),
       commitSha: initialGit.commitSha,
       target: options.target,
+      destinationIdentity: previewDestinationIdentity,
+      destinationIdentityState: previewDestinationIdentity ? "derived-from-config" : "target-database-not-configured",
       expectedAppId: APPSHEET_EXPECTED_LIVE_APP_ID,
       definition: {
         appId: definition.inventory.app.id,
@@ -208,6 +217,10 @@ export async function runAppSheetHistoryCli(args: string[], workingDirectory = p
     if (!options.apply) return { code: 0, output: JSON.stringify(report) };
 
     const databaseUrl = selectedDatabaseUrl(options.target);
+    const reviewTarget = options.target === "isolated" ? "isolated-test" : "production";
+    let destinationIdentity: string;
+    try { destinationIdentity = appSheetDatabaseDestinationIdentity(reviewTarget, databaseUrl); }
+    catch { throw new AppSheetHistoryStageError("database_target_identity_invalid"); }
     const reviewPath = privateAppSheetChildPath(options.reviewPath!, privateDirectory, workingDirectory);
     const reviewValue = await readPrivateJson<unknown>(reviewPath, privateDirectory, workingDirectory, MAX_REVIEW_BYTES);
     const review = requireAppSheetTechnicalReview(reviewValue, {
@@ -218,6 +231,8 @@ export async function runAppSheetHistoryCli(args: string[], workingDirectory = p
       projectionHash: prepared.projectionHash,
       commitSha: initialGit.commitSha,
       importer: APPSHEET_HISTORY_IMPORTER_VERSION,
+      target: reviewTarget,
+      destinationIdentity,
     });
     if (review.reviewer.trim().toLowerCase() === options.actorId!.trim().toLowerCase())
       throw new AppSheetHistoryStageError("independent_technical_reviewer_required");
@@ -243,10 +258,11 @@ export async function runAppSheetHistoryCli(args: string[], workingDirectory = p
         technicalReview: review,
         commitSha: finalGit.commitSha,
         allowStagedDelta: options.allowStagedDelta,
-        target: options.target === "production" ? "production" : "isolated-test",
+        target: reviewTarget,
+        destinationIdentity,
         backupEvidence,
       }, db);
-      return { code: 0, output: JSON.stringify({ ...report, status: result.status, replay: result.replay, snapshotId: result.snapshotId }) };
+      return { code: 0, output: JSON.stringify({ ...report, destinationIdentity, destinationIdentityState: "derived-from-config", status: result.status, replay: result.replay, snapshotId: result.snapshotId }) };
     } finally {
       await db.$disconnect();
     }

@@ -14,6 +14,7 @@ import {
 } from "../server/operations/appsheet-history.js";
 import { finalDeltaProofForCapture } from "../server/operations/access.js";
 import { APPSHEET_EXPECTED_LIVE_APP_ID } from "../server/operations/appsheet-canonical.js";
+import { appSheetDatabaseDestinationIdentity } from "../server/operations/appsheet-database-target.js";
 import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
 import { APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../shared/operations/appsheet-canonical.js";
 import { canonicalJson } from "../shared/operations/exact.js";
@@ -21,6 +22,8 @@ import { canonicalJson } from "../shared/operations/exact.js";
 const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 const preciseColorRedText = "0.12345678901234566";
 const preciseColorRed = Number(preciseColorRedText);
+const historyTestDestinationIdentity = appSheetDatabaseDestinationIdentity("isolated-test",
+  new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history_contract?schema=public&sslmode=require"));
 function historyCapture(): LoadedAppSheetHistoryCapture {
   const manifestHash = sha256(`synthetic-history-capture:${randomUUID()}`);
   const captureId = `appsreal-${manifestHash.slice(0, 16)}`;
@@ -172,14 +175,16 @@ test("history writer persists its stable top-level coverage for invoice-sequence
     const reviewedAt = "2026-10-09T12:00:00.000Z";
     const backupSnapshotAt = "2026-10-09T12:05:00.000Z";
     const technicalReview = {
-      schemaVersion: 1, reviewKind: "independent-technical", captureId: capture.manifest.captureId,
+      schemaVersion: 2, reviewKind: "independent-technical", captureId: capture.manifest.captureId,
       manifestHash: capture.manifest.manifestHash, definitionHash: definition.appliedDefinitionHash,
       projectionKind: "history", projectionHash: prepared.projectionHash, commitSha,
+      target: "isolated-test", destinationIdentity: historyTestDestinationIdentity,
       importer: APPSHEET_HISTORY_IMPORTER_VERSION, reviewer: "synthetic-independent-reviewer", approved: true,
       reviewedAt, findings: [],
     };
     const stageOptions = {
       actorId: stageActorId, technicalReview, commitSha, target: "isolated-test" as const,
+      destinationIdentity: historyTestDestinationIdentity,
       backupEvidence: { manifestHash: sha256("synthetic backup metadata fixture"), snapshotAt: backupSnapshotAt },
     };
     const moneyFact = prepared.persistedFacts.find((fact) => fact.amountMinor !== null);

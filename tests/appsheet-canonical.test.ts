@@ -9,10 +9,13 @@ import {
   APPSHEET_EXPECTED_LIVE_APP_ID,
   AppSheetCanonicalError,
   appSheetAppliedDefinitionHash,
+  appSheetCanonicalCurrentDestinationHash,
   prepareAppSheetDefinitionInventory,
   prepareAppSheetMasterProjection,
   stageAppSheetCanonicalMasters,
 } from "../server/operations/appsheet-canonical.js";
+import { eligibleAppSheetCanonicalMemberIds } from "../server/operations/access.js";
+import { appSheetDatabaseDestinationIdentity } from "../server/operations/appsheet-database-target.js";
 import { APPSHEET_CANONICAL_IMPORTER_VERSION } from "../shared/operations/appsheet-canonical.js";
 import { parseArgs } from "../scripts/appsheet-canonical.js";
 import { requireAppSheetTechnicalReview } from "../shared/operations/appsheet-review.js";
@@ -526,4 +529,188 @@ test("technical review is bound to the exact source commit", () => {
   };
   assert.equal(requireAppSheetTechnicalReview(review, expected).commitSha, expected.commitSha);
   assert.throws(() => requireAppSheetTechnicalReview(review, { ...expected, commitSha: "8".repeat(40) }));
+});
+
+test("capture-bound member review survives a later capture review and follows only its selected capture", async () => {
+  const previousDatabaseUrl = process.env.DATABASE_URL;
+  const databaseUrl = "postgresql://synthetic:synthetic@127.0.0.1/bombo_ui_capture_review?schema=synthetic";
+  process.env.DATABASE_URL = databaseUrl;
+  try {
+    const first = project({ captureRevision: "identity-review-capture-a" });
+    const second = project({ captureRevision: "identity-review-capture-b" });
+    const firstCapture = first.capture;
+    const secondCapture = second.capture;
+    const destinationIdentity = appSheetDatabaseDestinationIdentity("production", new URL(databaseUrl));
+    const projectedMember = first.destinations.find((destination) => destination.type === "member");
+    assert.ok(projectedMember && projectedMember.type === "member");
+    const member = { id: projectedMember.id, ...projectedMember.data };
+    const destinationDataHash = appSheetCanonicalCurrentDestinationHash(member, "member");
+    const firstRecord = first.records.find((record) => record.sourceTable === "C_Cliente");
+    const secondRecord = second.records.find((record) => record.sourceTable === "C_Cliente");
+    assert.ok(firstRecord && secondRecord);
+
+    const asStoredCapture = (capture: typeof firstCapture) => {
+      const pageManifest = capture.pageManifest;
+      const pageRefs = pageManifest.map((page) => ({ path: page.path, sheetId: page.sheetId, pageIndex: page.pageIndex,
+        startRow: page.startRow, endRow: page.endRow, pageHash: page.pageHash, counts: page.counts }));
+      const sheets: Array<Record<string, unknown>> = pageManifest.map((page) => ({ sheetId: page.sheetId, title: page.title, pageCount: 1,
+        verifiedPageCount: 1, stablePageCount: 1, changedPageCount: 0, bodyRead: true, bodyExcluded: false }));
+      sheets.push({ sheetId: 99, title: "T_Usuarios", pageCount: 0, verifiedPageCount: 0, stablePageCount: 0,
+        changedPageCount: 0, bodyRead: false, bodyExcluded: true, bodyExclusionReason: "authentication-table-body-redacted" });
+      return {
+      captureId: capture.captureId,
+      sourceSystem: capture.sourceSystem,
+      sourceId: capture.sourceId,
+      spreadsheetId: capture.spreadsheetId,
+      metadataHash: capture.metadataHash,
+      headersHash: capture.headersHash,
+      manifestHash: capture.manifestHash,
+      dataHash: hash(pageRefs),
+      definitionHash: capture.definitionHash,
+      stability: { ...capture.stability, cutoverEligible: true, missingPages: 0, unresolvedFormulaCount: 0,
+        sourceWriteDetected: false, bodyExcludedSheets: ["T_Usuarios"] },
+      firstReadAt: new Date(capture.firstReadAt!),
+      verificationStartedAt: new Date(capture.verificationStartedAt!),
+      verificationCompletedAt: new Date(capture.verificationCompletedAt!),
+      cutoffAt: new Date(capture.cutoffAt!),
+      dataCoverage: { ...capture.dataCoverage, metadataStable: true, headersStableAll: true, failedPages: 0,
+        changedPages: 0, unresolvedFormulaCount: 0, sheets },
+      pageManifest,
+      definitionCoverage: capture.definitionCoverage,
+      dataSheetCount: capture.dataSheetCount,
+      dataPageCount: capture.dataPageCount,
+      dataRecordCount: capture.dataRecordCount,
+      dataFormulaCount: capture.dataFormulaCount,
+      dataUnresolvedFormulaCount: capture.dataUnresolvedFormulaCount,
+      definitionTableCount: capture.definitionTableCount,
+      definitionColumnCount: capture.definitionColumnCount,
+      definitionSliceCount: capture.definitionSliceCount,
+      definitionViewCount: capture.definitionViewCount,
+      definitionActionCount: capture.definitionActionCount,
+      definitionBotCount: capture.definitionBotCount,
+      definitionWorkflowRuleCount: capture.definitionWorkflowRuleCount,
+      definitionFormatRuleCount: capture.definitionFormatRuleCount,
+      };
+    };
+    const storedCaptures = new Map([
+      [firstCapture.captureId, asStoredCapture(firstCapture)],
+      [secondCapture.captureId, asStoredCapture(secondCapture)],
+    ]);
+    const fingerprint = {
+      sourceTable: "C_Cliente", sourceKey: firstRecord.sourceKey, destinationType: "member", destinationId: member.id,
+      dataHash: destinationDataHash, operationVersion: 0,
+    };
+    const snapshot = (id: string, capture: typeof firstCapture, projectionHash: string, reviewedBy: string, reviewedAt: Date) => ({
+      id, status: "reviewed", createdBy: "importer", reviewedBy, reviewedAt, fileHash: capture.manifestHash,
+      sourceSystem, importerVersion: APPSHEET_CANONICAL_IMPORTER_VERSION, captureManifestId: capture.captureId,
+      controls: { appSheetCanonical: { projectionHash, stageContext: { target: "production", destinationIdentity }, destinationFingerprints: [fingerprint] } },
+      coverage: {},
+    });
+    const firstReviewedAt = new Date(fixtureDate);
+    const secondReviewedAt = new Date(new Date(fixtureDate).getTime() + 10_000);
+    const firstSnapshot = snapshot("snapshot-capture-a", firstCapture, first.projectionHash, "checker-a", firstReviewedAt);
+    const secondSnapshot = snapshot("snapshot-capture-b", secondCapture, second.projectionHash, "checker-b", secondReviewedAt);
+    const identity: { id: string; sourceSystem: string; sourceTable: string; sourceKey: string; destinationType: string; destinationId: string; approvedBy: string | null } = {
+      id: "identity-customer-1", sourceSystem, sourceTable: "C_Cliente", sourceKey: firstRecord.sourceKey,
+      destinationType: "member", destinationId: member.id, approvedBy: "checker-b",
+    };
+    const firstRecordForReview = { ...firstRecord, snapshotId: firstSnapshot.id };
+    const secondRecordForReview = { ...secondRecord, snapshotId: secondSnapshot.id };
+    const reviewDetails = (snapshotId: string, capture: typeof firstCapture, projectionHash: string) => ({
+      schemaVersion: 1, snapshotId, captureId: capture.captureId, manifestHash: capture.manifestHash, projectionHash,
+      destinationIdentity, identityCount: 2, expectedIdentityCount: 2,
+    });
+    const identityDetails = (snapshotId: string, capture: typeof firstCapture, projectionHash: string, reviewer: string, recordId: string) => ({
+      schemaVersion: 1, identityId: identity.id, snapshotId, captureId: capture.captureId, manifestHash: capture.manifestHash,
+      projectionHash, destinationIdentity, sourceRecordId: recordId, sourceTable: "C_Cliente", sourceKey: identity.sourceKey,
+      sourceContentHash: snapshotId === firstSnapshot.id ? firstRecord.contentHash : secondRecord.contentHash,
+      destinationType: "member", destinationId: member.id, destinationDataHash, approvedBy: reviewer,
+    });
+    const snapshotAudit = (snapshotId: string, requestId: string, reviewer: string, details: unknown, createdAt: Date) => ({
+      actorId: reviewer, action: "appsheet.canonical_identities_reviewed", objectId: snapshotId, requestId, details, createdAt,
+    });
+    const identityAudit = (snapshotId: string, requestId: string, reviewer: string, details: unknown, createdAt: Date) => ({
+      actorId: reviewer, action: "appsheet.canonical_identity_reviewed", objectId: identity.id, requestId, details, createdAt,
+    });
+    const audits: Array<Record<string, unknown>> = [
+      snapshotAudit(firstSnapshot.id, "request-a", "checker-a", reviewDetails(firstSnapshot.id, firstCapture, first.projectionHash), firstReviewedAt),
+      identityAudit(firstSnapshot.id, "request-a", "checker-a", identityDetails(firstSnapshot.id, firstCapture, first.projectionHash, "checker-a", firstRecord.id), firstReviewedAt),
+    ];
+    let snapshots = [firstSnapshot];
+    let currentObjectVersion = 0;
+    const commandReceipts: Array<{
+      requestId: string; actorId: string; targetId: string; command: string; response: Record<string, unknown>;
+      resultingVersion: number; committedAt: Date;
+    }> = [];
+    const tx = {
+      appSheetCaptureManifest: { findUnique: async ({ where }: { where: { captureId: string } }) => storedCaptures.get(where.captureId) ?? null },
+      legacyImportSnapshot: { findMany: async ({ where }: { where: Record<string, unknown> }) => snapshots.filter((row) =>
+        row.captureManifestId === where.captureManifestId && row.fileHash === where.fileHash && row.importerVersion === where.importerVersion) },
+      user: { findUnique: async ({ where }: { where: { id: string } }) => ({ active: ["checker-a", "checker-b"].includes(where.id) }) },
+      operationAudit: { findMany: async ({ where, take }: { where: Record<string, any>; take?: number }) => audits.filter((row) => {
+        const ids = typeof where.objectId === "string" ? [where.objectId] : where.objectId?.in as string[] | undefined;
+        const actionFilter = where.action;
+        const actions = typeof actionFilter === "string" ? [actionFilter] : actionFilter?.in as string[] | undefined;
+        const requestFilter = where.requestId;
+        const requestIds = typeof requestFilter === "string" ? [requestFilter] : requestFilter?.in as string[] | undefined;
+        return (!ids || ids.includes(String(row.objectId))) && (!actions || actions.includes(String(row.action))) &&
+          (!requestIds || requestIds.includes(String(row.requestId)));
+      }).slice(0, take === undefined ? undefined : take) },
+      operationMember: { findMany: async () => [member] },
+      legacySourceRecord: { findMany: async ({ where }: { where: Record<string, any> }) => [firstRecordForReview, secondRecordForReview].filter((record) =>
+        record && record.snapshotId === where.snapshotId && record.sourceTable === where.sourceTable && where.sourceKey.in.includes(record.sourceKey)) },
+      legacyIdentity: { findMany: async () => [identity] },
+      operationObject: { findMany: async () => [{ id: member.id, kind: "member", version: currentObjectVersion }] },
+      commandReceipt: { findMany: async () => commandReceipts },
+    };
+
+    assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, firstCapture.captureId), new Set([member.id]),
+      "la aprobación exacta de A sigue válida aunque approvedBy apunte al checker de B");
+    assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, secondCapture.captureId), new Set(),
+      "B no habilita la identidad hasta que exista su auditoría ligada a la captura");
+
+    snapshots = [...snapshots, secondSnapshot];
+    audits.push(
+      snapshotAudit(secondSnapshot.id, "request-b", "checker-b", reviewDetails(secondSnapshot.id, secondCapture, second.projectionHash), secondReviewedAt),
+      identityAudit(secondSnapshot.id, "request-b", "checker-b", identityDetails(secondSnapshot.id, secondCapture, second.projectionHash, "checker-b", secondRecord.id), secondReviewedAt),
+    );
+    assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, secondCapture.captureId), new Set([member.id]),
+      "B habilita la identidad sólo después de su propia revisión exacta");
+
+    const transactionStartedAt = new Date(secondReviewedAt.getTime() + 100);
+    const permissionReviewedAt = new Date(transactionStartedAt.getTime() + 25);
+    const permissionResult = {
+      memberId: member.id, status: "verified", reviewerId: "permission-reviewer", reviewedAt: permissionReviewedAt.toISOString(),
+    };
+    const permissionReceipt = {
+      requestId: "permission-after-review", actorId: "permission-reviewer", targetId: member.id, command: "PermissionVerified",
+      response: { requestId: "permission-after-review", targetId: member.id, version: 1, result: { permission: permissionResult } },
+      resultingVersion: 1, committedAt: transactionStartedAt,
+    };
+    assert.ok(permissionReviewedAt > permissionReceipt.committedAt,
+      "el timestamp semántico del permiso ocurre después del now() de inicio de transacción del receipt");
+    commandReceipts.push(permissionReceipt);
+    audits.push({ actorId: permissionReceipt.actorId, action: permissionReceipt.command, objectId: member.id,
+      requestId: permissionReceipt.requestId, details: { version: permissionReceipt.resultingVersion }, createdAt: transactionStartedAt });
+    currentObjectVersion = 1;
+    assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, firstCapture.captureId), new Set([member.id]),
+      "un permiso legítimo conserva elegibilidad aunque reviewedAt sea posterior a committedAt de inicio de transacción");
+    assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, secondCapture.captureId), new Set([member.id]));
+
+    permissionResult.reviewedAt = new Date(transactionStartedAt.getTime() - 1).toISOString();
+    assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, firstCapture.captureId), new Set(),
+      "el resultado semántico anterior al inicio de transacción se rechaza");
+    permissionResult.reviewedAt = permissionReviewedAt.toISOString();
+    currentObjectVersion = 2;
+    assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, firstCapture.captureId), new Set(),
+      "un salto de versión sin receipt causal no conserva elegibilidad");
+    currentObjectVersion = 1;
+
+    identity.approvedBy = null;
+    assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, firstCapture.captureId), new Set(),
+      "la revocación explícita de approvedBy invalida una aprobación previa");
+  } finally {
+    if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousDatabaseUrl;
+  }
 });

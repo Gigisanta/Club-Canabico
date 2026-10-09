@@ -132,6 +132,11 @@ test("AppSheet catalogue writes preserve SKU identity and never book stock, sale
       patch: {
         catalogId: "catalog-id-kept-separate", availability: "Sí", segment: "Premium", description: "Descripción ya validada",
         price5Grams: { amountMinor: "1234567", currency: "ARS" },
+        price10Grams: { amountMinor: "11000", currency: "ARS" },
+        price15Grams: { amountMinor: "12000", currency: "ARS" },
+        price20Grams: { amountMinor: "13000", currency: "ARS" },
+        price25Grams: { amountMinor: "14000", currency: "ARS" },
+        price30Grams: { amountMinor: "15000", currency: "ARS" },
         price10To15Grams: { amountMinor: "4500000", currency: "USD" },
         promoA: { amountMinor: "250000", currency: "ARS" }, clientTariff: { amountMinor: "7500000", currency: "ARS" },
       },
@@ -141,6 +146,11 @@ test("AppSheet catalogue writes preserve SKU identity and never book stock, sale
     const saved = await savedResponse.json() as { version: number; result: { appSheet: Record<string, unknown> } };
     assert.equal(saved.version, 4);
     assert.deepEqual(saved.result.appSheet.price5Grams, { amountMinor: "1234567", currency: "ARS" });
+    assert.deepEqual(saved.result.appSheet.price10Grams, { amountMinor: "11000", currency: "ARS" });
+    assert.deepEqual(saved.result.appSheet.price15Grams, { amountMinor: "12000", currency: "ARS" });
+    assert.deepEqual(saved.result.appSheet.price20Grams, { amountMinor: "13000", currency: "ARS" });
+    assert.deepEqual(saved.result.appSheet.price25Grams, { amountMinor: "14000", currency: "ARS" });
+    assert.deepEqual(saved.result.appSheet.price30Grams, { amountMinor: "15000", currency: "ARS" });
 
     // A second editor opened at v3 must not overwrite the first editor's v4 save.
     const staleRequestId = randomUUID();
@@ -162,6 +172,12 @@ test("AppSheet catalogue writes preserve SKU identity and never book stock, sale
     assert.equal(stored.active, skuBefore.active);
     assert.equal(stored.minQuantity.toString(), skuBefore.minQuantity.toString());
     assert.equal(stored.minVarieties, skuBefore.minVarieties);
+    assert.deepEqual((stored.appSheet as Record<string, unknown>).price10Grams, { amountMinor: "11000", currency: "ARS" });
+    assert.deepEqual((stored.appSheet as Record<string, unknown>).price15Grams, { amountMinor: "12000", currency: "ARS" });
+    assert.deepEqual((stored.appSheet as Record<string, unknown>).price20Grams, { amountMinor: "13000", currency: "ARS" });
+    assert.deepEqual((stored.appSheet as Record<string, unknown>).price25Grams, { amountMinor: "14000", currency: "ARS" });
+    assert.deepEqual((stored.appSheet as Record<string, unknown>).price30Grams, { amountMinor: "15000", currency: "ARS" });
+    assert.deepEqual((stored.appSheet as Record<string, unknown>).price10To15Grams, { amountMinor: "4500000", currency: "USD" }, "el intervalo legado conserva su propio dato y moneda");
     assert.deepEqual((stored.appSheet as Record<string, unknown>).price20To25Grams, { amountMinor: "345678", currency: "USD" }, "editar campos parciales conserva los valores conocidos omitidos");
     assert.deepEqual((stored.appSheet as Record<string, unknown>).futureField, { retained: true }, "los metadatos futuros desconocidos se conservan en persistencia");
     assert.deepEqual(balanceValues(await db.stockBalance.findUniqueOrThrow({ where: { id: "appsheet-fixture-balance" } })), balanceValues(balanceBefore));
@@ -192,19 +208,21 @@ test("AppSheet catalogue writes preserve SKU identity and never book stock, sale
 
     const invalidRequestId = randomUUID();
     const invalidPatch = await call("/operations/commands", "catalog-commercial", envelope(invalidRequestId, skuId, "CatalogueSheetSaved", {
-      patch: { unit: "ud", availability: "available" },
+      patch: { price15Grams: { amountMinor: "-1", currency: "ARS" } },
     }, 5));
-    assert.ok(invalidPatch.status >= 400 && invalidPatch.status < 500, "unidades y enums ajenos al contrato se rechazan antes de escribir");
+    assert.ok(invalidPatch.status >= 400 && invalidPatch.status < 500, "un importe exacto inválido se rechaza antes de escribir");
     assert.equal((await db.catalogSku.findUniqueOrThrow({ where: { id: skuId } })).unit, "g");
     assert.equal((await db.operationObject.findUniqueOrThrow({ where: { id: skuId } })).version, 5);
+    assert.deepEqual(((await db.catalogSku.findUniqueOrThrow({ where: { id: skuId } })).appSheet as Record<string, unknown>).price15Grams, { amountMinor: "12000", currency: "ARS" });
     assert.equal(await db.commandReceipt.findUnique({ where: { requestId: invalidRequestId } }), null, "el rechazo de esquema no deja comprobante");
 
     const missingId = "appsheet-fixture-missing-sku";
     const missingRequestId = randomUUID();
     const missing = await call("/operations/commands", "catalog-commercial", envelope(missingRequestId, missingId, "CatalogueSheetSaved", {
-      patch: { price5Grams: { amountMinor: "1", currency: "ARS" } },
+      patch: { price30Grams: { amountMinor: "1", currency: "ARS" } },
     }, 0));
     assert.equal(missing.status, 404, "no se puede crear un SKU editando su ficha AppSheet");
+    assert.equal(await db.catalogSku.findUnique({ where: { id: missingId } }), null, "el rollback tampoco crea el SKU que faltaba");
     assert.equal((await db.operationObject.findUnique({ where: { id: missingId } })), null, "la operación crea su versión sólo dentro de la transacción; el rechazo revierte ese intento");
     assert.equal((await db.commandReceipt.findUnique({ where: { requestId: missingRequestId } })), null, "el rechazo no deja comprobante persistido");
 

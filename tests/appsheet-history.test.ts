@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -22,11 +23,18 @@ import {
 import { APPSHEET_EXPECTED_LIVE_APP_ID } from "../server/operations/appsheet-canonical.js";
 import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_MOVEMENT_OVERLAP_FIELDS,
   APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
+import { appSheetDatabaseDestinationIdentity } from "../server/operations/appsheet-database-target.js";
 import { canonicalJson } from "../shared/operations/exact.js";
 import { pendingMappingFingerprintPayload, reconcileAppSheetPendingRows } from "../shared/operations/appsheet-pending.js";
 import { parseAppSheetHistoryCliArgs, privateAppSheetChildPath, runAppSheetHistoryCli } from "../scripts/appsheet-history.js";
 
 const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+const HISTORY_TEST_DESTINATION_ID = appSheetDatabaseDestinationIdentity("isolated-test",
+  new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history?schema=history&sslmode=require"));
+const OTHER_HISTORY_TEST_DESTINATION_ID = appSheetDatabaseDestinationIdentity("isolated-test",
+  new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history?schema=other&sslmode=require"));
+const PRODUCTION_TEST_DESTINATION_ID = appSheetDatabaseDestinationIdentity("production",
+  new URL("postgresql://fixture:fixture@db.example.invalid:5432/bombo?schema=public&sslmode=require"));
 const pendingCapture = {
   captureId: "appsreal-0123456789abcdef",
   manifestHash: "a".repeat(64),
@@ -324,9 +332,8 @@ function stageFixture(): PreparedAppSheetHistoryProjection {
   } as unknown as PreparedAppSheetHistoryProjection;
 }
 
-function stageReview() {
+function baseStageReview() {
   return {
-    schemaVersion: 1 as const,
     reviewKind: "independent-technical" as const,
     captureId: pendingCapture.captureId,
     manifestHash: pendingCapture.manifestHash,
@@ -335,11 +342,26 @@ function stageReview() {
     projectionHash: "d".repeat(64),
     commitSha: "e".repeat(40),
     importer: APPSHEET_HISTORY_IMPORTER_VERSION,
+    target: "isolated-test" as const,
+    destinationIdentity: HISTORY_TEST_DESTINATION_ID,
     reviewer: "independent-reviewer",
     approved: true as const,
     reviewedAt: "2026-10-09T12:00:00.000Z",
     findings: [],
   };
+}
+
+function stageReview() {
+  return {
+    ...baseStageReview(),
+    schemaVersion: 2 as const,
+    target: "isolated-test" as const,
+    destinationIdentity: HISTORY_TEST_DESTINATION_ID,
+  };
+}
+
+function legacyStageReview() {
+  return { ...baseStageReview(), schemaVersion: 1 as const };
 }
 
 function populatedStageFixture(): PreparedAppSheetHistoryProjection {
@@ -419,6 +441,7 @@ function memoryHistoryClient() {
   let operationObject: Record<string, unknown> | null = null;
   let audit: Record<string, unknown> | null = null;
   let writes = 0;
+  const sourceBatchBytes: number[] = [];
   const tx = {
     user: { findUnique: async () => ({ id: "authorized-user", role: "admin", active: true }) },
     operationAccess: { findUnique: async () => ({ enabled: true, capabilities: ["imports.write"] }) },
@@ -427,7 +450,9 @@ function memoryHistoryClient() {
       create: async ({ data }: { data: Record<string, unknown> }) => { snapshot = data; writes++; },
     },
     $executeRaw: async (query: { values: unknown[] }) => {
-      const batch = JSON.parse(String(query.values[0])) as Array<Record<string, unknown>>;
+      const serialized = String(query.values[0]);
+      sourceBatchBytes.push(Buffer.byteLength(serialized, "utf8"));
+      const batch = JSON.parse(serialized) as Array<Record<string, unknown>>;
       rows.sourceRecords.push(...batch.map(copyStoredSourceRecord));
       writes += batch.length;
       return batch.length;
@@ -469,7 +494,7 @@ function memoryHistoryClient() {
     $transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback(tx),
   } as unknown as PrismaClient;
   return {
-    client, rows, get snapshot() { return snapshot; }, get writes() { return writes; },
+    client, rows, sourceBatchBytes, get snapshot() { return snapshot; }, get writes() { return writes; },
   };
 }
 
@@ -479,6 +504,7 @@ test("invalid review is rejected before opening a write transaction", async () =
   await assert.rejects(stageAppSheetHistoryProjection(stageFixture(), {
     actorId: "authorized-user", technicalReview: { ...stageReview(), projectionHash: "f".repeat(64) },
     commitSha: "e".repeat(40), allowStagedDelta: true, target: "isolated-test",
+    destinationIdentity: HISTORY_TEST_DESTINATION_ID,
     backupEvidence: { manifestHash: "9".repeat(64), snapshotAt: "2026-10-09T12:00:00.000Z" },
   }, client), (error) => error instanceof AppSheetHistoryStageError && error.code === "technical_review_invalid");
   assert.equal(transactionCount, 0);
@@ -526,6 +552,7 @@ test("failed staged write is rolled back by the serializable transaction boundar
   await assert.rejects(stageAppSheetHistoryProjection(populatedStageFixture(), {
     actorId: "authorized-user", technicalReview: stageReview(), commitSha: "e".repeat(40),
     allowStagedDelta: true, target: "isolated-test",
+    destinationIdentity: HISTORY_TEST_DESTINATION_ID,
     backupEvidence: { manifestHash: "9".repeat(64), snapshotAt: "2026-10-09T12:00:00.000Z" },
   }, client), /injected_audit_failure/);
   assert.equal(committed, false);
@@ -539,6 +566,7 @@ test("replaying populated history compares persisted rows independent of query o
   const options = {
     actorId: "authorized-user", technicalReview: stageReview(), commitSha: "e".repeat(40),
     allowStagedDelta: true, target: "isolated-test" as const,
+    destinationIdentity: HISTORY_TEST_DESTINATION_ID,
     backupEvidence: { manifestHash: "9".repeat(64), snapshotAt: "2026-10-09T12:00:00.000Z" },
   };
 
@@ -559,6 +587,117 @@ test("replaying populated history compares persisted rows independent of query o
   assert.equal(memory.writes, writesAfterStage);
   assert.equal(memory.snapshot?.status, "staged");
   assert.equal(memory.snapshot?.reviewedBy, null);
+
+  let mismatchedTargetTransactions = 0;
+  const mismatchClient = { $transaction: async () => { mismatchedTargetTransactions++; throw new Error("must_not_start"); } } as unknown as PrismaClient;
+  await assert.rejects(stageAppSheetHistoryProjection(prepared, {
+    ...options, destinationIdentity: OTHER_HISTORY_TEST_DESTINATION_ID,
+  }, mismatchClient), (error) => error instanceof AppSheetHistoryStageError && error.code === "technical_review_invalid");
+  assert.equal(mismatchedTargetTransactions, 0, "un destino distinto se rechaza antes de abrir la transacción");
+  assert.equal(memory.writes, writesAfterStage, "el rechazo no modifica el staging ya replayable");
+  assert.equal(HISTORY_TEST_DESTINATION_ID, appSheetDatabaseDestinationIdentity("isolated-test",
+    new URL("postgresql://other-user:other-password@127.0.0.1:5432/bombo_ui_history?schema=history&sslmode=disable")),
+  "las credenciales y TLS no forman parte de la identidad destino");
+  assert.notEqual(HISTORY_TEST_DESTINATION_ID, OTHER_HISTORY_TEST_DESTINATION_ID,
+    "el schema PostgreSQL distingue destinos dentro de la misma base");
+  assert.equal(appSheetDatabaseDestinationIdentity("isolated-test",
+    new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history")),
+  appSheetDatabaseDestinationIdentity("isolated-test",
+    new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history?schema=public")),
+  "el schema omitido usa el default de Prisma `public`");
+  assert.notEqual(appSheetDatabaseDestinationIdentity("isolated-test",
+    new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history?schema=public")),
+  appSheetDatabaseDestinationIdentity("isolated-test",
+    new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history?schema=Public")),
+  "los nombres de schema mantienen la distinción por mayúsculas");
+  assert.throws(() => appSheetDatabaseDestinationIdentity("isolated-test",
+    new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history?schema=history&host=replica.example")),
+  /appsheet_database_target_ambiguous/);
+
+});
+
+test("unbound and isolated-bound reviews are rejected for production before opening a transaction", async () => {
+  const stablePrepared = stageFixture();
+  stablePrepared.capture = { ...stablePrepared.capture, mode: "stable" };
+  let transactionCount = 0;
+  const client = { $transaction: async () => { transactionCount++; throw new Error("must_not_start"); } } as unknown as PrismaClient;
+  const productionOptions = {
+    actorId: "authorized-user", commitSha: "e".repeat(40),
+    allowStagedDelta: true, target: "production", destinationIdentity: PRODUCTION_TEST_DESTINATION_ID,
+    backupEvidence: { manifestHash: "9".repeat(64), snapshotAt: "2026-10-09T12:00:00.000Z" },
+  } as const;
+  await assert.rejects(stageAppSheetHistoryProjection(stablePrepared, {
+    ...productionOptions, technicalReview: legacyStageReview(),
+  }, client), (error) => error instanceof AppSheetHistoryStageError && error.code === "technical_review_invalid");
+  await assert.rejects(stageAppSheetHistoryProjection(stablePrepared, {
+    ...productionOptions, technicalReview: stageReview(),
+  }, client), (error) => error instanceof AppSheetHistoryStageError && error.code === "technical_review_invalid");
+  assert.equal(transactionCount, 0);
+});
+
+test("history source batches respect the byte cap and replay the exact split without duplicates", async () => {
+  const prepared = stageFixture();
+  const payload = "x".repeat(2_200_000);
+  prepared.persistedRecords = [11, 12].map((sourceRow) => ({
+    id: `00000000-0000-5000-8000-${String(sourceRow).padStart(12, "0")}`,
+    snapshotId: prepared.snapshotId,
+    sourceTable: "Large_Table",
+    sourceKey: `large-${sourceRow}`,
+    sourceRow,
+    fileHash: "a".repeat(64),
+    contentHash: "b".repeat(64),
+    importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION,
+    original: { payload },
+    normalized: { payload },
+    treatment: "archive_only",
+  }));
+  const memory = memoryHistoryClient();
+  const options = {
+    actorId: "authorized-user", technicalReview: stageReview(), commitSha: "e".repeat(40),
+    allowStagedDelta: true, target: "isolated-test" as const,
+    destinationIdentity: HISTORY_TEST_DESTINATION_ID,
+    backupEvidence: { manifestHash: "9".repeat(64), snapshotAt: "2026-10-09T12:00:00.000Z" },
+  };
+
+  const staged = await stageAppSheetHistoryProjection(prepared, options, memory.client);
+  assert.equal(staged.replay, false);
+  assert.equal(memory.sourceBatchBytes.length, 2, "el límite de bytes separa estas dos filas aunque sean menos de 500");
+  assert.ok(memory.sourceBatchBytes.every((bytes) => bytes <= 8 * 1024 * 1024));
+  assert.ok(memory.sourceBatchBytes.reduce((sum, bytes) => sum + bytes, 0) > 8 * 1024 * 1024);
+  assert.deepEqual(memory.rows.sourceRecords.map((row) => row.id), prepared.persistedRecords.map((row) => row.id));
+
+  const writesAfterStage = memory.writes;
+  const replay = await stageAppSheetHistoryProjection(prepared, options, memory.client);
+  assert.equal(replay.replay, true);
+  assert.equal(memory.writes, writesAfterStage, "el replay no duplica filas ni efectos del staging");
+  assert.equal(memory.sourceBatchBytes.length, 2);
+});
+
+test("a single over-budget history source row is rejected before staged writes", async () => {
+  const prepared = stageFixture();
+  const payload = "x".repeat(4_300_000);
+  prepared.persistedRecords = [{
+    id: "00000000-0000-5000-8000-000000000011",
+    snapshotId: prepared.snapshotId,
+    sourceTable: "Large_Table",
+    sourceKey: "oversized-row",
+    sourceRow: 2,
+    fileHash: "a".repeat(64),
+    contentHash: "b".repeat(64),
+    importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION,
+    original: { payload },
+    normalized: { payload },
+    treatment: "archive_only",
+  }];
+  const memory = memoryHistoryClient();
+  await assert.rejects(stageAppSheetHistoryProjection(prepared, {
+    actorId: "authorized-user", technicalReview: stageReview(), commitSha: "e".repeat(40),
+    allowStagedDelta: true, target: "isolated-test", destinationIdentity: HISTORY_TEST_DESTINATION_ID,
+    backupEvidence: { manifestHash: "9".repeat(64), snapshotAt: "2026-10-09T12:00:00.000Z" },
+  }, memory.client), (error) => error instanceof AppSheetHistoryStageError && error.code === "history_source_record_too_large");
+  assert.equal(memory.writes, 0);
+  assert.equal(memory.snapshot, null);
+  assert.deepEqual(memory.rows.sourceRecords, []);
 });
 
 test("replaying same-ID history content tampering is rejected without writes", async () => {
@@ -591,8 +730,9 @@ test("replaying same-ID history content tampering is rejected without writes", a
     const prepared = populatedStageFixture();
     const memory = memoryHistoryClient();
     const options = {
-      actorId: "authorized-user", technicalReview: stageReview(), commitSha: "e".repeat(40),
-      allowStagedDelta: true, target: "isolated-test" as const,
+    actorId: "authorized-user", technicalReview: stageReview(), commitSha: "e".repeat(40),
+    allowStagedDelta: true, target: "isolated-test" as const,
+    destinationIdentity: HISTORY_TEST_DESTINATION_ID,
       backupEvidence: { manifestHash: "9".repeat(64), snapshotAt: "2026-10-09T12:00:00.000Z" },
     };
     const first = await stageAppSheetHistoryProjection(prepared, options, memory.client);

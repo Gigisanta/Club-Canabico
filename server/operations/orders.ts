@@ -3,12 +3,13 @@ import { z } from "zod";
 import { registerCommand, OperationError, json, objectId, evidence, decimal, currency, minor, positiveMinor, requireDelivery, requireCapability, capabilities, touchAggregate, audit, type CommandContext } from "./core.js";
 import { parseDecimal, parseQuantity, formatDecimal, roundHalfUp, canonicalJson } from "../../shared/operations/exact.js";
 import { appsheetInvoiceInput, isAppSheetInvoiceTotalPending, type AppSheetInvoiceInput } from "../../shared/operations/appsheet.js";
-import { APPSHEET_INVOICE_RULE_VERSION, APPSHEET_INVOICE_SOURCE_EXPRESSIONS, calculateAppSheetInvoiceFinancials } from "../../shared/operations/appsheet-invoice-rules.js";
+import { APPSHEET_INVOICE_RULE_VERSION, APPSHEET_INVOICE_RULE_VERSION_V1, APPSHEET_INVOICE_SOURCE_EXPRESSIONS, APPSHEET_INVOICE_SOURCE_EXPRESSIONS_V1, calculateAppSheetInvoiceFinancials, type AppSheetInvoiceRuleVersion } from "../../shared/operations/appsheet-invoice-rules.js";
 import { quoteInput, quoteOrder, authorizeQuoteAdjustments } from "./commercial.js";
 import { commercialAddress } from "./member-fields.js";
 import { reserveOrder, prepareOrder, releaseOrderReservations, cancelOrderLines, dispatchOrder, deliverOrder, inspectOrderReturn } from "./stock.js";
 import { postLedger, accountBalance } from "./finance.js";
 import { applyAppSheetInvoiceSequenceSeed, reserveNewAppSheetInvoiceNumber, verifyExistingAppSheetInvoiceReservation } from "./appsheet-invoice-sequence.js";
+import { requireEligibleAppSheetReplacementMember } from "./access.js";
 const today=(now:Date)=>new Intl.DateTimeFormat("en-CA",{timeZone:"America/Argentina/Buenos_Aires"}).format(now);
 async function draft(ctx:CommandContext){const order=await ctx.tx.operationOrder.findUniqueOrThrow({where:{id:ctx.envelope.targetId}});if(!["draft","preorder"].includes(order.commercialState))throw new OperationError(409,"CONFIRMED_QUOTE_FROZEN","La cotización confirmada requiere una revisión aceptada");return order;}
 
@@ -49,13 +50,54 @@ function appSheetQuoteCanonical(value:unknown):string{
 }
 function appSheetQuoteHash(quote:Record<string,unknown>){return createHash("sha256").update(appSheetQuoteCanonical(quote)).digest("hex");}
 
+const invoiceUpdatedInput = z.record(z.string(),z.unknown()).superRefine((raw,ctx)=>{
+ const {acceptance,...invoice}=raw;
+ const parsed=appsheetInvoiceInput.safeParse(invoice);
+ if(!parsed.success){for(const issue of parsed.error.issues)ctx.addIssue({code:"custom",path:issue.path,message:issue.message});return;}
+ if(acceptance!==undefined&&!evidence.safeParse(acceptance).success)
+  ctx.addIssue({code:"custom",path:["acceptance"],message:"La aceptación debe conservar evidencia explícita.");
+ if(!parsed.data.preorder&&acceptance===undefined)
+  ctx.addIssue({code:"custom",path:["acceptance"],message:"La conversión de una preventa requiere la aceptación explícita del cliente.");
+ if(parsed.data.preorder&&acceptance!==undefined)
+  ctx.addIssue({code:"custom",path:["acceptance"],message:"Guardá la preventa sin aceptación; registrala al confirmar la cotización.");
+}).transform(raw=>{
+ const {acceptance,...invoice}=raw;
+ const normalized=appsheetInvoiceInput.parse(invoice);
+ return {
+  ...normalized,
+  ...(acceptance===undefined?{}:{acceptance:evidence.parse(acceptance)}),
+ };
+});
+
 type InvoiceSku={id:string;unit:string;active:boolean;appSheet:unknown};
-type AppSheetInvoiceCalculationOptions={replacement?:boolean;invoiceNumber?:string|null;evaluatedAt?:Date;numbering?:{captureId:string;id:bigint;year:number}};
+type AppSheetInvoiceCalculationOptions={replacement?:boolean;historicalSnapshot?:boolean;ruleVersion?:AppSheetInvoiceRuleVersion;invoiceNumber?:string|null;evaluatedAt?:Date;numbering?:{captureId:string;id:bigint;year:number}};
+function requireReplacementInvoiceInputAvailability(input:AppSheetInvoiceInput,skuById:Map<string,InvoiceSku>){
+ for(const line of input.lines){
+  const sku=skuById.get(line.skuId),appSheet=sku?.appSheet&&typeof sku.appSheet==="object"&&!Array.isArray(sku.appSheet)?sku.appSheet as {availability?:unknown}:{};
+  if(!sku?.active||sku.unit!=="g")throw new OperationError(422,"ORDER_SKU_UNAVAILABLE","El producto de la factura debe estar activo y expresado en gramos");
+  if(appSheet.availability!=="Sí")
+   throw new OperationError(422,"APP_SHEET_SKU_AVAILABILITY_UNVERIFIED","La disponibilidad AppSheet del producto debe estar confirmada como Sí antes de guardar la factura.");
+  let quantity:bigint;
+  try{quantity=parseQuantity(line.quantity,"g");}catch{throw new OperationError(422,"QUOTE_QUANTITY","La cantidad debe respetar la precisión de la unidad seleccionada");}
+  if(quantity<1_000n||quantity>99_000n)
+   throw new OperationError(422,"APP_SHEET_INVOICE_QUANTITY_RANGE","La cantidad de cada producto debe estar entre 1 y 99 gramos.");
+ }
+}
+async function requireCurrentAppSheetInvoiceAvailability(ctx:CommandContext,skuIds:string[],replacement:boolean){
+ const skus=skuIds.length?await ctx.tx.catalogSku.findMany({where:{id:{in:skuIds}}}):[],skuById=new Map(skus.map(sku=>[sku.id,sku]));
+ for(const skuId of skuIds){
+  const sku=skuById.get(skuId),appSheet=sku?.appSheet&&typeof sku.appSheet==="object"&&!Array.isArray(sku.appSheet)?sku.appSheet as {availability?:unknown}:{};
+  if(!sku?.active||sku.unit!=="g")throw new OperationError(422,"ORDER_SKU_UNAVAILABLE","El producto de la factura debe estar activo y expresado en gramos");
+  if(replacement?appSheet.availability!=="Sí":appSheet.availability==="NO")
+   throw new OperationError(422,replacement?"APP_SHEET_SKU_AVAILABILITY_UNVERIFIED":"ORDER_SKU_UNAVAILABLE",replacement?"La disponibilidad AppSheet del producto debe estar confirmada como Sí antes de confirmar la factura.":"El producto de la factura no está disponible");
+ }
+}
 function buildAppSheetInvoiceSnapshot(input:AppSheetInvoiceInput,skuById:Map<string,InvoiceSku>,options:AppSheetInvoiceCalculationOptions={}){
+ if(options.replacement&&!options.historicalSnapshot)requireReplacementInvoiceInputAvailability(input,skuById);
  const lines=input.lines.map(line=>{
   const sku=skuById.get(line.skuId);
   const appSheet=sku?.appSheet&&typeof sku.appSheet==="object"&&!Array.isArray(sku.appSheet)?sku.appSheet as {availability?:unknown}:{};
-  if(!sku?.active||appSheet.availability==="NO"||sku.unit!=="g")throw new OperationError(422,"ORDER_SKU_UNAVAILABLE","El producto de la factura debe estar activo, disponible y expresado en gramos");
+  if(!sku?.active||(!options.historicalSnapshot&&appSheet.availability==="NO")||sku.unit!=="g")throw new OperationError(422,"ORDER_SKU_UNAVAILABLE","El producto de la factura debe estar activo, disponible y expresado en gramos");
   let quantity:bigint;
   try{quantity=parseQuantity(line.quantity,sku.unit);}catch{throw new OperationError(422,"QUOTE_QUANTITY","La cantidad debe respetar la precisión de la unidad seleccionada");}
   if(quantity<=0n)throw new OperationError(422,"QUOTE_QUANTITY","La cantidad de la línea debe ser positiva");
@@ -75,38 +117,56 @@ function buildAppSheetInvoiceSnapshot(input:AppSheetInvoiceInput,skuById:Map<str
  const clientTariff=BigInt(input.moto?.clientTariffMinor??"0");
  const capturedBase=checkInvoiceMinor(productTotal+clientTariff);
  checkInvoiceMinor(productTotal);checkInvoiceMinor(clientTariff);
+ const ruleVersion=options.ruleVersion??APPSHEET_INVOICE_RULE_VERSION;
  const financials=options.replacement?calculateAppSheetInvoiceFinancials({
   subtotalMinor:productTotal,clientTariffMinor:clientTariff,paymentMethod:input.productPaymentMethod,currency:input.currency,
- }):null;
+  ...(input.moto?{moto:{paymentMethod:input.moto.paymentMethod}}:{}),
+ },{ruleVersion}):null;
  if(financials){checkInvoiceMinor(financials.transferMinor);checkInvoiceMinor(financials.transferTotalMinor);checkInvoiceMinor(financials.totalMinor);}
+ if(financials?.motoTransferMinor!==null&&financials?.motoTransferMinor!==undefined)checkInvoiceMinor(financials.motoTransferMinor);
+ if(financials?.motoClientSubtotalMinor!==null&&financials?.motoClientSubtotalMinor!==undefined)checkInvoiceMinor(financials.motoClientSubtotalMinor);
+ const effectiveClientTariff=financials?.motoClientSubtotalMinor??clientTariff;
  const effectiveInvoiceNumber=options.replacement?(options.invoiceNumber??input.invoiceNumber??null):(input.invoiceNumber??null);
  const effectiveInput=options.replacement?{...input,invoiceNumber:effectiveInvoiceNumber??undefined}:input;
  const formulaEvidence=financials?{
- schemaVersion:"appsheet-invoice-calculation/v1",ruleVersion:APPSHEET_INVOICE_RULE_VERSION,
+ schemaVersion:ruleVersion===APPSHEET_INVOICE_RULE_VERSION_V1?"appsheet-invoice-calculation/v1":"appsheet-invoice-calculation/v2",ruleVersion,
   evaluatedAt:(options.evaluatedAt??new Date()).toISOString(),phase:"Form Saved · Recalcular_Factura",
-  sourceExpressions:APPSHEET_INVOICE_SOURCE_EXPRESSIONS,
+  sourceExpressions:ruleVersion===APPSHEET_INVOICE_RULE_VERSION_V1?APPSHEET_INVOICE_SOURCE_EXPRESSIONS_V1:APPSHEET_INVOICE_SOURCE_EXPRESSIONS,
   numbering:options.numbering?{captureId:options.numbering.captureId,sequenceId:options.numbering.id.toString(),year:options.numbering.year,allocation:"transactional_sequence_reservation"}:null,
   results:{Cantidad_Gr:lines.reduce((sum,line)=>sum+parseQuantity(line.requested,"g"),0n).toString(),Subtotal_Venta:productTotal.toString(),
-   Tarifa_Moto_Cliente:clientTariff.toString(),Transferencia:financials.transferMinor.toString(),
-   Total_venta_Transferencia:financials.transferTotalMinor.toString(),Total_Facturado:financials.totalMinor.toString()},
+   Tarifa_Moto_Cliente:effectiveClientTariff.toString(),Transferencia:financials.transferMinor.toString(),
+   Total_venta_Transferencia:financials.transferTotalMinor.toString(),Total_Facturado:financials.totalMinor.toString(),
+   ...(ruleVersion===APPSHEET_INVOICE_RULE_VERSION&&financials.motoTransferMinor!==null?{
+    Transferencia_moto:financials.motoTransferMinor.toString(),Subtotal_Cliente_Moto:financials.motoClientSubtotalMinor!.toString(),
+   }:{}),
   transfer:financials.transferCalculation,
+  ...(ruleVersion===APPSHEET_INVOICE_RULE_VERSION&&financials.motoTransferCalculation?{motoTransfer:financials.motoTransferCalculation}:{}),
+ }:null;
+ const motoPaymentComponent=input.moto?{
+  paymentMethod:input.moto.paymentMethod,
+  transferMinor:financials?.motoTransferMinor?.toString()??null,
+  transferCalculationState:financials?.motoClientSubtotalMinor!==null&&financials?.motoClientSubtotalMinor!==undefined?"defined":"pending_definition",
+  clientTariffMinor:input.moto.clientTariffMinor,
+  totalTariffMinor:input.moto.totalTariffMinor,
+  adminTariffMinor:input.moto.adminTariffMinor,
+  ...(financials?.motoClientSubtotalMinor!==null&&financials?.motoClientSubtotalMinor!==undefined?{clientSubtotalMinor:financials.motoClientSubtotalMinor.toString()}:{}),
  }:null;
  const quote={
   source:"appsheet-invoice",currency:input.currency,invoiceNumber:effectiveInvoiceNumber,invoiceDate:input.invoiceDate,note:input.note,
   lines:lines.map(({appsheet,...line})=>({...line,...appsheet})),
-  subtotalMinor:financials?productTotal.toString():null,capturedProductMinor:productTotal.toString(),subtotalCalculationState:financials?"defined":"pending_definition",discountMinor:"0",deliveryMinor:clientTariff.toString(),deliveryDiscountMinor:"0",
+  subtotalMinor:financials?productTotal.toString():null,capturedProductMinor:productTotal.toString(),subtotalCalculationState:financials?"defined":"pending_definition",discountMinor:"0",deliveryMinor:effectiveClientTariff.toString(),deliveryDiscountMinor:"0",
   surchargeMinor:financials?financials.transferMinor.toString():"0",productTransferMinor:financials?financials.transferMinor.toString():null,capturedBaseMinor:capturedBase.toString(),totalMinor:financials?financials.totalMinor.toString():null,
   totalCalculationState:financials?"defined":"pending_definition",...(financials?{totalCalculationSource:"appsheet_recalculation_action",appSheetFormula:formulaEvidence}:{}),
   paymentComponents:{
    products:{paymentMethod:input.productPaymentMethod,transferMinor:financials?financials.transferMinor.toString():null,transferCalculationState:financials?"defined":"pending_definition",totalMinor:financials?financials.transferTotalMinor.toString():productTotal.toString()},
-   moto:input.moto?{paymentMethod:input.moto.paymentMethod,transferMinor:null,transferCalculationState:"pending_definition",clientTariffMinor:input.moto.clientTariffMinor,totalTariffMinor:input.moto.totalTariffMinor,adminTariffMinor:input.moto.adminTariffMinor}:null,
+   moto:motoPaymentComponent,
   },
   moto:input.moto??null,quotedBy:null,quotedDate:input.invoiceDate,input:effectiveInput,
  };
  const deliveryAddress=input.moto?{
   ...input.address,motoDestination:input.moto.destination,motoDeliveryDate:input.moto.deliveryDate,motoServiceType:input.moto.serviceType,
  }:input.address;
- return {lines,quote,capturedBase,productTotal,clientTariff,surcharge:financials?.transferMinor??0n,total:financials?.totalMinor??capturedBase,deliveryAddress};
+ return {lines,quote,capturedBase,productTotal,clientTariff:effectiveClientTariff,surcharge:financials?.transferMinor??0n,total:financials?.totalMinor??capturedBase,deliveryAddress};
 }
 
 async function currentInvoiceAuthority(ctx:CommandContext){
@@ -117,13 +177,23 @@ function invoiceNumberFromQuote(quote:Record<string,unknown>):string|null{
  return typeof quote.invoiceNumber==="string"?quote.invoiceNumber:null;
 }
 
-async function verifiedAppSheetSnapshot(ctx:CommandContext,order:StoredOrder,quote:Record<string,unknown>){
+async function verifiedAppSheetSnapshot(ctx:CommandContext,order:StoredOrder,quote:Record<string,unknown>,options:{allowIncompleteHistoricalMotoForEdit?:boolean}={}){
  const parsed=appsheetInvoiceInput.safeParse(quote.input);
  if(!parsed.success)throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La factura pendiente no conserva un formulario AppSheet válido");
  const skuIds=[...new Set(parsed.data.lines.map(line=>line.skuId))];
  const skus=skuIds.length?await ctx.tx.catalogSku.findMany({where:{id:{in:skuIds}}}):[];
- const formulaEvidence=quote.appSheetFormula&&typeof quote.appSheetFormula==="object"&&!Array.isArray(quote.appSheetFormula)?quote.appSheetFormula as Record<string,unknown>:null;
- const replacement=Boolean(formulaEvidence?.ruleVersion===APPSHEET_INVOICE_RULE_VERSION);
+ const formulaValue=quote.appSheetFormula;
+ const formulaEvidence=formulaValue&&typeof formulaValue==="object"&&!Array.isArray(formulaValue)?formulaValue as Record<string,unknown>:null;
+ if(Object.hasOwn(quote,"appSheetFormula")&&!formulaEvidence)
+  throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La factura declara una regla AppSheet sin conservar su evidencia verificable");
+ const rawRuleVersion=formulaEvidence?.ruleVersion;
+ const ruleVersion:AppSheetInvoiceRuleVersion|null=rawRuleVersion===APPSHEET_INVOICE_RULE_VERSION||rawRuleVersion===APPSHEET_INVOICE_RULE_VERSION_V1?rawRuleVersion:null;
+ if(formulaEvidence&&!ruleVersion)
+  throw new OperationError(409,"INVOICE_SNAPSHOT_RULE_VERSION_UNSUPPORTED","La factura usa una versión de reglas AppSheet desconocida y requiere revisión antes de confirmar");
+ const expectedFormulaSchema=ruleVersion===APPSHEET_INVOICE_RULE_VERSION_V1?"appsheet-invoice-calculation/v1":"appsheet-invoice-calculation/v2";
+ if(formulaEvidence&&formulaEvidence.schemaVersion!==expectedFormulaSchema)
+  throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La versión de evidencia financiera no coincide con sus reglas AppSheet");
+ const replacement=Boolean(formulaEvidence&&ruleVersion);
  const authority=await currentInvoiceAuthority(ctx);
  if(replacement){
   const evaluatedAt=typeof formulaEvidence?.evaluatedAt==="string"?new Date(formulaEvidence.evaluatedAt):new Date(Number.NaN);
@@ -135,7 +205,7 @@ async function verifiedAppSheetSnapshot(ctx:CommandContext,order:StoredOrder,quo
   if(sequenceId===null||sequenceYear===null||sequenceCaptureId===null)throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La instantánea no conserva la reserva transaccional de su número.");
   if(authority?.cutoverProfile==="appsheet-replacement"&&authority.captureManifestId!==sequenceCaptureId)throw new OperationError(409,"INVOICE_SEQUENCE_CAPTURE_MISMATCH","La reserva no corresponde a la captura activa.");
   await verifyExistingAppSheetInvoiceReservation(ctx.tx,{captureId:sequenceCaptureId,orderId:order.id,invoiceNumber:invoiceNumberFromQuote(quote),generatedId:sequenceId,generatedYear:sequenceYear});
-  const built=buildAppSheetInvoiceSnapshot(parsed.data,new Map(skus.map(sku=>[sku.id,sku])),{replacement:true,invoiceNumber:invoiceNumberFromQuote(quote),evaluatedAt,numbering:{captureId:sequenceCaptureId,id:sequenceId,year:sequenceYear}});
+  const built=buildAppSheetInvoiceSnapshot(parsed.data,new Map(skus.map(sku=>[sku.id,sku])),{replacement:true,historicalSnapshot:true,ruleVersion:ruleVersion!,invoiceNumber:invoiceNumberFromQuote(quote),evaluatedAt,numbering:{captureId:sequenceCaptureId,id:sequenceId,year:sequenceYear}});
   if(appSheetQuoteCanonical(built.quote)!==appSheetQuoteCanonical(quote))throw new OperationError(409,"INVOICE_SNAPSHOT_CHANGED","La confirmación debe partir de la última factura AppSheet guardada");
   const [object,receipt]=await Promise.all([
    ctx.tx.operationObject.findUnique({where:{id:order.id},select:{version:true}}),
@@ -144,9 +214,11 @@ async function verifiedAppSheetSnapshot(ctx:CommandContext,order:StoredOrder,quo
   const result=(receipt?.response as {result?:{snapshotHash?:unknown;quoteVersion?:unknown}}|undefined)?.result;
   if(!object||!receipt||receipt.resultingVersion!==object.version||result?.quoteVersion!==order.quoteVersion||result?.snapshotHash!==appSheetQuoteHash(quote))
    throw new OperationError(409,"INVOICE_SNAPSHOT_CHANGED","La confirmación debe partir de la última factura AppSheet guardada");
+  if(ruleVersion===APPSHEET_INVOICE_RULE_VERSION_V1&&parsed.data.moto&&["transfer","mercado_pago"].includes(parsed.data.moto.paymentMethod)&&!options.allowIncompleteHistoricalMotoForEdit)
+   throw new OperationError(409,"APP_SHEET_MOTO_FORMULA_RECALCULATION_REQUIRED","La regla histórica no calculó el 5% de la moto; editá y recalculá la factura para generar una cotización actual antes de confirmarla.");
   return built;
  }
- const built=buildAppSheetInvoiceSnapshot(parsed.data,new Map(skus.map(sku=>[sku.id,sku])));
+ const built=buildAppSheetInvoiceSnapshot(parsed.data,new Map(skus.map(sku=>[sku.id,sku])),{historicalSnapshot:true});
  if(appSheetQuoteCanonical(built.quote)!==appSheetQuoteCanonical(quote))throw new OperationError(409,"INVOICE_SNAPSHOT_CHANGED","La instantánea de la factura cambió después de guardarse");
  const [object,receipt]=await Promise.all([
   ctx.tx.operationObject.findUnique({where:{id:order.id},select:{version:true}}),
@@ -165,8 +237,10 @@ registerCommand("InvoiceSaved",{kind:"order",capability:"orders.write",create:tr
  if(replacement&&!authority?.captureManifestId)throw new OperationError(423,"APP_SHEET_INVOICE_SEQUENCE_CAPTURE_REQUIRED","La numeración requiere una captura verificada vinculada a la autoridad actual.");
  const member=await ctx.tx.operationMember.findUnique({where:{id:v.memberId}});
  if(!member)throw new OperationError(422,"MEMBER_REQUIRED","Elegí un socio identificado");
+ if(replacement)await requireEligibleAppSheetReplacementMember(ctx.tx,member.id);
  const skuIds=[...new Set(v.lines.map(line=>line.skuId))],skus=await ctx.tx.catalogSku.findMany({where:{id:{in:skuIds}}});
  const skuById=new Map(skus.map(sku=>[sku.id,sku]));
+ if(replacement)requireReplacementInvoiceInputAvailability(v,skuById);
  let effectiveInput=v,built:ReturnType<typeof buildAppSheetInvoiceSnapshot>;
  if(replacement){
   // The order FK exists before reservation; both the counter bump and this row
@@ -200,11 +274,15 @@ registerCommand("InvoiceSaved",{kind:"order",capability:"orders.write",create:tr
  return {...result,invoiceNumber:built.quote.invoiceNumber};
 }});
 
-registerCommand("InvoiceUpdated",{kind:"order",capability:"orders.write",schema:appsheetInvoiceInput,execute:async ctx=>{
- const v=ctx.envelope.data as AppSheetInvoiceInput,order=await ctx.tx.operationOrder.findUnique({where:{id:ctx.envelope.targetId}});
+registerCommand("InvoiceUpdated",{kind:"order",capability:"orders.write",schema:invoiceUpdatedInput,execute:async ctx=>{
+ const {acceptance:rawAcceptance,...rawInvoice}=ctx.envelope.data;
+ const v=appsheetInvoiceInput.parse(rawInvoice) as AppSheetInvoiceInput;
+ const acceptance=rawAcceptance===undefined?undefined:evidence.parse(rawAcceptance) as Record<string,unknown>;
+ const order=await ctx.tx.operationOrder.findUnique({where:{id:ctx.envelope.targetId}});
  if(!order||order.commercialState!=="preorder"||(order.quote as {source?:unknown}).source!=="appsheet-invoice")throw new OperationError(409,"INVOICE_NOT_EDITABLE","Sólo se puede modificar una factura pendiente de AppSheet");
  if(v.memberId!==order.memberId)throw new OperationError(403,"INVOICE_MEMBER_FROZEN","La preventa conserva el socio autorizado al crearla");
  const authority=await currentInvoiceAuthority(ctx),replacement=authority?.cutoverProfile==="appsheet-replacement";
+ if(replacement)await requireEligibleAppSheetReplacementMember(ctx.tx,order.memberId);
  const previousQuote=order.quote as Record<string,unknown>,storedInvoiceNumber=invoiceNumberFromQuote(previousQuote);
  const priorReservation=await ctx.tx.appSheetInvoiceNumberReservation.findUnique({where:{orderId:order.id},select:{id:true}});
  const invoiceNumberLocked=replacement||Boolean(priorReservation);
@@ -212,6 +290,11 @@ registerCommand("InvoiceUpdated",{kind:"order",capability:"orders.write",schema:
   throw new OperationError(409,"INVOICE_NUMBER_IMMUTABLE","El número de factura queda fijado al crearla y no se puede editar.");
  if(replacement){
   if(!authority?.captureManifestId)throw new OperationError(423,"APP_SHEET_INVOICE_SEQUENCE_CAPTURE_REQUIRED","La numeración requiere una captura verificada vinculada a la autoridad actual.");
+ }
+ if(!v.preorder){
+  // Verify the persisted quote before replacing it. Historical v1 Moto transfers
+  // may only be converted by this edit when replacement recalculates them as v2.
+  await verifiedAppSheetSnapshot(ctx,order,previousQuote,{allowIncompleteHistoricalMotoForEdit:replacement});
  }
  const effectiveInput=invoiceNumberLocked?{...v,invoiceNumber:storedInvoiceNumber??undefined}:v;
  const skuIds=[...new Set(v.lines.map(line=>line.skuId))],skus=skuIds.length?await ctx.tx.catalogSku.findMany({where:{id:{in:skuIds}}}):[];
@@ -237,7 +320,8 @@ registerCommand("InvoiceUpdated",{kind:"order",capability:"orders.write",schema:
   channel:v.moto?"delivery":"local",commercialState:"preorder",financialState:"unpaid",
  }});
  if(v.preorder)return {orderId:order.id,commercialState:"preorder",deliveryId:null,reservations:null,quoteFrozen:false,quoteVersion:updated.quoteVersion,snapshotHash:appSheetQuoteHash(built.quote),invoiceNumber:built.quote.invoiceNumber};
- const result=await confirmOrderSnapshot(ctx,updated,built.quote,{deliveryAddress:built.deliveryAddress,financialState:"unpaid"});
+ const acceptedQuote={...acceptance!,acceptedBy:ctx.actor.id,acceptedAt:ctx.now.toISOString(),quoteVersion:updated.quoteVersion,snapshotHash:appSheetQuoteHash(built.quote)};
+ const result=await confirmOrderSnapshot(ctx,updated,built.quote,{deliveryAddress:built.deliveryAddress,acceptance:acceptedQuote,financialState:"unpaid"});
  return {...result,invoiceNumber:built.quote.invoiceNumber};
 }});
 
@@ -253,7 +337,10 @@ registerCommand("InvoiceConfirmed",{kind:"order",capability:"orders.write",schem
  if(order.commercialState!=="preorder")throw new OperationError(409,"INVOICE_NOT_PREORDER","Sólo se puede confirmar una factura pendiente");
  const quote=order.quote as Record<string,unknown>;
  if(quote.source!=="appsheet-invoice"||!Array.isArray(quote.lines)||!quote.lines.length)throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La factura no contiene una instantánea AppSheet completa");
- await verifiedAppSheetSnapshot(ctx,order,quote);
+ await requireEligibleAppSheetReplacementMember(ctx.tx,order.memberId);
+ const verified=await verifiedAppSheetSnapshot(ctx,order,quote);
+ const authority=await currentInvoiceAuthority(ctx);
+ await requireCurrentAppSheetInvoiceAvailability(ctx,verified.lines.map(line=>line.skuId),authority?.cutoverProfile==="appsheet-replacement");
  const snapshot=quote as typeof quote & {moto?:AppSheetInvoiceInput["moto"]};
  const deliveryAddress=snapshot.moto?{
   ...order.address as Record<string,unknown>,motoDestination:snapshot.moto.destination,motoDeliveryDate:snapshot.moto.deliveryDate,motoServiceType:snapshot.moto.serviceType,

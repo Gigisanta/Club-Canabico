@@ -15,6 +15,7 @@ import {
 import { APPSHEET_CANONICAL_IMPORTER_VERSION } from "../shared/operations/appsheet-canonical.js";
 import { AppSheetHistoryStageError, loadAppSheetHistoryCapture } from "../server/operations/appsheet-history.js";
 import { requireAppSheetTechnicalReview } from "../shared/operations/appsheet-review.js";
+import { appSheetDatabaseDestinationIdentity } from "../server/operations/appsheet-database-target.js";
 import { verifyBackupReference } from "../server/operations/financial-source-stage.js";
 
 const PRIVATE_DIR = ".local/appsheet-real-20261009";
@@ -40,7 +41,8 @@ function usage(): string {
     "       [--expected-app-id <id>] [--allow-staged-delta] [--refresh-preliminary] [--apply --target isolated-test|production --actor-id <id> --review <JSON privado>]",
     "       [--backup-reference <respaldo verificado>] sólo junto a --target production.",
     "Preview es el comportamiento predeterminado. --allow-staged-delta crea sólo una derivación bloqueada para cutover.",
-    "Apply exige revisión técnica independiente; isolated-test usa TEST_DATABASE_URL loopback bombo_ui_* y production exige DATABASE_URL y respaldo verificado.",
+    "Apply exige revisión técnica independiente ligada a target y fingerprint no secreto de base/schema; v1 sólo vale en isolated-test.",
+    "El fingerprint omite credenciales y opciones TLS; isolated-test usa TEST_DATABASE_URL loopback bombo_ui_* y production exige DATABASE_URL y respaldo verificado.",
     "--refresh-preliminary sólo permite actualizar maestros con identidad sin aprobar y última proyección staged sin revisión ni cambios manuales.",
   ].join("\n");
 }
@@ -212,10 +214,19 @@ async function run(args: string[], workingDirectory = process.cwd()): Promise<{ 
       allowStagedDelta: options.allowStagedDelta,
       expectedAppId: options.expectedAppId,
     });
+    const configuredTargetUrl = options.target === "isolated-test" ? process.env.TEST_DATABASE_URL : process.env.DATABASE_URL;
+    let previewDestinationIdentity: string | null = null;
+    if (configuredTargetUrl) {
+      const previewDatabaseUrl = options.target === "isolated-test" ? requireTestDatabaseUrl() : requireProductionDatabaseUrl();
+      try { previewDestinationIdentity = appSheetDatabaseDestinationIdentity(options.target, previewDatabaseUrl); }
+      catch { throw new AppSheetCanonicalError("database_target_identity_invalid"); }
+    }
     const report = {
       ...appSheetCanonicalProjectionReport(projection),
       commitSha: initialGitState.commitSha,
       target: options.target,
+      destinationIdentity: previewDestinationIdentity,
+      destinationIdentityState: previewDestinationIdentity ? "derived-from-config" : "target-database-not-configured",
       expectedAppId: projection.expectedAppId,
       definitionIdentityState: projection.definitionIdentityState,
       definition: {
@@ -237,6 +248,9 @@ async function run(args: string[], workingDirectory = process.cwd()): Promise<{ 
       try { backupEvidence = await verifyBackupReference(options.backupReference!); }
       catch { throw new AppSheetCanonicalError("verified_production_backup_required"); }
     } else databaseUrl = requireTestDatabaseUrl();
+    let destinationIdentity: string;
+    try { destinationIdentity = appSheetDatabaseDestinationIdentity(options.target, databaseUrl); }
+    catch { throw new AppSheetCanonicalError("database_target_identity_invalid"); }
     const reviewValue = await readPrivateJson(options.reviewPath!, privateDirectory, workingDirectory, 1_000_000);
     const review = requireAppSheetTechnicalReview(reviewValue, {
       captureId: projection.capture.captureId,
@@ -246,6 +260,8 @@ async function run(args: string[], workingDirectory = process.cwd()): Promise<{ 
       projectionHash: projection.projectionHash,
       commitSha: initialGitState.commitSha,
       importer: APPSHEET_CANONICAL_IMPORTER_VERSION,
+      target: options.target,
+      destinationIdentity,
     });
     const finalGitState = readGitState(workingDirectory);
     if (!finalGitState.clean || finalGitState.commitSha !== initialGitState.commitSha)
@@ -257,9 +273,10 @@ async function run(args: string[], workingDirectory = process.cwd()): Promise<{ 
         refreshPreliminary: options.refreshPreliminary,
         commitSha: finalGitState.commitSha,
         target: options.target,
+        destinationIdentity,
         backupEvidence,
       }, db);
-      return { code: 0, output: JSON.stringify({ ...report, status: staged.status, replay: staged.replay, snapshotId: staged.snapshotId }) };
+      return { code: 0, output: JSON.stringify({ ...report, destinationIdentity, status: staged.status, replay: staged.replay, snapshotId: staged.snapshotId }) };
     } finally {
       await db.$disconnect();
     }

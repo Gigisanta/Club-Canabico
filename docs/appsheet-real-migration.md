@@ -1,6 +1,6 @@
 # Migración técnica de AppSheet: captura, proyecciones y corte
 
-Estado de preparación al 9 de octubre de 2026, anterior al ensayo de carga de estos snapshots. Esta guía documenta la reconciliación de fuentes, las proyecciones y los gates del corte. La evidencia posterior de aplicación, repetición y producción se conserva separadamente en el manifiesto privado del ensayo. No declara equivalencia funcional completa ni activación operativa.
+Estado de preparación inicial al 9 de octubre de 2026, anterior al ensayo de carga de estos snapshots. Las secciones de preparación conservan ese estado histórico; la actualización al final describe la relectura y los cambios posteriores. Esta guía documenta la reconciliación de fuentes, las proyecciones y los gates del corte. La evidencia posterior de aplicación, repetición y producción se conserva separadamente en el manifiesto privado del ensayo. No declara equivalencia funcional completa ni activación operativa.
 
 ## Alcance de la fuente
 
@@ -84,18 +84,18 @@ Cada proyección se aplica por separado. El target `isolated-test` de maestros r
 node scripts/operations-backup.mjs backup <directorio-privado-nuevo>
 node scripts/operations-backup.mjs verify <directorio-privado-nuevo>
 
-# Ejemplos de apply; requieren actor, revisión independiente y respaldo verificado.
-# El staging preliminar requiere revisión técnica y respaldo; no habilita el corte.
+# Ejemplos de ensayo aislado; requieren actor, revisión independiente y respaldo verificado.
+# Una captura preliminar sólo puede ensayarse aislada; producción exige stable=true.
 ./node_modules/.bin/tsx scripts/appsheet-canonical.ts \
   --definition .local/appsheet-real-20261009/appsheet-definition-inventory-1.001739-v2.json \
-  --allow-staged-delta --apply --target production \
+  --allow-staged-delta --apply --target isolated-test \
   --actor-id <administrador-activo> \
   --review .local/appsheet-real-20261009/masters-review.json \
   --backup-reference <paquete-privado-verificado>
 
 ./node_modules/.bin/tsx scripts/appsheet-history.ts \
   --definition .local/appsheet-real-20261009/appsheet-definition-inventory-1.001739-v2.json \
-  --allow-staged-delta --apply --target production \
+  --allow-staged-delta --apply --target isolated \
   --actor-id <administrador-activo> \
   --review .local/appsheet-real-20261009/history-review.json \
   --backup-reference <paquete-privado-verificado>
@@ -134,3 +134,24 @@ Después del primer write real, no restaurar encima de la base viva un paquete a
 | Corte funcional | Sin cutoff estable, adjuntos completos, revisión de historia, delta final posterior a pausa, ni gates de autoridad y aperturas aceptados. | No listo para cortar ni declarar paridad completa. |
 
 Los conteos y estados del staging anterior de `appsheet-business-archive` y de observaciones financieras están documentados por separado en [Migración AppSheet y operación manual](appsheet-migration-2026-10-09.md). No representan la aplicación de estos nuevos snapshots de maestros e historia.
+
+
+## Relectura de paridad del 9 de octubre de 2026
+
+Se volvió a leer, sin modificar la aplicación, [la documentación del sistema oficial Adm_TB](https://www.appsheet.com/template/appdoc?appId=5b49e640-a7c9-40bb-bccf-ddbc9fcc63f0). La versión observada fue `1.001739`: 58 tablas, 1.075 columnas, 10 slices, 113 vistas, 21 reglas de formato y 310 acciones. Los 570 objetos raíz y sus columnas coincidieron semánticamente con la definición anterior, excluyendo posiciones de evidencia y el encabezado generado. Esto compara definiciones; no vuelve estable el libro ni certifica sus filas.
+
+La captura HTML privada tiene SHA-256 `f4c9aea7d1f5d088990d04032f96cbde43d2ccebca4f5152e96950bfa9281d60`. El inventario final del parser `1.2.0` tiene SHA-256 `35cb592144a55559ba63002caf3ef96a0e017bfcbfefb13294ff79d12e6cfc84` y descriptor `1e034d799dd1cbeeda71d5d14946a4155effce40d2a6ad3d3619fdbf5e065d44`. Se corrige la lectura del nombre y versión del encabezado y se distingue JSON `null` de una expresión literal: un campo sin expresión no se convierte en la fórmula `"null"`. El mapa privado conserva 1.645 nodos y destinos candidatos; una coincidencia de nombre de archivo no demuestra equivalencia ejecutable.
+
+La revisión técnica v2 se vincula, además del commit y la proyección, al tipo de destino y a un fingerprint opaco de host, puerto, base y esquema. Las credenciales no participan en el fingerprint ni se muestran. Los previews pueden derivarlo de la configuración sin abrir una conexión. Una revisión v1 sólo puede emplearse en ensayo aislado. El staging de producción rechaza capturas inestables incluso si se solicita delta preliminar. La historia se escribe en bloques limitados por cantidad y bytes, conservando el orden y rechazando un registro individual demasiado grande antes de persistir el snapshot.
+
+La elegibilidad de socios del reemplazo exige la revisión de identidades de la captura seleccionada y sus auditorías individuales. Una aprobación genérica de un archivo anterior no la sustituye. La consulta filtra antes de paginar, y el control se aplica también a detalle, historia, acceso clínico y nuevas facturas. Los socios creados mediante el comando normal siguen disponibles; las modificaciones posteriores legítimas conservan su cadena de recibos y auditoría. La revisión de otra captura no invalida por sí sola la anterior ni autoriza datos de esa otra captura.
+
+El recorrido de factura mantiene borradores y permite crear un socio y volver al formulario. Los reintentos de una respuesta perdida conservan la identidad del comando. La selección del socio recién creado requiere comprobar su registro; una lectura fallida no inventa una opción. Confirmar una preventa desde la edición requiere la misma evidencia explícita de aceptación que su confirmación directa, vinculada a la cotización y su hash. La reserva de stock y entrega ocurre dentro de la transacción; guardar historia no repite cobros ni bots.
+
+La regla financiera v2 separa el 5% de los productos del 5% de Moto para Transferencia/Mercado Pago, y suma el subtotal de cliente de Moto una sola vez. Se conserva el cálculo v1 de las cotizaciones históricas; una cotización que dejó pendiente el recargo de Moto requiere edición y recálculo antes de confirmarse. Los resultados de dinero exacto conservan el cociente, el resto y la regla de redondeo aplicada. La fórmula fuente no especifica por sí sola ese redondeo: comparar contra resultados reales sigue siendo necesario para certificar paridad monetaria.
+
+En el legado, `Precio_gramo_línea` y `Valor_Total` son valores iniciales editables y no se reinician al editar. Las seis escalas exactas (`Precio_5_Gramos` a `Precio_30_Gramos`) y las promociones deben permanecer separadas; los intervalos agrupados antiguos de Bombo no permiten inferir esos precios. Las tarifas de Moto dependen de servicio, gramos totales y tres filas de catálogo. Se conserva cada expresión y su fase; no se convierten valores de catálogo o monedas desconocidos en importes aprobados. La disponibilidad por lote y su fecha de entrega todavía necesitan correspondencia comprobada con `C_Mercaderia`.
+
+La evidencia recibida posteriormente contiene tres libros de distintas fechas, 2.368 instancias de archivos y 94.794 celdas con fórmulas; ese número cuenta celdas, no expresiones únicas. Se conservaron 1.886 objetos únicos por contenido (219.570.906 bytes) y se vincularon 1.174 rutas exactas. Quedan 1.844 rutas faltantes y una ambigua. El delta recibido no fue importado automáticamente. Estos conteos proceden del manifiesto privado del ensayo `f6902ce`; no constituyen una captura final del sistema en uso.
+
+Estos cambios requieren un commit congelado, controles locales y revisión independiente del mismo SHA. La evidencia de esa ejecución se conserva en un manifiesto privado separado; este texto no afirma CI, despliegue, ingreso de Tiziano/Camila ni carga operativa en producción. Persisten la pausa manual y captura final, resultados de fórmulas sin resolver, adjuntos pendientes y cobertura incompleta de bots/Apps Script. AppSheet permanece intacto.

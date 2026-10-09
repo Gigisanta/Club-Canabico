@@ -3,7 +3,7 @@ import { Prisma, type AccountReconciliation } from "@prisma/client";
 import { z } from "zod";
 import { db } from "../db.js";
 import { capabilities, requireCapability, executeCommand, commandSpecs, envelopeSchema, wire, OperationError, requireMemberScope, requireAccountScope, objectScope } from "./core.js";
-import "./access.js";
+import { appSheetReplacementCanonicalMemberIds, requireEligibleAppSheetReplacementMember } from "./access.js";
 import { projectAppSheetCatalogue } from "./appsheet-catalogue.js";
 import { projectInvoiceAmount } from "./invoice-projection.js";
 import "./commercial.js";
@@ -52,7 +52,9 @@ operationsRoutes.get("/members",async(req,res)=>{
  const q=z.string().max(120).parse(req.query.q??"");
  const scope=await objectScope(db,req.user);
  const limit=pageSize(req.query.limit),cursor=pageCursor(req.query.cursor);
- const where:Prisma.OperationMemberWhereInput={...(scope.memberIds?{id:{in:scope.memberIds}}:{}),...(q?{OR:[{name:{contains:q,mode:"insensitive"}},{email:{contains:q,mode:"insensitive"}},{phone:{contains:q}}]}:{})};
+ let where:Prisma.OperationMemberWhereInput={...(scope.memberIds?{id:{in:scope.memberIds}}:{}),...(q?{OR:[{name:{contains:q,mode:"insensitive"}},{email:{contains:q,mode:"insensitive"}},{phone:{contains:q}}]}:{})};
+ const eligibleCanonicalIds=await appSheetReplacementCanonicalMemberIds(db);
+ if(eligibleCanonicalIds!==null)where={AND:[where,{OR:[{sourceSystem:null,sourceId:null,legacyCustomerId:null},{id:{in:[...eligibleCanonicalIds]}}]}]};
  if(cursor&&!await db.operationMember.findFirst({where:{AND:[where,{id:cursor}]},select:{id:true}}))throw new OperationError(400,"PAGE_CURSOR","La página debe reiniciarse con sus filtros actuales");
  const rows=await db.operationMember.findMany({where,orderBy:[{name:"asc"},{id:"asc"}],take:limit+1,...(cursor?{cursor:{id:cursor},skip:1}:{})});
  const hasMore=rows.length>limit,members=rows.slice(0,limit);
@@ -62,6 +64,7 @@ operationsRoutes.get("/members/:id",async(req,res)=>{
  await requireCapability(db,req.user,"members.read");const id=String(req.params.id);
  await requireMemberScope(db,req.user,id);
  const member=await db.operationMember.findUnique({where:{id}});if(!member)throw new OperationError(404,"MEMBER_NOT_FOUND","Socio no encontrado");
+ await requireEligibleAppSheetReplacementMember(db,id);
  const permissions=await db.memberPermission.findMany({where:{memberId:id},select:{id:true,kind:true,status:true,validFrom:true,validUntil:true,reviewerId:true,reviewedAt:true}});
  res.json(wire({member,permissions,version:(await versions([id]))[id]}));
 });
@@ -69,6 +72,7 @@ operationsRoutes.get("/members/:id/history",async(req,res)=>{
  await requireCapability(db,req.user,"members.read");const id=String(req.params.id);await requireMemberScope(db,req.user,id);
  const limit=pageSize(req.query.limit),cursor=pageCursor(req.query.cursor);
  if(!await db.operationMember.findUnique({where:{id},select:{id:true}}))throw new OperationError(404,"MEMBER_NOT_FOUND","Socio no encontrado");
+ await requireEligibleAppSheetReplacementMember(db,id);
  if(cursor&&!await db.operationOrder.findFirst({where:{id:cursor,memberId:id},select:{id:true}}))throw new OperationError(400,"PAGE_CURSOR","La página debe reiniciarse en este socio");
  const historicalCursor=z.string().max(4096).optional().parse(req.query.historicalCursor);
  res.json(wire(await memberHistory(id,limit,cursor,historicalCursor)));
@@ -92,6 +96,7 @@ operationsRoutes.get("/accounts/:id/reconciliations",async(req,res)=>{
 operationsRoutes.get("/members/:id/clinical",async(req,res)=>{
  await requireCapability(db,req.user,"clinical.read");const id=String(req.params.id);
  await requireMemberScope(db,req.user,id);
+ await requireEligibleAppSheetReplacementMember(db,id);
  const clinical=await db.memberClinicalRecord.findUnique({where:{memberId:id}});
  await db.operationAudit.create({data:{actorId:req.user.id,action:"clinical.read",objectId:id,details:{}}});
  res.json({clinical});

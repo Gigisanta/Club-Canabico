@@ -108,6 +108,11 @@ test("extracts AppSheet object groups, formula properties, references and stable
   assert.equal(field(calculated, "showIf").value, "ISNOTBLANK([Name])");
   assert.equal(field(calculated, "editableIf").value, 'USERROLE() = "Admin"');
   assert.equal(field(calculated, "resetIf").value, "[Enabled] = FALSE");
+  assert.equal(field(calculated, "requiredIf").value, null);
+  assert.equal(field(calculated, "requiredIf").state, "observed");
+  assert.equal(field(calculated, "suggestedValues").value, null);
+  assert.equal(field(calculated, "reference").value, null);
+  assert.equal(JSON.parse(field(calculated, "typeQualifier").value!).Required_If, null);
   assert.equal(field(calculated, "spreadsheetFormula").value, '=A1 & "&"');
   assert.equal(inventory.declaredCounts.columns, 2);
   assert.equal(inventory.observedCounts.columns, 2);
@@ -117,6 +122,29 @@ test("extracts AppSheet object groups, formula properties, references and stable
   assert.equal(inventory.source.sha256.length, 64);
   assert.equal(inventory.descriptorSha256.length, 64);
   assert.ok(inventory.evidence.every((entry) => entry.excerpt === null));
+});
+
+test("captures app header name and version without using an object property as the app version", () => {
+  const header = `<section class="cta"><table><tbody>
+    <tr><td><label for="ShortName">Short Name</label></td><td>Fixture Club</td></tr>
+    <tr><td><label for="Version">Version</label></td><td>1.001739</td></tr>
+  </tbody></table><span id="generatedDate">(Loading...)</span></section>`;
+  const objectProperty = `<section class="tableSection"><h5>Stock Table name</h5><table><tbody>
+    <tr><td><label for="Version">Version</label></td><td>999.99</td></tr>
+  </tbody></table></section>`;
+  const html = syntheticDefinition(objectProperty).replace("<main><h1>", `${header}<main><h1>`);
+  const inventory = parseAppSheetDefinitionHtml(html);
+  assert.equal(inventory.app.name, "Fixture Club");
+  assert.equal(inventory.app.version, "1.001739");
+  assert.equal(inventory.app.generatedAt, null);
+  assert.equal(inventory.app.deploymentState, null);
+  assert.ok(inventory.evidence.some((entry) => entry.label === "Application version" && entry.sectionPath[0] === "Application"));
+  assert.equal(parseAppSheetDefinitionHtml(syntheticDefinition(objectProperty)).app.version, null);
+
+  const conflicting = html.replace("</tbody></table><span", '<tr><td><label for="Version">Version</label></td><td>2.000001</td></tr></tbody></table><span');
+  const ambiguous = parseAppSheetDefinitionHtml(conflicting);
+  assert.equal(ambiguous.app.version, null);
+  assert.ok(ambiguous.warnings.includes("application_header_ambiguous:Version"));
 });
 
 test("preserves the C_Cliente Credencial File reference instead of misclassifying its name as auth", () => {

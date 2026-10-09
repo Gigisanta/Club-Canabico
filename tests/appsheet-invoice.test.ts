@@ -1000,7 +1000,10 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       await db.operationOrder.update({ where: { id: targetId }, data: { quote: originalQuote as any } });
 
       await db.memberPermission.updateMany({ where: { memberId, kind: "operations" }, data: { status: "pending" } });
-      const confirmOnUpdateRequest = envelope(targetId, "InvoiceUpdated", invoiceData({ preorder: false, lineTotal: "1001", quantity: "2" }), 2);
+      const confirmOnUpdateRequest = envelope(targetId, "InvoiceUpdated", {
+        ...invoiceData({ preorder: false, lineTotal: "1001", quantity: "2" }),
+        acceptance: { reference: "synthetic-conversion-acceptance" },
+      }, 2);
       const updatePermissionRejected = await send(confirmOnUpdateRequest);
       assert.equal(updatePermissionRejected.response.status, 423, JSON.stringify(updatePermissionRejected.body));
       assert.equal(updatePermissionRejected.body.code, "MEMBER_PERMISSION_PENDING");

@@ -5,6 +5,7 @@ import {
   type AppSheetCatalogueMoney,
   type AppSheetCataloguePatch,
 } from "../../shared/operations/appsheet-catalogue.js";
+import { appSheetExactTariffFields, type AppSheetExactTariffField } from "../../shared/operations/appsheet-line-pricing.js";
 import { apiGet, hasCapability, hasCommand, isUncertainCommandOutcome, OperationsApiError } from "./api";
 import { amountFormToMinor, formatMinor } from "./money";
 import { ActionButton, DataTable, EmptyState, ErrorState, InfoBand, LoadingState, StatusTag } from "./Primitives";
@@ -12,16 +13,12 @@ import type { OperationsContext, RunCommand } from "./types";
 import { useRemote } from "./useRemote";
 import "./AppSheetCatalogue.css";
 
-type MoneyField =
-  | "price5Grams"
+type MoneyField = AppSheetExactTariffField
   | "price10To15Grams"
   | "price15To20Grams"
   | "price20To25Grams"
   | "price25To30Grams"
   | "priceOver30Grams"
-  | "promoA"
-  | "promoB"
-  | "promoC"
   | "clientTariff"
   | "administrationTariff"
   | "totalTariff";
@@ -54,16 +51,14 @@ type CatalogueDraft = {
 };
 type PendingSave = { targetId: string; version: number; data: Record<string, unknown> };
 
+const exactAmountFields = Object.values(appSheetExactTariffFields).map(({ field, label }) => ({ key: field, label }));
 const amountFields: Array<{ key: MoneyField; label: string }> = [
-  { key: "price5Grams", label: "Precio_5_Gramos" },
-  { key: "price10To15Grams", label: "10 a 15 Gr." },
-  { key: "price15To20Grams", label: "15 a 20 Gr." },
-  { key: "price20To25Grams", label: "20 a 25 Gr." },
-  { key: "price25To30Grams", label: "25 a 30 Gr." },
-  { key: "priceOver30Grams", label: "Más de 30 Gr." },
-  { key: "promoA", label: "Promo A:" },
-  { key: "promoB", label: "Promo B:" },
-  { key: "promoC", label: "Promo C:" },
+  ...exactAmountFields,
+  { key: "price10To15Grams", label: "Rango legado: 10 a 15 g" },
+  { key: "price15To20Grams", label: "Rango legado: 15 a 20 g" },
+  { key: "price20To25Grams", label: "Rango legado: 20 a 25 g" },
+  { key: "price25To30Grams", label: "Rango legado: 25 a 30 g" },
+  { key: "priceOver30Grams", label: "Rango legado: más de 30 g" },
   { key: "clientTariff", label: "Tarifa_Cliente" },
   { key: "administrationTariff", label: "Tarifa_Administración" },
   { key: "totalTariff", label: "Total" },
@@ -359,7 +354,7 @@ export function AppSheetCatalogue({ context, refreshKey, runCommand, onRefresh, 
         <label className="ops-field"><span>Disponibilidad</span><select value={draft.availability} disabled={!editable} onChange={event => updateBasic("availability", event.target.value)}><option value="">Sin dato conocido</option><option value="NO">NO</option><option value="Sí">Sí</option></select><small>La disponibilidad comercial se conserva separada del stock físico.</small></label>
         <label className="ops-field"><span>SegmentoTarifario</span><select value={draft.segment} disabled={!editable} onChange={event => updateBasic("segment", event.target.value)}><option value="">Sin dato conocido</option><option value="Premium">Premium</option><option value="Estandar">Estandar</option></select></label>
       </div>
-      <fieldset className="appsheet-catalogue-prices"><legend>Precios, promociones y tarifas</legend><p>Escribí el importe en moneda principal con hasta dos decimales y elegí la moneda. Se guarda como unidades menores enteras; los campos vacíos siguen desconocidos.</p>
+      <fieldset className="appsheet-catalogue-prices"><legend>Precios, promociones y tarifas</legend><p>Escribí el importe en moneda principal con hasta dos decimales y elegí la moneda. Se guarda como unidades menores enteras; los campos vacíos siguen desconocidos.</p><p role="note">Los campos “Rango legado” se conservan como referencia. No determinan un precio exacto de 10, 15, 20, 25 o 30 gramos.</p>
         <div className="appsheet-catalogue-money-grid">{amountFields.map(({ key, label }) => {
           const value = draft.amounts[key];
           const inputId = `appsheet-catalogue-${selectedSnapshot.id}-${key}`;

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { Buffer } from "node:buffer";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { Prisma, type LegacyHistoricalFact, type LegacySourceRecord, type PrismaClient } from "@prisma/client";
@@ -37,6 +38,9 @@ const MAX_SOURCE_CELL_COUNT = 512;
 const MAX_SAFE_ROW_NUMBER = 100_000;
 const ACTOR = "codex:appsheet-history-stage";
 const STAGE_ACTION = "legacy.appsheet_history_staged";
+const MAX_HISTORY_SOURCE_RECORD_BATCH_ROWS = 500;
+// Current verified capture peaks below 6.3 MiB per 500-row batch; leave headroom while bounding the bind value.
+const MAX_HISTORY_SOURCE_RECORD_BATCH_BYTES = 8 * 1024 * 1024;
 const PAGE_SCHEMA = "appsheet-sheet-page/v1";
 const HEADER_SCHEMA = "appsheet-sheet-headers/v1";
 const MANIFEST_SCHEMA = "appsheet-capture-manifest/v1";
@@ -1844,11 +1848,13 @@ export function prepareAppSheetHistoryProjection(capture: LoadedAppSheetHistoryC
   };
 }
 
-function buildStageControls(prepared: PreparedAppSheetHistoryProjection, backup: { manifestHash: string; snapshotAt: string }, review: z.infer<typeof appSheetTechnicalReviewSchema>, commitSha: string,
-  actorId: string, recordsHash: string, factsHash: string, exceptionsHash: string): Record<string, unknown> {
+function buildStageControls(prepared: PreparedAppSheetHistoryProjection, backup: { manifestHash: string; snapshotAt: string },
+  review: z.infer<typeof appSheetTechnicalReviewSchema>, commitSha: string, actorId: string,
+  target: AppSheetHistoryStageOptions["target"], destinationIdentity: string,
+  recordsHash: string, factsHash: string, exceptionsHash: string): Record<string, unknown> {
   return {
     appSheetHistoryStage: {
-      schemaVersion: "appsheet-history-stage/v1",
+      schemaVersion: "appsheet-history-stage/v2",
       projectionKind: "history",
       sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
       mappingId: APPSHEET_HISTORY_MAPPING_ID,
@@ -1869,14 +1875,17 @@ function buildStageControls(prepared: PreparedAppSheetHistoryProjection, backup:
       factsHash,
       exceptionsHash,
       technicalReview: {
+        schemaVersion: review.schemaVersion,
         reviewKind: review.reviewKind,
         reviewer: review.reviewer,
         reviewedAt: review.reviewedAt,
         approved: review.approved,
+        bindingSource: review.schemaVersion === 1 ? "legacy-isolated-only" : "explicit-target-and-destination",
         findingsCount: review.findings.length,
         findingsHash: digest(review.findings),
         commitSha,
       },
+      destination: { target, identity: destinationIdentity },
       humanReview: { status: "pending" },
       operationalAuthority: { status: "unchanged" },
       backupManifestHash: backup.manifestHash,
@@ -1902,6 +1911,7 @@ type AppSheetHistoryStageOptions = {
   commitSha: string;
   allowStagedDelta?: boolean;
   target: "isolated-test" | "production";
+  destinationIdentity: string;
   backupEvidence: { manifestHash: string; snapshotAt: string };
 };
 
@@ -1909,6 +1919,8 @@ function validateAppSheetHistoryReview(
   prepared: PreparedAppSheetHistoryProjection,
   input: unknown,
   commitSha: string,
+  target: AppSheetHistoryStageOptions["target"],
+  destinationIdentity: string,
   actorId?: string,
 ): z.infer<typeof appSheetTechnicalReviewSchema> {
   if (!/^[a-f0-9]{40}$/.test(commitSha)) fail("commit_sha_invalid");
@@ -1922,6 +1934,8 @@ function validateAppSheetHistoryReview(
       projectionHash: prepared.projectionHash,
       commitSha,
       importer: APPSHEET_HISTORY_IMPORTER_VERSION,
+      target,
+      destinationIdentity,
     });
   } catch {
     fail("technical_review_invalid");
@@ -1986,6 +2000,7 @@ function stageAuditDetails(prepared: PreparedAppSheetHistoryProjection, options:
     technicalReviewAt: review.reviewedAt,
     commitSha: options.commitSha,
     target: options.target,
+    destinationIdentity: options.destinationIdentity,
     backupManifestHash: options.backupEvidence.manifestHash,
     backupSnapshotAt: options.backupEvidence.snapshotAt,
     authorizationContext: "user-authorized-plan",
@@ -2000,7 +2015,52 @@ function expectedSnapshotControls(prepared: PreparedAppSheetHistoryProjection, o
   const recordsHash = digest(prepared.persistedRecords);
   const factsHash = digest(prepared.persistedFacts.map((fact) => compactPersistedFact(fact as unknown as Record<string, unknown>)));
   const exceptionsHash = digest(prepared.exceptions);
-  return buildStageControls(prepared, backup, review, options.commitSha, options.actorId, recordsHash, factsHash, exceptionsHash);
+  return buildStageControls(prepared, backup, review, options.commitSha, options.actorId, options.target,
+    options.destinationIdentity, recordsHash, factsHash, exceptionsHash);
+}
+
+function serializedHistorySourceRecordBatches(records: readonly Prisma.LegacySourceRecordCreateManyInput[]): Array<{
+  rows: Prisma.LegacySourceRecordCreateManyInput[];
+  json: string;
+}> {
+  const batches: Array<{ rows: Prisma.LegacySourceRecordCreateManyInput[]; json: string }> = [];
+  let rows: Prisma.LegacySourceRecordCreateManyInput[] = [];
+  let rowJson: string[] = [];
+  let byteCount = 2; // JSON array brackets.
+
+  const flush = () => {
+    if (rows.length === 0) return;
+    const json = `[${rowJson.join(",")}]`;
+    if (Buffer.byteLength(json, "utf8") > MAX_HISTORY_SOURCE_RECORD_BATCH_BYTES)
+      fail("history_source_record_batch_byte_limit_exceeded");
+    batches.push({ rows, json });
+    rows = [];
+    rowJson = [];
+    byteCount = 2;
+  };
+
+  for (const record of records) {
+    let serialized: string;
+    try {
+      const value = JSON.stringify(record);
+      if (value === undefined) fail("history_source_record_serialization_invalid");
+      serialized = value;
+    } catch {
+      fail("history_source_record_serialization_invalid");
+    }
+    const recordBytes = Buffer.byteLength(serialized!, "utf8");
+    if (recordBytes + 2 > MAX_HISTORY_SOURCE_RECORD_BATCH_BYTES)
+      fail("history_source_record_too_large");
+    const separatorBytes = rows.length === 0 ? 0 : 1;
+    if (rows.length > 0 && (rows.length >= MAX_HISTORY_SOURCE_RECORD_BATCH_ROWS ||
+        byteCount + separatorBytes + recordBytes > MAX_HISTORY_SOURCE_RECORD_BATCH_BYTES)) flush();
+    const nextSeparatorBytes = rows.length === 0 ? 0 : 1;
+    rows.push(record);
+    rowJson.push(serialized!);
+    byteCount += nextSeparatorBytes + recordBytes;
+  }
+  flush();
+  return batches;
 }
 
 function sameCanonical(left: unknown, right: unknown): boolean {
@@ -2101,7 +2161,8 @@ async function persistHistoryProjection(
   if (!/^[a-f0-9]{64}$/.test(options.backupEvidence.manifestHash) || !Number.isFinite(Date.parse(options.backupEvidence.snapshotAt)))
     fail("verified_backup_required");
   const actor = await assertHistoryStageActor(tx, options.actorId);
-  const currentReview = validateAppSheetHistoryReview(prepared, review, options.commitSha, actor.id);
+  const currentReview = validateAppSheetHistoryReview(prepared, review, options.commitSha,
+    options.target, options.destinationIdentity, actor.id);
   const captureManifestId = prepared.capture.mode === "stable"
     ? await ensureAppSheetCaptureManifest(tx, stableCaptureManifest(prepared)) : null;
   const controls = expectedSnapshotControls(prepared, options, currentReview);
@@ -2114,14 +2175,14 @@ async function persistHistoryProjection(
   } } });
   if (duplicate) fail("history_snapshot_unique_conflict");
 
+  const sourceRecordBatches = serializedHistorySourceRecordBatches(prepared.persistedRecords);
   await tx.legacyImportSnapshot.create({ data: {
     id: prepared.snapshotId, sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, filename: "appsheet-live-capture",
     fileHash: prepared.capture.manifest.manifestHash, importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION,
     status: "staged", createdBy: actor.id, reviewedBy: null, reviewedAt: null, captureManifestId,
     controls: asInputJson(controls), coverage: asInputJson(coverage),
   } });
-  for (let start = 0; start < prepared.persistedRecords.length; start += 500) {
-    const batch = prepared.persistedRecords.slice(start, start + 500);
+  for (const batch of sourceRecordBatches) {
     const inserted = await tx.$executeRaw(Prisma.sql`
       INSERT INTO "LegacySourceRecord" (
         "id", "snapshotId", "sourceTable", "sourceKey", "sourceRow", "fileHash", "contentHash", "importerVersion",
@@ -2130,12 +2191,12 @@ async function persistHistoryProjection(
       SELECT incoming."id", incoming."snapshotId", incoming."sourceTable", incoming."sourceKey", incoming."sourceRow",
         incoming."fileHash", incoming."contentHash", incoming."importerVersion", incoming."original", incoming."normalized",
         incoming."treatment"
-      FROM jsonb_to_recordset(${JSON.stringify(batch)}::jsonb) AS incoming(
+      FROM jsonb_to_recordset(${batch.json}::jsonb) AS incoming(
         "id" text, "snapshotId" text, "sourceTable" text, "sourceKey" text, "sourceRow" integer, "fileHash" text,
         "contentHash" text, "importerVersion" text, "original" jsonb, "normalized" jsonb, "treatment" text
       )
     `);
-    if (inserted !== batch.length) fail("history_source_record_batch_count_mismatch");
+    if (inserted !== batch.rows.length) fail("history_source_record_batch_count_mismatch");
   }
   for (let start = 0; start < prepared.persistedFacts.length; start += 500)
     await tx.legacyHistoricalFact.createMany({ data: prepared.persistedFacts.slice(start, start + 500) });
@@ -2162,10 +2223,13 @@ export async function stageAppSheetHistoryProjection(
   options: AppSheetHistoryStageOptions,
   client?: PrismaClient,
 ): Promise<{ snapshotId: string; captureManifestId: string | null; status: "staged"; replay: boolean; metrics: PreparedAppSheetHistoryProjection["metrics"] }> {
+  if (options.target === "production" && prepared.capture.mode !== "stable")
+    fail("production_history_requires_stable_capture");
   if (prepared.capture.mode === "preliminary-delta" && options.allowStagedDelta !== true) fail("staged_delta_requires_explicit_flag");
   if (!options.backupEvidence || !/^[a-f0-9]{64}$/.test(options.backupEvidence.manifestHash) ||
       !Number.isFinite(Date.parse(options.backupEvidence.snapshotAt))) fail("verified_backup_required");
-  const review = validateAppSheetHistoryReview(prepared, options.technicalReview, options.commitSha, options.actorId);
+  const review = validateAppSheetHistoryReview(prepared, options.technicalReview, options.commitSha,
+    options.target, options.destinationIdentity, options.actorId);
   const db = client ?? (await import("../db.js")).db;
   for (let attempt = 0; ; attempt++) {
     try {

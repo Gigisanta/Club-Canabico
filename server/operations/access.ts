@@ -7,7 +7,8 @@ import { canonicalJson } from "../../shared/operations/exact.js";
 import { APPSHEET_CANONICAL_SOURCE_SYSTEM, APPSHEET_CANONICAL_MAPPING_ID, APPSHEET_CANONICAL_IMPORTER_VERSION, APPSHEET_CANONICAL_SCHEMA_VERSION, prepareAppSheetCaptureManifest } from "../../shared/operations/appsheet-canonical.js";
 import { APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM, APPSHEET_HISTORY_IMPORTER_VERSION } from "../../shared/operations/appsheet-history.js";
 import { appSheetDefinitionInventorySchema } from "../../shared/operations/appsheet-definition.js";
-import { APPSHEET_EXPECTED_LIVE_APP_ID, appSheetAppliedDefinitionHash } from "./appsheet-canonical.js";
+import { APPSHEET_EXPECTED_LIVE_APP_ID, appSheetAppliedDefinitionHash, appSheetCanonicalCurrentDestinationHash } from "./appsheet-canonical.js";
+import { appSheetDatabaseDestinationIdentity } from "./appsheet-database-target.js";
 import { legacyPayloadHash } from "./legacy-upload-contract.js";
 import { registerCommand, OperationError, json, audit, capabilities, requireCapability, requireCanonicalAppSheetReplacementProfile, objectId, evidence, civilDate, requireMemberScope, requireDocumentScope, objectScope, type CommandContext, type Tx } from "./core.js";
 import { commercialAddress, commercialPreferences } from "./member-fields.js";
@@ -153,11 +154,17 @@ function requireDefinitionEvidence(snapshot:{id:string;sourceSystem:string;fileH
  const effects=asJsonObject(projection.effects),stageContext=asJsonObject(projection.stageContext),backup=stageContext&&asJsonObject(stageContext.backupEvidence);
  if(!effects||hashJson(effects)!==hashJson({stock:false,cash:false,orders:false,deliveries:false,messaging:false,priceApproval:false})||
     !stageContext||stageContext.target!=="production"||!backup||typeof backup.manifestHash!=="string"||!hashPattern.test(backup.manifestHash)||
-    typeof backup.snapshotAt!=="string"||!Number.isFinite(Date.parse(backup.snapshotAt)))
+    typeof backup.snapshotAt!=="string"||!Number.isFinite(Date.parse(backup.snapshotAt))||
+    typeof stageContext.destinationIdentity!=="string"||!/^appsheet-db-v1:[a-f0-9]{64}$/.test(stageContext.destinationIdentity))
   throw appSheetReadinessError("canonical_master_effects_or_production_backup_unverified");
+ let runtimeDestinationIdentity:string|null=null;
+ try{if(process.env.DATABASE_URL)runtimeDestinationIdentity=appSheetDatabaseDestinationIdentity("production",new URL(process.env.DATABASE_URL));}catch{}
+ if(!runtimeDestinationIdentity||stageContext.destinationIdentity!==runtimeDestinationIdentity)
+  throw appSheetReadinessError("canonical_master_database_target_mismatch");
  const review=asJsonObject(projection.technicalReview);
  if(!review||review.reviewKind!=="independent-technical"||review.approved!==true||review.projectionHash!==projection.projectionHash||
     review.captureId!==capture.captureId||review.manifestHash!==capture.manifestHash||review.definitionHash!==appliedHash||
+    review.target!==stageContext.target||review.destinationIdentity!==stageContext.destinationIdentity||
     review.importer!==APPSHEET_CANONICAL_IMPORTER_VERSION||typeof review.reviewer!=="string"||!review.reviewer.trim()||review.reviewer===snapshot.createdBy||
     typeof review.reviewedAt!=="string"||!Number.isFinite(Date.parse(review.reviewedAt))||Date.parse(review.reviewedAt)>Date.now()+60_000||
     !Number.isSafeInteger(review.findingsCount)||review.findingsCount!==0||typeof review.commitSha!=="string"||! /^[a-f0-9]{40}$/.test(review.commitSha)||
@@ -165,9 +172,9 @@ function requireDefinitionEvidence(snapshot:{id:string;sourceSystem:string;fileH
   throw appSheetReadinessError("canonical_master_technical_review_unbound");
  const reviewHash=hashJson({reviewKind:review.reviewKind,approved:review.approved,projectionHash:review.projectionHash,captureId:review.captureId,
   manifestHash:review.manifestHash,definitionHash:review.definitionHash,importer:review.importer,reviewer:review.reviewer,reviewedAt:review.reviewedAt,
-  findingsCount:review.findingsCount,commitSha:review.commitSha});
+  findingsCount:review.findingsCount,commitSha:review.commitSha,target:review.target,destinationIdentity:review.destinationIdentity});
  return {projection,coverageProjection,inventory,appliedHash,reviewHash,commitSha:review.commitSha,reviewer:String(review.reviewer),reviewedAt:String(review.reviewedAt),
-  projectionHash:String(projection.projectionHash),backupManifestHash:String(backup.manifestHash),backupSnapshotAt:String(backup.snapshotAt)};
+  projectionHash:String(projection.projectionHash),destinationIdentity:String(stageContext.destinationIdentity),backupManifestHash:String(backup.manifestHash),backupSnapshotAt:String(backup.snapshotAt)};
 }
 
 async function requireProjectionAudit(ctx:CommandContext,snapshotId:string,action:string){
@@ -177,6 +184,367 @@ async function requireProjectionAudit(ctx:CommandContext,snapshotId:string,actio
  if(!details)throw appSheetReadinessError("projection_stage_audit_invalid",{snapshotId,action});
  return {actorId:rows[0]!.actorId,details};
 }
+
+const canonicalIdentityReviewedAction="appsheet.canonical_identity_reviewed";
+const canonicalIdentitiesReviewedAction="appsheet.canonical_identities_reviewed";
+
+type CanonicalIdentityAuditBinding={
+ id:string;sourceTable:string;sourceKey:string;destinationType:string;destinationId:string;approvedBy:string|null;
+};
+type CanonicalIdentityAuditSource={id:string;contentHash:string};
+type CanonicalIdentityAuditFingerprint={sourceTable:string;sourceKey:string;destinationType:string;destinationId:string;dataHash:string};
+
+/** Prove that identity approvals belong to this snapshot review, not a reused legacy approval or another capture. */
+async function hasCanonicalIdentityReviewAudits(tx:Tx,input:{snapshotId:string;reviewerId:string;reviewedAt:Date;captureId:string;manifestHash:string;
+ projectionHash:string;destinationIdentity:string;expectedIdentityCount:number;identities:CanonicalIdentityAuditBinding[];
+ recordsByKey:Map<string,CanonicalIdentityAuditSource>;fingerprintsByKey:Map<string,CanonicalIdentityAuditFingerprint>}):Promise<boolean>{
+ const [snapshotAudits,identityAudits]=await Promise.all([
+  tx.operationAudit.findMany({where:{objectId:input.snapshotId,action:canonicalIdentitiesReviewedAction},
+   select:{actorId:true,requestId:true,details:true,createdAt:true},take:2}),
+  input.identities.length?tx.operationAudit.findMany({where:{objectId:{in:input.identities.map(identity=>identity.id)},action:canonicalIdentityReviewedAction},
+   select:{actorId:true,objectId:true,requestId:true,details:true,createdAt:true}}):Promise.resolve([]),
+ ]);
+ if(snapshotAudits.length!==1)return false;
+ const snapshotAudit=snapshotAudits[0]!,snapshotDetails=asJsonObject(snapshotAudit.details);
+ if(snapshotAudit.actorId!==input.reviewerId||!snapshotAudit.requestId||snapshotAudit.createdAt<input.reviewedAt||!snapshotDetails||
+   snapshotDetails.schemaVersion!==1||snapshotDetails.snapshotId!==input.snapshotId||snapshotDetails.captureId!==input.captureId||
+   snapshotDetails.manifestHash!==input.manifestHash||snapshotDetails.projectionHash!==input.projectionHash||
+   snapshotDetails.destinationIdentity!==input.destinationIdentity||snapshotDetails.identityCount!==input.expectedIdentityCount||
+   snapshotDetails.expectedIdentityCount!==input.expectedIdentityCount)return false;
+ const byIdentity=new Map<string,typeof identityAudits>();
+ for(const auditRow of identityAudits){const rows=byIdentity.get(auditRow.objectId)??[];rows.push(auditRow);byIdentity.set(auditRow.objectId,rows);}
+ for(const identity of input.identities){
+  const record=input.recordsByKey.get(canonicalJson([identity.sourceTable,identity.sourceKey]));
+  const fingerprint=input.fingerprintsByKey.get(canonicalJson([identity.sourceTable,identity.sourceKey]));
+  // approvedBy is a mutable, identity-wide pointer to the latest explicit approval.
+  // A different capture can be reviewed later by another checker, so this pointer
+  // must not replace (or invalidate) the capture-bound audit below. Null remains an
+  // explicit revocation and therefore fails closed.
+  if(!record||!fingerprint||identity.approvedBy===null)return false;
+  const matching=(byIdentity.get(identity.id)??[]).filter(row=>{
+   const details=asJsonObject(row.details);
+  return row.actorId===input.reviewerId&&row.requestId===snapshotAudit.requestId&&row.createdAt>=input.reviewedAt&&details?.schemaVersion===1&&
+    details.identityId===identity.id&&details.snapshotId===input.snapshotId&&details.captureId===input.captureId&&
+    details.manifestHash===input.manifestHash&&details.projectionHash===input.projectionHash&&details.destinationIdentity===input.destinationIdentity&&
+    details.sourceRecordId===record.id&&details.sourceTable===identity.sourceTable&&details.sourceKey===identity.sourceKey&&
+    details.sourceContentHash===record.contentHash&&details.destinationType===identity.destinationType&&details.destinationId===identity.destinationId&&
+    details.destinationDataHash===fingerprint.dataHash&&details.approvedBy===input.reviewerId;
+  });
+  if(matching.length!==1)return false;
+ }
+ return true;
+}
+
+const canonicalIdentityReviewSchema=z.strictObject({
+ captureId:z.string().regex(/^appsreal-[a-f0-9]{16}$/),manifestHash:z.string().regex(/^[a-f0-9]{64}$/),
+ projectionHash:z.string().regex(/^[a-f0-9]{64}$/),destinationCount:z.number().int().min(1).max(100_000),
+ evidenceReference:z.string().trim().min(3).max(500),
+});
+type CanonicalIdentityReviewInput=z.infer<typeof canonicalIdentityReviewSchema>;
+function productionAppSheetDestinationIdentity():string|null{
+ try{return process.env.DATABASE_URL?appSheetDatabaseDestinationIdentity("production",new URL(process.env.DATABASE_URL)):null;}catch{return null;}
+}
+type CanonicalReviewIdentity={id:string;sourceSystem:string;sourceTable:string;sourceKey:string;destinationType:string;destinationId:string;approvedBy:string|null};
+type CanonicalReviewRecord={id:string;sourceTable:string;sourceKey:string;sourceRow:number;fileHash:string;contentHash:string;importerVersion:string;treatment:string};
+type CanonicalIdentityReviewPlan={snapshot:{id:string;sourceSystem:string;fileHash:string;importerVersion:string;status:string;createdBy:string;reviewedBy:string|null;reviewedAt:Date|null;
+ controls:unknown;coverage:unknown;captureManifestId:string|null};capture:Awaited<ReturnType<typeof requireStableAppSheetCapture>>;
+ definition:ReturnType<typeof requireDefinitionEvidence>;records:CanonicalReviewRecord[];identities:CanonicalReviewIdentity[];
+ fingerprints:Map<string,{destinationType:string;sourceTable:string;sourceKey:string;destinationId:string;dataHash:string;operationVersion:number}>};
+
+/** Build the complete approval plan from the exact stable snapshot; no partial identity set can be approved. */
+async function prepareCanonicalIdentityReview(ctx:CommandContext,input:CanonicalIdentityReviewInput):Promise<CanonicalIdentityReviewPlan>{
+ const snapshot=await ctx.tx.legacyImportSnapshot.findUnique({where:{id:ctx.envelope.targetId},select:{id:true,sourceSystem:true,fileHash:true,importerVersion:true,status:true,createdBy:true,
+  reviewedBy:true,reviewedAt:true,controls:true,coverage:true,captureManifestId:true}});
+ if(!snapshot||snapshot.sourceSystem!==APPSHEET_CANONICAL_SOURCE_SYSTEM||snapshot.importerVersion!==APPSHEET_CANONICAL_IMPORTER_VERSION||
+   snapshot.fileHash!==input.manifestHash||snapshot.captureManifestId!==input.captureId||snapshot.status!=="staged"||snapshot.reviewedBy!==null||snapshot.reviewedAt!==null)
+  throw appSheetReadinessError("canonical_identity_review_snapshot_not_pending");
+ if(snapshot.createdBy===ctx.actor.id)throw new OperationError(403,"INDEPENDENT_IDENTITY_REVIEW_REQUIRED","Quien preparó los maestros no puede aprobar sus identidades.");
+ const capture=await requireStableAppSheetCapture(ctx.tx,input.captureId);
+ if(capture.manifestHash!==snapshot.fileHash)throw appSheetReadinessError("canonical_identity_review_capture_mismatch");
+ const definition=requireDefinitionEvidence(snapshot,capture),runtimeDestinationIdentity=productionAppSheetDestinationIdentity();
+ if(!runtimeDestinationIdentity||definition.destinationIdentity!==runtimeDestinationIdentity)
+  throw appSheetReadinessError("canonical_identity_review_database_target_mismatch");
+ if(definition.projectionHash!==input.projectionHash)throw appSheetReadinessError("canonical_identity_review_projection_mismatch");
+
+ const records=await ctx.tx.legacySourceRecord.findMany({where:{snapshotId:snapshot.id},orderBy:[{sourceTable:"asc"},{sourceRow:"asc"}],
+  select:{id:true,sourceTable:true,sourceKey:true,sourceRow:true,fileHash:true,contentHash:true,importerVersion:true,treatment:true}});
+ if(!records.length||records.length!==input.destinationCount||records.some(record=>!["C_Cliente","D_Catalogo_Mercaderia"].includes(record.sourceTable)||
+   !record.sourceKey||record.fileHash!==snapshot.fileHash||record.importerVersion!==snapshot.importerVersion||record.treatment!=="fact_candidate"))
+  throw appSheetReadinessError("canonical_identity_review_source_records_invalid");
+ const sourceKeys=new Set<string>();
+ for(const record of records){const key=canonicalJson([record.sourceTable,record.sourceKey]);if(sourceKeys.has(key))throw appSheetReadinessError("canonical_identity_review_duplicate_source_key");sourceKeys.add(key);}
+ const openExceptions=await ctx.tx.legacyException.count({where:{snapshotId:snapshot.id,status:"open"}});
+ if(openExceptions!==0)throw appSheetReadinessError("canonical_identity_review_exceptions_unresolved",{count:openExceptions});
+ const declaredTables=Array.isArray(definition.coverageProjection.tables)?definition.coverageProjection.tables.map(asJsonObject):null;
+ if(!declaredTables||declaredTables.some(table=>!table))throw appSheetReadinessError("canonical_identity_review_coverage_missing");
+ for(const sourceTable of ["C_Cliente","D_Catalogo_Mercaderia"]){
+  const declared=declaredTables.find(table=>table!.sourceTable===sourceTable),actual=records.filter(record=>record.sourceTable===sourceTable).length;
+  if(!declared||declared!.sourceRecordCount!==actual||declared!.canonicalTargetCount!==actual||declared!.blockingExceptionCount!==0||declared!.reviewExceptionCount!==0)
+   throw appSheetReadinessError("canonical_identity_review_table_coverage_invalid",{sourceTable});
+ }
+ const projection=asJsonObject(asJsonObject(snapshot.controls)?.appSheetCanonical),rawFingerprints=projection&&Array.isArray(projection.destinationFingerprints)?projection.destinationFingerprints.map(asJsonObject):null;
+ if(!projection||!rawFingerprints||rawFingerprints.length!==records.length||rawFingerprints.some(row=>!row))
+  throw appSheetReadinessError("canonical_identity_review_destination_fingerprints_missing");
+ const fingerprints=new Map<string,{destinationType:string;sourceTable:string;sourceKey:string;destinationId:string;dataHash:string;operationVersion:number}>();
+ for(const raw of rawFingerprints){
+  const row=raw!;
+  if(!["member","sku"].includes(String(row.destinationType))||!["C_Cliente","D_Catalogo_Mercaderia"].includes(String(row.sourceTable))||
+    typeof row.sourceKey!=="string"||typeof row.destinationId!=="string"||typeof row.dataHash!=="string"||!hashPattern.test(row.dataHash)||
+    typeof row.operationVersion!=="number"||!Number.isSafeInteger(row.operationVersion)||row.operationVersion<0)
+   throw appSheetReadinessError("canonical_identity_review_destination_fingerprint_invalid");
+  const expectedType=row.sourceTable==="C_Cliente"?"member":"sku",key=canonicalJson([row.sourceTable,row.sourceKey]);
+  if(row.destinationType!==expectedType||fingerprints.has(key))throw appSheetReadinessError("canonical_identity_review_destination_fingerprint_ambiguous");
+  fingerprints.set(key,row as {destinationType:string;sourceTable:string;sourceKey:string;destinationId:string;dataHash:string;operationVersion:number});
+ }
+ const keysByTable=new Map<string,string[]>();
+ for(const record of records){const rows=keysByTable.get(record.sourceTable)??[];rows.push(record.sourceKey);keysByTable.set(record.sourceTable,rows);}
+ const identities:CanonicalReviewIdentity[]=[];
+ for(const [sourceTable,keys] of keysByTable){
+  const destinationType=sourceTable==="C_Cliente"?"member":"sku";
+  for(let start=0;start<keys.length;start+=500)identities.push(...await ctx.tx.legacyIdentity.findMany({where:{sourceSystem:APPSHEET_CANONICAL_SOURCE_SYSTEM,
+   sourceTable,sourceKey:{in:keys.slice(start,start+500)},destinationType},select:{id:true,sourceSystem:true,sourceTable:true,sourceKey:true,destinationType:true,destinationId:true,approvedBy:true}}));
+ }
+ if(identities.length!==records.length||new Set(identities.map(identity=>canonicalJson([identity.sourceTable,identity.sourceKey,identity.destinationType]))).size!==records.length)
+  throw appSheetReadinessError("canonical_identity_review_identity_coverage_invalid");
+ const recordByKey=new Map(records.map(record=>[canonicalJson([record.sourceTable,record.sourceKey]),record]));
+ const memberIdentities=identities.filter(identity=>identity.destinationType==="member"),skuIdentities=identities.filter(identity=>identity.destinationType==="sku");
+ const destinationIds=[...new Set(identities.map(identity=>identity.destinationId))];
+ if(destinationIds.length!==identities.length)throw appSheetReadinessError("canonical_identity_review_destination_reused");
+ const [members,skus,objects]=await Promise.all([
+  memberIdentities.length?ctx.tx.operationMember.findMany({where:{id:{in:memberIdentities.map(identity=>identity.destinationId)}},
+   select:{id:true,legacyCustomerId:true,sourceSystem:true,sourceId:true,name:true,email:true,phone:true,address:true,preferences:true}}):Promise.resolve([]),
+  skuIdentities.length?ctx.tx.catalogSku.findMany({where:{id:{in:skuIdentities.map(identity=>identity.destinationId)}},
+   select:{id:true,code:true,name:true,variety:true,category:true,unit:true,active:true,sourceSystem:true,sourceId:true,appSheet:true}}):Promise.resolve([]),
+  ctx.tx.operationObject.findMany({where:{id:{in:destinationIds}},select:{id:true,kind:true,version:true}}),
+ ]);
+ const memberById=new Map(members.map(member=>[member.id,member])),skuById=new Map(skus.map(sku=>[sku.id,sku])),objectById=new Map(objects.map(object=>[object.id,object]));
+ for(const identity of identities){
+  const key=canonicalJson([identity.sourceTable,identity.sourceKey]),record=recordByKey.get(key),fingerprint=fingerprints.get(key),object=objectById.get(identity.destinationId);
+  if(!record||!fingerprint||fingerprint.destinationId!==identity.destinationId||!object||object.kind!==identity.destinationType||object.version!==fingerprint.operationVersion)
+   throw appSheetReadinessError("canonical_identity_review_destination_version_or_lineage_mismatch");
+  const current=identity.destinationType==="member"?memberById.get(identity.destinationId):skuById.get(identity.destinationId);
+  const lineageMatches=identity.destinationType==="member"
+   ?Boolean(current&&"legacyCustomerId" in current&&current.legacyCustomerId===identity.sourceKey&&current.sourceSystem===APPSHEET_CANONICAL_SOURCE_SYSTEM&&current.sourceId===identity.sourceKey)
+   :Boolean(current&&"active" in current&&current.sourceSystem===APPSHEET_CANONICAL_SOURCE_SYSTEM&&current.sourceId===identity.sourceKey);
+  if(!current||!lineageMatches||appSheetCanonicalCurrentDestinationHash(current,identity.destinationType as "member"|"sku")!==fingerprint.dataHash)
+   throw appSheetReadinessError("canonical_identity_review_destination_changed");
+ }
+ const stageAudit=await requireProjectionAudit(ctx,snapshot.id,"appsheet.canonical_masters_staged"),stageDetails=stageAudit.details;
+ if(stageAudit.actorId!==snapshot.createdBy||stageDetails.captureId!==capture.captureId||stageDetails.manifestHash!==capture.manifestHash||
+   stageDetails.projectionHash!==definition.projectionHash||stageDetails.destinationIdentity!==definition.destinationIdentity||stageDetails.target!=="production"||
+   stageDetails.importerVersion!==APPSHEET_CANONICAL_IMPORTER_VERSION||stageDetails.recordCount!==records.length||stageDetails.destinationCount!==records.length||stageDetails.exceptionCount!==0)
+  throw appSheetReadinessError("canonical_identity_review_stage_audit_mismatch");
+ if(input.captureId!==capture.captureId||input.manifestHash!==capture.manifestHash||input.projectionHash!==definition.projectionHash||input.destinationCount!==identities.length)
+  throw appSheetReadinessError("canonical_identity_review_request_binding_mismatch");
+ return {snapshot,capture,definition,records,identities,fingerprints};
+}
+
+const canonicalMemberMutationCommands=["MemberUpdated","PermissionVerified","ClinicalRecordReviewed"] as const;
+function isServerDateAtOrAfter(value:Date,floor:Date){return value instanceof Date&&Number.isFinite(value.getTime())&&value>=floor;}
+/** DateTime defaults to PostgreSQL's transaction-start time; server result timestamps may be later within that transaction. */
+function responseDateAtOrAfterTransactionStart(value:unknown,reviewedAt:Date,transactionStartedAt:Date){
+ if(typeof value!=="string")return false;
+ const date=new Date(value);
+ return Number.isFinite(date.getTime())&&date>=reviewedAt&&date>=transactionStartedAt;
+}
+
+type CanonicalMemberMutationCandidate={member:{id:string;legacyCustomerId:string|null;sourceSystem:string|null;sourceId:string|null;
+ name:string;email:string;phone:string;address:unknown;preferences:unknown};baselineVersion:number;currentVersion:number;baselineHash:string;currentHash:string};
+
+/** Accept only contiguous, server-receipted member-safe commands after identity approval. */
+async function canonicalMemberMutationChainIds(tx:Tx,candidates:CanonicalMemberMutationCandidate[],reviewedAt:Date):Promise<Set<string>>{
+ const eligible=new Set<string>(),validCandidates=candidates.filter(candidate=>Number.isSafeInteger(candidate.baselineVersion)&&candidate.baselineVersion>=0&&
+  Number.isSafeInteger(candidate.currentVersion)&&candidate.currentVersion>=candidate.baselineVersion);
+ if(!validCandidates.length)return eligible;
+ const lowestBaseline=Math.min(...validCandidates.map(candidate=>candidate.baselineVersion));
+ const receipts=await tx.commandReceipt.findMany({where:{targetId:{in:validCandidates.map(candidate=>candidate.member.id)},
+  resultingVersion:{gt:lowestBaseline}},orderBy:[{targetId:"asc"},{resultingVersion:"asc"}],
+  select:{requestId:true,actorId:true,targetId:true,command:true,response:true,resultingVersion:true,committedAt:true}});
+ const receiptsRequiringAudit=receipts.filter(receipt=>canonicalMemberMutationCommands.includes(receipt.command as typeof canonicalMemberMutationCommands[number]));
+ const audits=receiptsRequiringAudit.length?await tx.operationAudit.findMany({where:{objectId:{in:[...new Set(receiptsRequiringAudit.map(receipt=>receipt.targetId))]},
+  action:{in:[...canonicalMemberMutationCommands]},requestId:{in:receiptsRequiringAudit.map(receipt=>receipt.requestId)}},
+  select:{actorId:true,action:true,objectId:true,requestId:true,details:true,createdAt:true}}):[];
+ const receiptsByMember=new Map<string,typeof receipts>(),auditsByRequest=new Map<string,typeof audits>();
+ for(const receipt of receipts){const rows=receiptsByMember.get(receipt.targetId)??[];rows.push(receipt);receiptsByMember.set(receipt.targetId,rows);}
+ for(const row of audits){const key=`${row.objectId}\0${row.requestId??""}\0${row.action}`,rows=auditsByRequest.get(key)??[];rows.push(row);auditsByRequest.set(key,rows);}
+ for(const candidate of validCandidates){
+  const {member,baselineVersion,currentVersion,baselineHash,currentHash}=candidate;
+  const rows=(receiptsByMember.get(member.id)??[]).filter(receipt=>receipt.resultingVersion>baselineVersion);
+  if(rows.length!==currentVersion-baselineVersion||rows.some(receipt=>!canonicalMemberMutationCommands.includes(receipt.command as typeof canonicalMemberMutationCommands[number])))continue;
+  if(!rows.length){if(currentHash===baselineHash)eligible.add(member.id);continue;}
+  let expectedVersion=baselineVersion+1,latestMemberHash=baselineHash,valid=true;
+  for(const receipt of rows){
+   if(receipt.resultingVersion!==expectedVersion++||receipt.resultingVersion>currentVersion||
+      !canonicalMemberMutationCommands.includes(receipt.command as typeof canonicalMemberMutationCommands[number])||
+      receipt.targetId!==member.id||!isServerDateAtOrAfter(receipt.committedAt,reviewedAt)){valid=false;break;}
+   const matchingAudits=auditsByRequest.get(`${member.id}\0${receipt.requestId}\0${receipt.command}`)??[];
+   if(matchingAudits.length!==1){valid=false;break;}
+   const auditRow=matchingAudits[0]!,details=asJsonObject(auditRow.details),response=asJsonObject(receipt.response);
+   if(auditRow.actorId!==receipt.actorId||auditRow.objectId!==member.id||auditRow.requestId!==receipt.requestId||
+      !isServerDateAtOrAfter(auditRow.createdAt,reviewedAt)||!details||details.version!==receipt.resultingVersion||!response||
+      response.requestId!==receipt.requestId||response.targetId!==member.id||response.version!==receipt.resultingVersion){valid=false;break;}
+   const result=asJsonObject(response.result);
+   if(!result){valid=false;break;}
+   if(receipt.command==="MemberUpdated"){
+    const updatedMember=asJsonObject(result.member);
+    if(!updatedMember||updatedMember.id!==member.id||updatedMember.legacyCustomerId!==member.legacyCustomerId||
+       updatedMember.sourceSystem!==member.sourceSystem||updatedMember.sourceId!==member.sourceId){valid=false;break;}
+    const updatedHash=appSheetCanonicalCurrentDestinationHash(updatedMember,"member");
+    if(!hashPattern.test(updatedHash)){valid=false;break;}
+    latestMemberHash=updatedHash;
+   }else if(receipt.command==="PermissionVerified"){
+    const permission=asJsonObject(result.permission);
+    if(!permission||permission.memberId!==member.id||permission.status!=="verified"||permission.reviewerId!==receipt.actorId||
+       !responseDateAtOrAfterTransactionStart(permission.reviewedAt,reviewedAt,receipt.committedAt)){valid=false;break;}
+   }else{
+    const clinical=asJsonObject(result.clinical);
+    if(!clinical||clinical.memberId!==member.id||!["verified","rejected","needs_information"].includes(String(clinical.verification))||
+       clinical.reviewedBy!==receipt.actorId||!responseDateAtOrAfterTransactionStart(clinical.reviewedAt,reviewedAt,receipt.committedAt)){valid=false;break;}
+   }
+  }
+  if(valid&&expectedVersion===currentVersion+1&&currentHash===latestMemberHash)eligible.add(member.id);
+ }
+ return eligible;
+}
+
+/** Return only canonical members reviewed for this exact production capture and still matching their staged fingerprint. */
+export async function eligibleAppSheetCanonicalMemberIds(tx:Tx,captureId:string|null,onlyMemberIds?:string[]):Promise<Set<string>>{
+ if(!captureId||onlyMemberIds?.length===0)return new Set();
+ let capture:Awaited<ReturnType<typeof requireStableAppSheetCapture>>;
+ try{capture=await requireStableAppSheetCapture(tx,captureId);}catch(error){
+  if(error instanceof OperationError&&error.code==="APPSHEET_REPLACEMENT_NOT_READY")return new Set();
+  throw error;
+ }
+ const destinationIdentity=productionAppSheetDestinationIdentity();
+ if(!destinationIdentity)return new Set();
+ const snapshots=await tx.legacyImportSnapshot.findMany({where:{sourceSystem:APPSHEET_CANONICAL_SOURCE_SYSTEM,captureManifestId:capture.captureId,
+  fileHash:capture.manifestHash,importerVersion:APPSHEET_CANONICAL_IMPORTER_VERSION},select:{id:true,status:true,createdBy:true,reviewedBy:true,reviewedAt:true,
+  controls:true,coverage:true,fileHash:true,sourceSystem:true,importerVersion:true}});
+ if(snapshots.length!==1)return new Set();
+ const snapshot=snapshots[0]!,controls=asJsonObject(snapshot.controls),projection=controls&&asJsonObject(controls.appSheetCanonical);
+ const stageContext=projection&&asJsonObject(projection.stageContext),projectionHash=typeof projection?.projectionHash==="string"?projection.projectionHash:"";
+ if(snapshot.status!=="reviewed"||!snapshot.reviewedBy||snapshot.reviewedBy===snapshot.createdBy||!snapshot.reviewedAt||
+   snapshot.fileHash!==capture.manifestHash||snapshot.sourceSystem!==APPSHEET_CANONICAL_SOURCE_SYSTEM||snapshot.importerVersion!==APPSHEET_CANONICAL_IMPORTER_VERSION||
+   !stageContext||stageContext.target!=="production"||stageContext.destinationIdentity!==destinationIdentity||!hashPattern.test(projectionHash))return new Set();
+ const [reviewer,snapshotReviews]=await Promise.all([
+  tx.user.findUnique({where:{id:snapshot.reviewedBy},select:{active:true}}),
+  tx.operationAudit.findMany({where:{objectId:snapshot.id,action:canonicalIdentitiesReviewedAction},select:{actorId:true,requestId:true,details:true,createdAt:true},take:2}),
+ ]);
+ if(!reviewer?.active||!snapshot.reviewedAt||snapshotReviews.length!==1||snapshotReviews[0]!.actorId!==snapshot.reviewedBy||
+   !snapshotReviews[0]!.requestId||snapshotReviews[0]!.createdAt<snapshot.reviewedAt)return new Set();
+ const snapshotReview=asJsonObject(snapshotReviews[0]!.details);
+ if(!snapshotReview||snapshotReview.schemaVersion!==1||snapshotReview.snapshotId!==snapshot.id||snapshotReview.captureId!==capture.captureId||
+   snapshotReview.manifestHash!==capture.manifestHash||snapshotReview.projectionHash!==projectionHash||snapshotReview.destinationIdentity!==destinationIdentity||
+   typeof snapshotReview.identityCount!=="number"||snapshotReview.identityCount<1||snapshotReview.identityCount!==snapshotReview.expectedIdentityCount)return new Set();
+ const members=await tx.operationMember.findMany({where:{sourceSystem:APPSHEET_CANONICAL_SOURCE_SYSTEM,...(onlyMemberIds?{id:{in:onlyMemberIds}}:{})},
+  select:{id:true,legacyCustomerId:true,sourceSystem:true,sourceId:true,name:true,email:true,phone:true,address:true,preferences:true}});
+ if(!members.length)return new Set();
+ const sourceKeys=[...new Set(members.filter(member=>member.sourceId&&member.sourceId===member.legacyCustomerId).map(member=>member.sourceId!))];
+ if(!sourceKeys.length)return new Set();
+ const [records,identities]=await Promise.all([
+  tx.legacySourceRecord.findMany({where:{snapshotId:snapshot.id,sourceTable:"C_Cliente",sourceKey:{in:sourceKeys}},
+   select:{id:true,sourceTable:true,sourceKey:true,contentHash:true,fileHash:true,importerVersion:true,treatment:true}}),
+  tx.legacyIdentity.findMany({where:{sourceSystem:APPSHEET_CANONICAL_SOURCE_SYSTEM,sourceTable:"C_Cliente",destinationType:"member",sourceKey:{in:sourceKeys}},
+   select:{id:true,sourceSystem:true,sourceTable:true,sourceKey:true,destinationType:true,destinationId:true,approvedBy:true}}),
+ ]);
+ const recordByKey=new Map(records.map(record=>[record.sourceKey,record])),identityByKey=new Map(identities.map(identity=>[identity.sourceKey,identity]));
+ const auditRows=identities.length?await tx.operationAudit.findMany({where:{objectId:{in:identities.map(identity=>identity.id)},action:canonicalIdentityReviewedAction},
+  select:{actorId:true,objectId:true,requestId:true,details:true,createdAt:true}}):[];
+ const auditByIdentity=new Map<string,typeof auditRows>();
+ for(const auditRow of auditRows){const rows=auditByIdentity.get(auditRow.objectId)??[];rows.push(auditRow);auditByIdentity.set(auditRow.objectId,rows);}
+ const memberIds=members.map(member=>member.id);
+ const objects=await tx.operationObject.findMany({where:{id:{in:memberIds}},select:{id:true,kind:true,version:true}});
+ const objectById=new Map(objects.map(object=>[object.id,object]));
+ const fingerprints=Array.isArray(projection.destinationFingerprints)?projection.destinationFingerprints.map(asJsonObject):[];
+ const fingerprintByKey=new Map<string,Record<string,unknown>>();
+ for(const fingerprint of fingerprints){
+  if(!fingerprint||fingerprint.sourceTable!=="C_Cliente")continue;
+  const key=String(fingerprint.sourceKey);
+  if(fingerprintByKey.has(key))return new Set();
+  fingerprintByKey.set(key,fingerprint);
+ }
+ const candidates:CanonicalMemberMutationCandidate[]=[];
+ for(const member of members){
+  if(!member.sourceId||member.sourceId!==member.legacyCustomerId)continue;
+  const record=recordByKey.get(member.sourceId),identity=identityByKey.get(member.sourceId),fingerprint=fingerprintByKey.get(member.sourceId),object=objectById.get(member.id);
+  const perIdentityAudit=identity?auditByIdentity.get(identity.id)??[]:[];
+  if(!record||record.fileHash!==snapshot.fileHash||record.importerVersion!==snapshot.importerVersion||record.treatment!=="fact_candidate"||
+   !identity||identity.destinationId!==member.id||identity.approvedBy===null||
+    !fingerprint||fingerprint.destinationType!=="member"||fingerprint.destinationId!==member.id||typeof fingerprint.dataHash!=="string"||!hashPattern.test(fingerprint.dataHash)||
+    typeof fingerprint.operationVersion!=="number"||!Number.isSafeInteger(fingerprint.operationVersion)||!object||object.kind!=="member"||
+    object.version<fingerprint.operationVersion)continue;
+  const identityAuditsForCapture=perIdentityAudit.filter(row=>{
+   const details=asJsonObject(row.details);
+  return row.actorId===snapshot.reviewedBy&&details?.approvedBy===snapshot.reviewedBy&&details.snapshotId===snapshot.id&&
+    details.captureId===capture.captureId&&details.projectionHash===projectionHash&&
+    details.destinationIdentity===destinationIdentity;
+  });
+  if(identityAuditsForCapture.length!==1)continue;
+  const identityAudit=identityAuditsForCapture[0]!,details=asJsonObject(identityAudit.details);
+  if(identityAudit.actorId!==snapshot.reviewedBy||identityAudit.requestId!==snapshotReviews[0]!.requestId||!identityAudit.createdAt||identityAudit.createdAt<snapshot.reviewedAt||
+    !details||details.schemaVersion!==1||details.identityId!==identity.id||details.snapshotId!==snapshot.id||
+    details.captureId!==capture.captureId||details.manifestHash!==capture.manifestHash||details.projectionHash!==projectionHash||
+    details.destinationIdentity!==destinationIdentity||details.sourceRecordId!==record.id||details.sourceTable!==record.sourceTable||
+    details.sourceKey!==record.sourceKey||details.sourceContentHash!==record.contentHash||details.destinationType!=="member"||details.destinationId!==member.id||
+    details.destinationDataHash!==fingerprint.dataHash||details.approvedBy!==snapshot.reviewedBy)continue;
+  const currentHash=appSheetCanonicalCurrentDestinationHash(member,"member");
+  if(!hashPattern.test(currentHash))continue;
+  candidates.push({member,baselineVersion:fingerprint.operationVersion,currentVersion:object.version,baselineHash:fingerprint.dataHash,currentHash});
+ }
+ return canonicalMemberMutationChainIds(tx,candidates,snapshot.reviewedAt);
+}
+
+/** null means no AppSheet replacement authority is active; an empty set means none of its imported members are eligible. */
+export async function appSheetReplacementCanonicalMemberIds(tx:Tx,onlyMemberIds?:string[]):Promise<Set<string>|null>{
+ const authority=await tx.operationAuthority.findUnique({where:{id:"operations"},select:{mode:true,cutoverProfile:true,captureManifestId:true}});
+ if(authority?.mode!=="active"||authority.cutoverProfile!=="appsheet-replacement")return null;
+ return eligibleAppSheetCanonicalMemberIds(tx,authority.captureManifestId,onlyMemberIds);
+}
+
+/** Keep native MemberCreated rows available while failing closed for unreviewed or mismatched imported provenance. */
+export async function requireEligibleAppSheetReplacementMember(tx:Tx,memberId:string):Promise<void>{
+ const eligibleCanonicalIds=await appSheetReplacementCanonicalMemberIds(tx,[memberId]);
+ if(eligibleCanonicalIds===null)return;
+ const member=await tx.operationMember.findUnique({where:{id:memberId},select:{id:true,sourceSystem:true,sourceId:true,legacyCustomerId:true}});
+ if(!member)throw new OperationError(404,"MEMBER_NOT_FOUND","Socio no encontrado");
+ if(member.sourceSystem===null&&member.sourceId===null&&member.legacyCustomerId===null)return;
+ if(member.sourceSystem===APPSHEET_CANONICAL_SOURCE_SYSTEM&&eligibleCanonicalIds.has(member.id))return;
+ throw new OperationError(423,"APPSHEET_MEMBER_NOT_ELIGIBLE","El socio importado no pertenece a la captura AppSheet revisada por la autoridad activa.",{memberId});
+}
+
+registerCommand("AppSheetCanonicalIdentitiesReviewed",{kind:"legacyImport",capability:"imports.review",administrative:true,
+ schema:canonicalIdentityReviewSchema,execute:async ctx=>{
+  await requireCapability(ctx.tx,ctx.actor,"imports.review");
+  const input=canonicalIdentityReviewSchema.parse(ctx.envelope.data),plan=await prepareCanonicalIdentityReview(ctx,input);
+  const reviewedAt=ctx.now;
+  const idsByPreviousApprover=new Map<string|null,string[]>();
+  for(const identity of plan.identities){const ids=idsByPreviousApprover.get(identity.approvedBy)??[];ids.push(identity.id);idsByPreviousApprover.set(identity.approvedBy,ids);}
+  for(const [previousApprover,ids] of idsByPreviousApprover){
+   const updated=await ctx.tx.legacyIdentity.updateMany({where:{id:{in:ids},approvedBy:previousApprover},data:{approvedBy:ctx.actor.id}});
+   if(updated.count!==ids.length)throw appSheetReadinessError("canonical_identity_review_concurrent_change");
+  }
+  const snapshotUpdate=await ctx.tx.legacyImportSnapshot.updateMany({where:{id:plan.snapshot.id,sourceSystem:APPSHEET_CANONICAL_SOURCE_SYSTEM,
+   fileHash:plan.capture.manifestHash,captureManifestId:plan.capture.captureId,status:"staged",reviewedBy:null,reviewedAt:null},
+   data:{status:"reviewed",reviewedBy:ctx.actor.id,reviewedAt}});
+  if(snapshotUpdate.count!==1)throw appSheetReadinessError("canonical_identity_review_snapshot_changed");
+  const recordByKey=new Map(plan.records.map(record=>[canonicalJson([record.sourceTable,record.sourceKey]),record]));
+  const identityAudits=plan.identities.map(identity=>{
+   const key=canonicalJson([identity.sourceTable,identity.sourceKey]),record=recordByKey.get(key),fingerprint=plan.fingerprints.get(key);
+   if(!record||!fingerprint)throw appSheetReadinessError("canonical_identity_review_audit_binding_missing");
+   return {actorId:ctx.actor.id,action:canonicalIdentityReviewedAction,objectId:identity.id,requestId:ctx.envelope.requestId,createdAt:reviewedAt,
+    details:json({schemaVersion:1,identityId:identity.id,snapshotId:plan.snapshot.id,captureId:plan.capture.captureId,manifestHash:plan.capture.manifestHash,
+     projectionHash:plan.definition.projectionHash,destinationIdentity:plan.definition.destinationIdentity,sourceRecordId:record.id,sourceTable:record.sourceTable,
+     sourceKey:record.sourceKey,sourceContentHash:record.contentHash,destinationType:identity.destinationType,destinationId:identity.destinationId,
+     destinationDataHash:fingerprint.dataHash,approvedBy:ctx.actor.id})};
+  });
+  for(let start=0;start<identityAudits.length;start+=500)await ctx.tx.operationAudit.createMany({data:identityAudits.slice(start,start+500)});
+  await ctx.tx.operationAudit.create({data:{actorId:ctx.actor.id,action:canonicalIdentitiesReviewedAction,objectId:plan.snapshot.id,requestId:ctx.envelope.requestId,
+   createdAt:reviewedAt,details:json({schemaVersion:1,snapshotId:plan.snapshot.id,captureId:plan.capture.captureId,manifestHash:plan.capture.manifestHash,
+    projectionHash:plan.definition.projectionHash,destinationIdentity:plan.definition.destinationIdentity,identityCount:plan.identities.length,
+    expectedIdentityCount:plan.records.length,evidenceReference:input.evidenceReference.trim()})}});
+  return {snapshotId:plan.snapshot.id,captureId:plan.capture.captureId,projectionHash:plan.definition.projectionHash,
+   identitiesReviewed:plan.identities.length,status:"reviewed",operationalEffects:false};
+ }});
 
 /** Complete source-linked evidence gate. Missing publication/open-object/opening proof stays a hard blocker. */
 type AppSheetReplacementProof={
@@ -260,14 +628,29 @@ async function requireVerifiedAppSheetReplacement(ctx:CommandContext,captureId:s
  }
  const identityByKey=new Map(identities.map(identity=>[canonicalJson([identity.sourceTable,identity.sourceKey,identity.destinationType]),identity]));
  const expectedIdentityCount=masterRecords.length;
- if(identities.length!==expectedIdentityCount||identityByKey.size!==identities.length||identities.some(identity=>!identity.approvedBy))
+ if(identities.length!==expectedIdentityCount||identityByKey.size!==identities.length||identities.some(identity=>identity.approvedBy===null))
   throw appSheetReadinessError("canonical_master_identity_review_pending");
- const identityReviewers=[...new Set(identities.map(identity=>identity.approvedBy).filter((id):id is string=>Boolean(id)))];
- const activeIdentityReviewers=[] as Array<{id:string}>;
- for(let start=0;start<identityReviewers.length;start+=500){
-  activeIdentityReviewers.push(...await ctx.tx.user.findMany({where:{id:{in:identityReviewers.slice(start,start+500)},active:true},select:{id:true}}));
+ const masterProjection=asJsonObject(asJsonObject(master.controls)?.appSheetCanonical);
+ const rawFingerprints=masterProjection&&Array.isArray(masterProjection.destinationFingerprints)?masterProjection.destinationFingerprints.map(asJsonObject):null;
+ if(!masterProjection||!rawFingerprints||rawFingerprints.length!==masterRecords.length||rawFingerprints.some(item=>!item))
+  throw appSheetReadinessError("canonical_master_identity_review_fingerprints_missing");
+ const fingerprintByKey=new Map<string,CanonicalIdentityAuditFingerprint>();
+ for(const raw of rawFingerprints){
+  const fingerprint=raw!;
+  if(typeof fingerprint.sourceTable!=="string"||typeof fingerprint.sourceKey!=="string"||typeof fingerprint.destinationType!=="string"||
+     typeof fingerprint.destinationId!=="string"||typeof fingerprint.dataHash!=="string"||!hashPattern.test(fingerprint.dataHash))
+   throw appSheetReadinessError("canonical_master_identity_review_fingerprint_invalid");
+  const key=canonicalJson([fingerprint.sourceTable,fingerprint.sourceKey]);
+  if(fingerprintByKey.has(key))throw appSheetReadinessError("canonical_master_identity_review_fingerprint_ambiguous");
+  fingerprintByKey.set(key,{sourceTable:fingerprint.sourceTable,sourceKey:fingerprint.sourceKey,destinationType:fingerprint.destinationType,
+   destinationId:fingerprint.destinationId,dataHash:fingerprint.dataHash});
  }
- if(activeIdentityReviewers.length!==identityReviewers.length)throw appSheetReadinessError("canonical_master_identity_reviewer_inactive");
+ const recordsByKey=new Map(masterRecords.map(record=>[canonicalJson([record.sourceTable,record.sourceKey]),{id:record.id,contentHash:record.contentHash}]));
+ if(recordsByKey.size!==masterRecords.length||fingerprintByKey.size!==masterRecords.length||!master.reviewedAt||
+   !await hasCanonicalIdentityReviewAudits(ctx.tx,{snapshotId:master.id,reviewerId:master.reviewedBy!,reviewedAt:master.reviewedAt,
+    captureId:capture.captureId,manifestHash:capture.manifestHash,projectionHash:definition.projectionHash,destinationIdentity:definition.destinationIdentity,
+    expectedIdentityCount,identities,recordsByKey,fingerprintsByKey:fingerprintByKey}))
+  throw appSheetReadinessError("canonical_master_identity_review_audit_missing_or_unbound");
  const membersById=new Map<string,{id:string;legacyCustomerId:string|null;sourceSystem:string|null;sourceId:string|null}>();
  const skusById=new Map<string,{id:string;sourceSystem:string|null;sourceId:string|null;active:boolean}>();
  const objectsById=new Map<string,{id:string;kind:string}>();
@@ -535,7 +918,10 @@ registerCommand("MemberCreated",{kind:"member",capability:"members.write",create
  execute:async ctx=>({member:await ctx.tx.operationMember.create({data:{id:ctx.envelope.targetId,...ctx.envelope.data as {name:string;email:string;phone:string},address:json(ctx.envelope.data.address),preferences:json(ctx.envelope.data.preferences)}})})});
 registerCommand("MemberUpdated",{kind:"member",capability:"members.write",
  schema:z.strictObject({name:z.string().min(1).max(200),email:z.union([z.email(),z.literal("")]),phone:z.string().max(80),address:commercialAddress,preferences:commercialPreferences}),
- execute:async ctx=>({member:await ctx.tx.operationMember.update({where:{id:ctx.envelope.targetId},data:{...ctx.envelope.data as {name:string;email:string;phone:string},address:json(ctx.envelope.data.address),preferences:json(ctx.envelope.data.preferences)}})})});
+ execute:async ctx=>{
+  await requireEligibleAppSheetReplacementMember(ctx.tx,ctx.envelope.targetId);
+  return {member:await ctx.tx.operationMember.update({where:{id:ctx.envelope.targetId},data:{...ctx.envelope.data as {name:string;email:string;phone:string},address:json(ctx.envelope.data.address),preferences:json(ctx.envelope.data.preferences)}})};
+ }});
 registerCommand("PermissionVerified",{kind:"member",capability:"permissions.verify",
  schema:z.strictObject({kind:z.string().min(1).max(80),validFrom:civilDate,validUntil:civilDate,evidenceDocumentId:z.uuid()}),
  execute:async ctx=>{

@@ -19,6 +19,7 @@ import {
 import { appSheetDefinitionInventorySchema, type AppSheetDefinitionInventory } from "../../shared/operations/appsheet-definition.js";
 import { canonicalJson } from "../../shared/operations/exact.js";
 import { requireAppSheetTechnicalReview } from "../../shared/operations/appsheet-review.js";
+import type { AppSheetReviewTarget } from "../../shared/operations/appsheet-review.js";
 import { commercialAddress } from "./member-fields.js";
 import { capabilitiesFromGrant } from "./access-snapshot.js";
 import { sourceRecordSchema } from "./legacy-source-contract.js";
@@ -910,7 +911,7 @@ function snapshotCoverage(projection: AppSheetCanonicalProjection): Record<strin
 }
 
 type BackupEvidence = { manifestHash: string; snapshotAt: string };
-type StageContext = { target: "isolated-test" | "production"; backupEvidence?: BackupEvidence };
+type StageContext = { target: AppSheetReviewTarget; destinationIdentity: string; backupEvidence?: BackupEvidence };
 
 type DestinationFingerprint = {
   destinationType: "member" | "sku";
@@ -980,6 +981,8 @@ function snapshotControls(
         manifestHash: review.manifestHash,
         definitionHash: review.definitionHash ?? null,
         commitSha: review.commitSha,
+        target: review.schemaVersion === 2 ? review.target : context.target,
+        destinationIdentity: review.schemaVersion === 2 ? review.destinationIdentity : context.destinationIdentity,
       },
       botInventory: {
         state: "unsupported-in-generated-documentation",
@@ -988,6 +991,7 @@ function snapshotControls(
       },
       stageContext: {
         target: context.target,
+        destinationIdentity: context.destinationIdentity,
         backupEvidence: context.backupEvidence ?? null,
       },
       humanReview: { status: "pending" },
@@ -1048,7 +1052,7 @@ async function assertActorCanStage(tx: PrismaNamespace.TransactionClient, actorI
   return actor;
 }
 
-function prepareReview(projection: AppSheetCanonicalProjection, actorId: string, input: unknown, commitSha: string) {
+function prepareReview(projection: AppSheetCanonicalProjection, actorId: string, input: unknown, commitSha: string, context: StageContext) {
   const review = requireAppSheetTechnicalReview(input, {
     captureId: projection.capture.captureId,
     manifestHash: projection.capture.manifestHash,
@@ -1057,6 +1061,8 @@ function prepareReview(projection: AppSheetCanonicalProjection, actorId: string,
     projectionHash: projection.projectionHash,
     commitSha,
     importer: APPSHEET_CANONICAL_IMPORTER_VERSION,
+    target: context.target,
+    destinationIdentity: context.destinationIdentity,
   });
   if (review.reviewer.trim().toLowerCase() === actorId.trim().toLowerCase()) fail("independent_technical_reviewer_required");
   return review;
@@ -1188,8 +1194,8 @@ async function findPriorMasterBaseline(
   return null;
 }
 
-function currentDestinationHash(existing: unknown, destination: Destination): string {
-  if (destination.type === "member") {
+function currentDestinationHash(existing: unknown, destinationType: "member" | "sku"): string {
+  if (destinationType === "member") {
     const member = existing as { legacyCustomerId: string | null; sourceSystem: string | null; sourceId: string | null; name: string; email: string; phone: string; address: unknown; preferences: unknown };
     return digest({
       legacyCustomerId: member.legacyCustomerId,
@@ -1214,6 +1220,11 @@ function currentDestinationHash(existing: unknown, destination: Destination): st
     sourceId: sku.sourceId,
     appSheet: sku.appSheet === null ? null : jsonValue(sku.appSheet),
   });
+}
+
+/** Hash the current canonical master fields with the exact shape used by staging. */
+export function appSheetCanonicalCurrentDestinationHash(existing: unknown, destinationType: "member" | "sku"): string {
+  return currentDestinationHash(existing, destinationType);
 }
 
 async function prepareMasterStagePlan(
@@ -1288,7 +1299,7 @@ async function prepareMasterStagePlan(
     if (prior.fingerprint.destinationType !== destination.type || prior.fingerprint.sourceTable !== destination.sourceTable ||
         prior.fingerprint.sourceKey !== destination.sourceKey || prior.fingerprint.destinationId !== destination.id)
       fail("preliminary_master_refresh_lineage_mismatch");
-    const beforeHash = currentDestinationHash(existing, destination);
+    const beforeHash = currentDestinationHash(existing, destination.type);
     if (beforeHash !== prior.fingerprint.dataHash || object.version !== prior.fingerprint.operationVersion)
       fail("preliminary_master_refresh_manual_change_detected");
     if (destination.type === "member") {
@@ -1320,11 +1331,13 @@ async function persistProjection(
   context: StageContext,
 ): Promise<{ snapshotId: string; captureId: string; status: "staged"; replay: boolean; counts: AppSheetCanonicalProjection["summary"] }> {
   if (projection.capture.stabilityMode === "staged-delta" && !allowStagedDelta) fail("staged_delta_requires_explicit_flag");
+  if (context.target === "production" && projection.capture.stabilityMode !== "stable") fail("production_requires_stable_capture");
   const actor = await assertActorCanStage(tx, actorId);
   if (!/^[a-f0-9]{40}$/.test(commitSha)) fail("commit_sha_invalid");
   if (context.target === "production" && (!context.backupEvidence || !HASH.test(context.backupEvidence.manifestHash) ||
       !Number.isFinite(Date.parse(context.backupEvidence.snapshotAt)))) fail("verified_backup_required");
-  const review = prepareReview(projection, actor.id, reviewInput, commitSha);
+  if (!/^appsheet-db-v1:[a-f0-9]{64}$/.test(context.destinationIdentity)) fail("database_destination_identity_invalid");
+  const review = prepareReview(projection, actor.id, reviewInput, commitSha, context);
   const snapshotId = snapshotIdFor(projection);
   if (snapshotId !== projection.snapshotId) fail("snapshot_id_invalid");
 
@@ -1493,6 +1506,7 @@ async function persistProjection(
       target: context.target,
       backupManifestHash: context.backupEvidence?.manifestHash ?? null,
       backupSnapshotAt: context.backupEvidence?.snapshotAt ?? null,
+      destinationIdentity: context.destinationIdentity,
       recordCount: projection.summary.recordCount, destinationCount: projection.destinations.length,
       exceptionCount: projection.summary.exceptionCount,
     }),
@@ -1510,6 +1524,7 @@ export async function stageAppSheetCanonicalMasters(
     refreshPreliminary?: boolean;
     commitSha: string;
     target: "isolated-test" | "production";
+    destinationIdentity: string;
     backupEvidence?: BackupEvidence;
   },
   client?: PrismaClient,
@@ -1521,7 +1536,9 @@ export async function stageAppSheetCanonicalMasters(
     try {
       return await db.$transaction(
         (tx) => persistProjection(tx, projection, options.actorId, options.technicalReview, options.allowStagedDelta === true,
-          options.refreshPreliminary === true, options.commitSha, { target: options.target, backupEvidence: options.backupEvidence }),
+          options.refreshPreliminary === true, options.commitSha, {
+            target: options.target, destinationIdentity: options.destinationIdentity, backupEvidence: options.backupEvidence,
+          }),
         { isolationLevel: "Serializable", timeout: 120_000, maxWait: 15_000 },
       );
     } catch (error) {
