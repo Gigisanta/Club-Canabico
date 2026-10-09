@@ -82,14 +82,36 @@ function sourceKey(table: string, values: Record<string, string | null>, duplica
   return value && value.trim() ? value : `synthetic:${table}:${sourceRow}`;
 }
 
+type PendingCaptureRow = {
+  sourceRow: number;
+  cells: Array<Parameters<typeof formatCellData>[0]>;
+  unresolvedFormulaCells: Array<string | number>;
+};
+
+function hasSourceEvidence(row: PendingCaptureRow): boolean {
+  if (row.unresolvedFormulaCells.length > 0) return true;
+  return row.cells.some(cell => {
+    const entered = cell.userEnteredValue;
+    const effective = cell.effectiveValue;
+    const enteredText = entered?.stringValue;
+    const effectiveText = effective?.stringValue;
+    return (typeof entered?.formulaValue === "string" && entered.formulaValue !== "") ||
+      (typeof enteredText === "string" && enteredText.trim() !== "") ||
+      entered?.numberValue !== undefined || entered?.boolValue !== undefined ||
+      Boolean(effective?.errorValue) || effective?.numberValue !== undefined || effective?.boolValue !== undefined ||
+      (typeof effectiveText === "string" && effectiveText.trim() !== "");
+  });
+}
+
 function sourceRecordFromCapture(input: {
   table: string;
-  row: { sourceRow: number; cells: Array<{ columnIndex: number }>; unresolvedFormulaCells: Array<string | number> };
+  row: PendingCaptureRow;
   headerColumns: Array<{ columnIndex: number; header: string | null }>;
-}): AppSheetPendingSourceRecord {
+}): AppSheetPendingSourceRecord | null {
   const { table, row, headerColumns } = input;
+  if (!hasSourceEvidence(row)) return null;
   const headersByIndex = new Map(headerColumns.map(column => [column.columnIndex, column.header]));
-  const formatted = row.cells.map(cell => formatCellData(cell as never, row.sourceRow, headersByIndex.get(cell.columnIndex) ?? null));
+  const formatted = row.cells.map(cell => formatCellData(cell, row.sourceRow, headersByIndex.get(cell.columnIndex) ?? null));
   const grouped = new Map<string, typeof formatted>();
   const unresolved = new Set<string>();
   const unresolvedCoordinates = new Set(row.unresolvedFormulaCells.map(String));
@@ -191,7 +213,10 @@ export async function prepareAppSheetPendingPreview(
     if (!APPSHEET_PENDING_TABLES.includes(page.sheet.title as (typeof APPSHEET_PENDING_TABLES)[number])) continue;
     const headerSheet = headerSheets.get(page.sheet.title);
     if (!headerSheet) throw new AppSheetPendingPreviewError("capture_headers_missing_for_table");
-    for (const row of page.rows) rawRows.push(sourceRecordFromCapture({ table: page.sheet.title, row, headerColumns: headerSheet.columns }));
+    for (const row of page.rows) {
+      const sourceRecord = sourceRecordFromCapture({ table: page.sheet.title, row, headerColumns: headerSheet.columns });
+      if (sourceRecord !== null) rawRows.push(sourceRecord);
+    }
   }
   const mappingHash = sha256(pendingMappingFingerprintPayload());
   const classified = reconcileAppSheetPendingRows(rawRows, {

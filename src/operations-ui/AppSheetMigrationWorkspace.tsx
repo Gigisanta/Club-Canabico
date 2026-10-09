@@ -9,6 +9,7 @@ const kindLabels: Record<string, string> = {
   invoice: "Facturas",
   "sale-line": "Detalle de ventas",
   purchase: "Compras",
+  stock: "Movimientos de stock",
   cash: "Movimientos de dinero",
   expense: "Gastos",
   fx: "Operaciones de moneda",

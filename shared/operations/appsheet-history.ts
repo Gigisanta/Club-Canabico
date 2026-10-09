@@ -12,6 +12,7 @@ export type AppSheetHistoryKind =
   | "invoice"
   | "sale-line"
   | "purchase"
+  | "stock"
   | "cash"
   | "expense"
   | "fx"
@@ -27,6 +28,10 @@ export interface AppSheetHistoryTableRule {
   amountField: string | null;
   quantityField: string | null;
   currencyField: string | null;
+  /** A source classification retained verbatim in the historical fact. */
+  classificationField?: string;
+  /** Exact values declared by the source enum, when the definition provides them. */
+  classificationValues?: readonly string[];
   /** Explicitly known physical unit, based on the source column's name. */
   defaultUnit: "g" | "ud" | null;
   /** Fields that name a related source row; never used as a substitute key. */
@@ -34,6 +39,10 @@ export interface AppSheetHistoryTableRule {
     sourceField: string;
     targetTable: string;
     targetField: string;
+    /** AppSheet Refs without a Required_If may legitimately be blank. */
+    required?: boolean;
+    /** Compare independently observed links that describe the same identity. */
+    identityGroup?: string;
   }[];
   /** Source flags are kept as evidence and must not be treated as certification. */
   nonAuthoritativeStatusFields: readonly string[];
@@ -66,7 +75,10 @@ export const APPSHEET_HISTORY_TABLE_RULES = [
     quantityField: "Cantidad_Gr",
     currencyField: null,
     defaultUnit: "g",
-    relationships: [{ sourceField: "Id_Factura", targetTable: "C_Facturacion", targetField: "Id_Factura" }],
+    relationships: [
+      { sourceField: "Id_Factura", targetTable: "C_Facturacion", targetField: "Id_Factura" },
+      { sourceField: "Artículo", targetTable: "C_Mercaderia", targetField: "ID_Mercaderia", required: false },
+    ],
     nonAuthoritativeStatusFields: [],
   },
   {
@@ -114,8 +126,28 @@ export const APPSHEET_HISTORY_TABLE_RULES = [
     quantityField: "Cantidad_Cann_Ingresado",
     currencyField: null,
     defaultUnit: null,
-    relationships: [{ sourceField: "Codigo_Detalle", targetTable: "D_Catalogo_Mercaderia", targetField: "Codigo_Detalle" }],
+    relationships: [
+      { sourceField: "Codigo_Detalle", targetTable: "D_Catalogo_Mercaderia", targetField: "Codigo_Detalle", identityGroup: "catalog-item" },
+      { sourceField: "Variedad_Cann", targetTable: "D_Catalogo_Mercaderia", targetField: "CatalogoID", required: false, identityGroup: "catalog-item" },
+    ],
     nonAuthoritativeStatusFields: ["Mercaderia_Movimiento_Generado", "Anulado", "Fecha_Entrega"],
+  },
+  {
+    table: "Mov_Stock1",
+    kind: "stock",
+    keyField: "ID_Mov_Stock_Total",
+    dateField: "Fecha_Movimiento_Stock",
+    amountField: null,
+    quantityField: "Cantidad_Gr",
+    currencyField: null,
+    classificationField: "Tipo_Registro_Mercaderia",
+    classificationValues: ["Entrada", "Venta", "Merma"],
+    defaultUnit: "g",
+    relationships: [
+      { sourceField: "Mercaderia_ID", targetTable: "C_Mercaderia", targetField: "ID_Mercaderia", required: false },
+      { sourceField: "Id_Detalle_Ref", targetTable: "C_Detalle_Fact", targetField: "Id_Detalle", required: false },
+    ],
+    nonAuthoritativeStatusFields: [],
   },
   {
     table: "C_gastos_operacion",

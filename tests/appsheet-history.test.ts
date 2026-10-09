@@ -4,14 +4,20 @@ import test from "node:test";
 import type { PrismaClient } from "@prisma/client";
 import {
   analyzeAppSheetHistoryMovementMatches,
+  appSheetHistoryProjectionReport,
   appSheetHistoryCoverageFingerprint,
   AppSheetHistoryStageError,
   buildAppSheetPendingSourceRecord,
   formatCellData,
+  prepareAppSheetHistoryProjection,
   stageAppSheetHistoryProjection,
+  type AppSheetHistoryDefinition,
+  type LoadedAppSheetHistoryCapture,
   type PreparedAppSheetHistoryProjection,
 } from "../server/operations/appsheet-history.js";
-import { APPSHEET_HISTORY_MOVEMENT_OVERLAP_FIELDS } from "../shared/operations/appsheet-history.js";
+import { APPSHEET_EXPECTED_LIVE_APP_ID } from "../server/operations/appsheet-canonical.js";
+import { APPSHEET_HISTORY_MOVEMENT_OVERLAP_FIELDS, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
+import { canonicalJson } from "../shared/operations/exact.js";
 import { pendingMappingFingerprintPayload, reconcileAppSheetPendingRows } from "../shared/operations/appsheet-pending.js";
 import { parseAppSheetHistoryCliArgs, privateAppSheetChildPath, runAppSheetHistoryCli } from "../scripts/appsheet-history.js";
 
@@ -178,6 +184,121 @@ test("coverage fingerprint hashes exception counts without changing the public c
   assert.equal(coverage.totals.kindCounts.cash, 2);
   assert.throws(() => appSheetHistoryCoverageFingerprint({ exceptionTotal: 1.5 }),
     (error) => error instanceof AppSheetHistoryStageError && error.code === "coverage_exception_count_invalid");
+  const withoutCash = { exceptionTotal: 0, sheets: [], totals: { kindCounts: { stock: 1 } } };
+  const explicitZeroCash = { exceptionTotal: 0, sheets: [], totals: { kindCounts: { stock: 1, cash: 0 } } };
+  assert.equal(appSheetHistoryCoverageFingerprint(withoutCash), appSheetHistoryCoverageFingerprint(explicitZeroCash));
+  for (const cash of [null, -1, 1.5, "0"]) assert.throws(() => appSheetHistoryCoverageFingerprint({
+    exceptionTotal: 0, sheets: [], totals: { kindCounts: { cash } },
+  }), (error) => error instanceof AppSheetHistoryStageError && error.code === "coverage_cash_fact_count_invalid");
+});
+
+test("stock movement projection preserves grams, optional source refs and catalog identity conflicts as history only", () => {
+  const sheetInputs = [
+    { sheetId: 1, title: "D_Catalogo_Mercaderia", headers: ["CatalogoID", "Codigo_Detalle"], rows: [
+      ["catalog-1", "CODE-1"], ["catalog-2", "CODE-2"],
+    ] },
+    { sheetId: 2, title: "C_Mercaderia", headers: ["ID_Mercaderia", "Fecha_Compra", "Precio_Total_Abonado", "Cantidad_Cann_Ingresado", "Codigo_Detalle", "Variedad_Cann"], rows: [
+      ["purchase-1", "2026-10-01", 100, 2.5, "CODE-1", "catalog-1"],
+      ["purchase-conflict", "2026-10-02", 200, 3, "CODE-1", "catalog-2"],
+      ["purchase-native-only", "2026-10-03", 50, 1, null, "catalog-2"],
+    ] },
+    { sheetId: 3, title: "C_Facturacion", headers: ["Id_Factura", "Fecha", "Total_Facturado", "Tipo_Moneda", "Cliente", "Estado"], rows: [
+      ["invoice-1", "2026-10-01", 100, "ARS", "member-1", "Cobrado"],
+    ] },
+    { sheetId: 4, title: "C_Detalle_Fact", headers: ["Id_Detalle", "Id_Factura", "Fecha", "Valor_Total", "Cantidad_Gr", "Artículo"], rows: [
+      ["detail-1", "invoice-1", "2026-10-01", 100, 1.5, "purchase-1"],
+    ] },
+    { sheetId: 5, title: "Mov_Stock1", headers: ["ID_Mov_Stock_Total", "Fecha_Movimiento_Stock", "Tipo_Registro_Mercaderia", "Cantidad_Gr", "Mercaderia_ID", "Id_Detalle_Ref"], rows: [
+      ["stock-entry", "2026-10-01", "Entrada", 8.25, "purchase-1", null],
+      ["stock-sale", "2026-10-02", "Venta", 1.5, null, "detail-1"],
+      ["stock-waste", "2026-10-03", "Merma", 0.25, "purchase-1", null],
+      ["stock-unmatched", "2026-10-04", "Salida", 0.4, "missing-merchandise", null],
+    ] },
+  ];
+  const headers = sheetInputs.map((sheet) => ({ sheetId: sheet.sheetId, title: sheet.title, mode: "grid", hidden: false,
+    headerRow: 1, gridRows: sheet.rows.length + 1, gridColumns: sheet.headers.length,
+    columns: sheet.headers.map((header, index) => ({ columnIndex: index + 1, header, sensitive: false })),
+    pageCount: 1, safeColumnIndexes: sheet.headers.map((_, index) => index + 1), omittedColumnIndexes: [] }));
+  const pages = sheetInputs.map((sheet) => {
+    const rows = sheet.rows.map((values, rowIndex) => ({ sourceRow: rowIndex + 2,
+      cells: values.map((value, index) => value === null ? { columnIndex: index + 1 }
+        : { columnIndex: index + 1, effectiveValue: typeof value === "number" ? { numberValue: value } : { stringValue: String(value) } }),
+      unresolvedFormulaCells: [], rowHash: "c".repeat(64) }));
+    return { schemaVersion: "appsheet-sheet-page/v1", spreadsheetId: "synthetic-spreadsheet", sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
+      sheet: { sheetId: sheet.sheetId, title: sheet.title, mode: "grid", hidden: false, headerRow: 1, gridRows: sheet.rows.length + 1, gridColumns: sheet.headers.length },
+      page: { index: 0, startRow: 2, endRow: sheet.rows.length + 1, a1Ranges: [], safeColumnIndexes: sheet.headers.map((_, index) => index + 1), omittedColumnIndexes: [], cellFields: "effectiveValue" },
+      rows, counts: { rowsSerialized: rows.length, formulaCellCount: 0, unresolvedFormulaCount: 0 }, pageHash: "d".repeat(64) };
+  });
+  const manifestPages = pages.map((page) => ({ path: `pages/${page.sheet.sheetId}-0-2.json`, sheetId: page.sheet.sheetId,
+    title: page.sheet.title, pageIndex: 0, startRow: page.page.startRow, endRow: page.page.endRow,
+    pageHash: page.pageHash, verifiedPageHash: page.pageHash, stable: true, counts: page.counts }));
+  const dataRecordCount = sheetInputs.reduce((sum, sheet) => sum + sheet.rows.length, 0);
+  const capture = {
+    directory: "/synthetic/private-capture", mode: "stable",
+    manifest: { captureId: "appsreal-stock-fixture", sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
+      manifestHash: "a".repeat(64), dataHash: "b".repeat(64), definitionHash: null,
+      spreadsheetId: "synthetic-spreadsheet", metadataHash: "c".repeat(64), headersHash: "d".repeat(64),
+      firstReadAt: "2026-10-09T10:00:00.000Z", verificationStartedAt: "2026-10-09T10:01:00.000Z",
+      verificationCompletedAt: "2026-10-09T10:02:00.000Z", cutoffAt: "2026-10-09T10:03:00.000Z", timestampGaps: [],
+      stability: { stable: true }, dataSheetCount: sheetInputs.length, dataPageCount: pages.length, dataRecordCount,
+      dataFormulaCount: 0, dataUnresolvedFormulaCount: 0, pages: manifestPages,
+      coverage: { sheets: sheetInputs.map((sheet) => ({ sheetId: sheet.sheetId, formulaCellCount: 0, unresolvedFormulaCount: 0 })) } },
+    headers: { schemaVersion: "appsheet-sheet-headers/v1", spreadsheetId: "synthetic-spreadsheet", sheets: headers },
+    pages, pagesBySheet: new Map(), deltaEvidence: [],
+  } as unknown as LoadedAppSheetHistoryCapture;
+  const sourceSha256 = "1".repeat(64), descriptorSha256 = "2".repeat(64);
+  const definition = { inventory: { source: { sha256: sourceSha256 }, descriptorSha256,
+    app: { id: APPSHEET_EXPECTED_LIVE_APP_ID }, sections: [], observedCounts: {} },
+    fileSha256: "3".repeat(64), sourceSha256, descriptorSha256,
+    appliedDefinitionHash: sha256(canonicalJson({ sourceSha256, descriptorSha256 })), identityState: "verified" } as unknown as AppSheetHistoryDefinition;
+
+  const prepared = prepareAppSheetHistoryProjection(capture, definition);
+  const facts = prepared.persistedFacts;
+  const stockFacts = facts.filter((fact) => fact.kind === "stock");
+  assert.equal(stockFacts.length, 4);
+  const sale = stockFacts.find((fact) => fact.sourceKey === "stock-sale");
+  assert.ok(sale);
+  assert.equal(sale.quantity?.toString(), "1.5");
+  assert.equal(sale.unit, "g");
+  assert.equal(sale.unitState, "known");
+  const saleAttributes = sale.attributes as unknown as { financialEffect: string; sourceClassification: { field: string; value: string; state: string }; relationships: Array<{ sourceField: string; status: string; targetSourceKey: string | null }> };
+  assert.equal(saleAttributes.financialEffect, "historical-fact-only");
+  assert.deepEqual(saleAttributes.sourceClassification, { field: "Tipo_Registro_Mercaderia", value: "Venta", state: "known" });
+  assert.deepEqual(saleAttributes.relationships.map(({ sourceField, status, targetSourceKey }) => ({ sourceField, status, targetSourceKey })), [
+    { sourceField: "Mercaderia_ID", status: "not_provided", targetSourceKey: null },
+    { sourceField: "Id_Detalle_Ref", status: "unique", targetSourceKey: "detail-1" },
+  ]);
+  const detail = prepared.persistedRecords.find((record) => record.sourceTable === "C_Detalle_Fact" && record.sourceKey === "detail-1");
+  assert.ok(detail);
+  const detailAttributes = facts.find((fact) => fact.sourceRecordId === detail.id)!.attributes as unknown as { relationships: Array<{ sourceField: string; status: string; targetSourceKey: string | null }> };
+  assert.ok(detailAttributes.relationships.some((link) => link.sourceField === "Artículo" && link.status === "unique" && link.targetSourceKey === "purchase-1"));
+
+  const purchase = prepared.persistedRecords.find((record) => record.sourceTable === "C_Mercaderia" && record.sourceKey === "purchase-1");
+  assert.ok(purchase);
+  const purchaseFact = facts.find((fact) => fact.sourceRecordId === purchase.id)!;
+  assert.equal(purchaseFact.quantity?.toString(), "2.5");
+  assert.equal(purchaseFact.unit, null, "purchase quantities without a declared source unit remain unknown");
+  assert.equal(purchaseFact.unitState, "absent");
+  const purchaseAttributes = purchaseFact.attributes as unknown as { relationships: Array<{ sourceField: string; status: string; targetSourceKey: string | null }> };
+  assert.ok(purchaseAttributes.relationships.some((link) => link.sourceField === "Variedad_Cann" && link.status === "unique" && link.targetSourceKey === "catalog-1"));
+  assert.ok(purchaseAttributes.relationships.some((link) => link.sourceField === "Codigo_Detalle" && link.status === "unique" && link.targetSourceKey === "catalog-1"));
+  const nativeOnly = prepared.persistedRecords.find((record) => record.sourceTable === "C_Mercaderia" && record.sourceKey === "purchase-native-only");
+  assert.ok(nativeOnly);
+  const nativeOnlyFact = facts.find((fact) => fact.sourceRecordId === nativeOnly.id)!;
+  const nativeOnlyLinks = (nativeOnlyFact.attributes as unknown as { relationships: Array<{ sourceField: string; status: string; targetSourceKey: string | null }> }).relationships;
+  assert.ok(nativeOnlyLinks.some((link) => link.sourceField === "Variedad_Cann" && link.status === "unique" && link.targetSourceKey === "catalog-2"));
+  assert.ok(nativeOnlyLinks.some((link) => link.sourceField === "Codigo_Detalle" && link.status === "missing"));
+  assert.ok(prepared.exceptions.some((exception) => exception.sourceRecordId === nativeOnly.id && exception.kind === "foreign_relationship_missing" && exception.severity === "blocking"));
+
+  const conflictingPurchase = prepared.persistedRecords.find((record) => record.sourceTable === "C_Mercaderia" && record.sourceKey === "purchase-conflict");
+  assert.ok(conflictingPurchase);
+  assert.ok(prepared.exceptions.some((exception) => exception.sourceRecordId === conflictingPurchase.id && exception.kind === "foreign_relationship_conflict" && exception.severity === "blocking"));
+  const unmatched = stockFacts.find((fact) => fact.sourceKey === "stock-unmatched");
+  assert.ok(unmatched);
+  assert.ok(prepared.exceptions.some((exception) => exception.sourceRecordId === unmatched.sourceRecordId && exception.kind === "source_classification_unresolved" && exception.severity === "blocking"));
+  assert.ok(prepared.exceptions.some((exception) => exception.sourceRecordId === unmatched.sourceRecordId && exception.kind === "foreign_relationship_missing" && exception.severity === "blocking"));
+  assert.equal(appSheetHistoryProjectionReport(prepared).cutoverEligible, false);
+  assert.equal(prepared.metrics.kindCounts.stock, 4);
 });
 
 function stageFixture(): PreparedAppSheetHistoryProjection {

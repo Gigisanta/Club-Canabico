@@ -121,7 +121,7 @@ appSheetMigrationRoutes.get("/:captureId/history", async (req, res) => {
 async function historyPage(req: Request, res: Response, snapshotIds: string[]) {
   const cursor = z.string().min(1).max(100).optional().parse(req.query.cursor);
   const table = z.string().max(200).optional().parse(req.query.table);
-  const kind = z.enum(["invoice", "sale-line", "purchase", "cash", "expense", "fx", "delivery", "archive"]).optional().parse(req.query.kind);
+  const kind = z.enum(["invoice", "sale-line", "purchase", "stock", "cash", "expense", "fx", "delivery", "archive"]).optional().parse(req.query.kind);
   const limit = z.coerce.number().int().min(1).max(100).parse(req.query.limit ?? 50);
   const where = { snapshotId: { in: snapshotIds }, ...(table ? { sourceTable: table } : {}), ...(kind ? { kind } : {}) };
   if (cursor && !await db.legacyHistoricalFact.findFirst({ where: { ...where, id: cursor }, select: { id: true } }))

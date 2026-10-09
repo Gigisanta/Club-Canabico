@@ -3,8 +3,12 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import bcrypt from "bcryptjs";
+import { Prisma } from "@prisma/client";
 import { splitSqlStatements } from "./migration-sql.js";
 import type { CommandEnvelope } from "../shared/operations/contracts.js";
+import { APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../shared/operations/appsheet-canonical.js";
+import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
+import { canonicalJson } from "../shared/operations/exact.js";
 import { formatAppSheetInvoiceNumberForYear } from "../shared/operations/appsheet-invoice-rules.js";
 
 test("AppSheet invoices preserve exact line values and independent moto metadata while confirming atomically", {
@@ -713,41 +717,252 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
     });
 
     await t.test("replacement invoices fail closed without a seed, then reserve numbers atomically and preserve them on edit", async () => {
-      const manifestHash = createHash("sha256").update(`synthetic-invoice-capture-${randomUUID()}`).digest("hex");
-      const dataHash = createHash("sha256").update(`synthetic-invoice-data-${randomUUID()}`).digest("hex");
+      const digest = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+      const manifestHash = digest(`synthetic-invoice-capture-${randomUUID()}`);
       const captureId = `appsreal-${manifestHash.slice(0, 16)}`;
-      const captureNow = new Date();
+      const captureNow = new Date(Date.now() - 60_000);
+      const pauseStartedAt = new Date(captureNow.getTime() - 4_000);
+      const firstReadAt = new Date(captureNow.getTime() - 3_000);
+      const verificationStartedAt = new Date(captureNow.getTime() - 2_000);
+      const verificationCompletedAt = new Date(captureNow.getTime() - 1_000);
+      const pageManifest = [
+        { sheetId: 1, title: "C_Cliente", bodyRead: true, bodyExcluded: false },
+        { sheetId: 2, title: "D_Catalogo_Mercaderia", bodyRead: true, bodyExcluded: false },
+        { sheetId: 3, title: "T_Usuarios", bodyRead: false, bodyExcluded: true, bodyExclusionReason: "authentication-table-body-redacted" },
+      ].map(sheet => {
+        const pageHash = digest(`synthetic-page-${sheet.sheetId}`);
+        return { ...sheet, path: `pages/${sheet.sheetId}-0-1.json`, pageIndex: 0, startRow: 1, endRow: 1,
+          pageHash, verifiedPageHash: pageHash, stable: true, counts: { rowsWithValues: 1 } };
+      });
+      const pageRefs = pageManifest.map(page => ({ path: page.path, sheetId: page.sheetId, pageIndex: page.pageIndex,
+        startRow: page.startRow, endRow: page.endRow, pageHash: page.pageHash, counts: page.counts }));
+      const dataHash = digest(canonicalJson(pageRefs));
+      const dataCoverage = {
+        metadataStable: true, headersStableAll: true, totalPages: pageManifest.length, rowsWithValues: pageManifest.length,
+        dataRecordCount: 3, failedPages: 0, changedPages: 0, unresolvedFormulaCount: 0,
+        sheets: [
+          { sheetId: 1, title: "C_Cliente", pageCount: 1, verifiedPageCount: 1, stablePageCount: 1, changedPageCount: 0, bodyRead: true, bodyExcluded: false },
+          { sheetId: 2, title: "D_Catalogo_Mercaderia", pageCount: 1, verifiedPageCount: 1, stablePageCount: 1, changedPageCount: 0, bodyRead: true, bodyExcluded: false },
+          { sheetId: 3, title: "T_Usuarios", pageCount: 1, verifiedPageCount: 1, stablePageCount: 1, changedPageCount: 0,
+            bodyRead: false, bodyExcluded: true, bodyExclusionReason: "authentication-table-body-redacted" },
+        ],
+      };
       await db.appSheetCaptureManifest.create({ data: {
-        captureId, sourceSystem: "appsheet-live-verified", sourceId: "synthetic-invoice-spreadsheet", spreadsheetId: "synthetic-invoice-spreadsheet",
+        captureId, sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM, sourceId: "synthetic-invoice-spreadsheet", spreadsheetId: "synthetic-invoice-spreadsheet",
         metadataHash: "a".repeat(64), headersHash: "b".repeat(64), manifestHash, dataHash, definitionHash: null,
-        stability: { stable: true }, firstReadAt: captureNow, verificationStartedAt: captureNow, verificationCompletedAt: captureNow, cutoffAt: captureNow,
-        dataCoverage: {}, pageManifest: [], dataSheetCount: 0, dataPageCount: 0, dataRecordCount: 0,
-        dataFormulaCount: 0, dataUnresolvedFormulaCount: 0,
+        stability: { stable: true, cutoverEligible: true, metadataStable: true, headersStable: true, pageHashesStable: true, scanComplete: true,
+          firstPassPages: 3, verifiedPages: 3, matchedPages: 3, changedPages: 0, failedPages: 0, missingPages: 0,
+          unresolvedFormulaCount: 0, sourceWriteDetected: false, bodyExcludedSheets: ["T_Usuarios"] },
+        firstReadAt, verificationStartedAt, verificationCompletedAt, cutoffAt: captureNow,
+        dataCoverage, pageManifest, dataSheetCount: 3, dataPageCount: 3, dataRecordCount: 3,
+        dataFormulaCount: 0, dataUnresolvedFormulaCount: 0, definitionTableCount: null, definitionColumnCount: null,
+        definitionSliceCount: null, definitionViewCount: null, definitionActionCount: null, definitionBotCount: null,
+        definitionWorkflowRuleCount: null, definitionFormatRuleCount: null,
       } });
       const snapshotId = `synthetic-invoice-history-${randomUUID()}`;
+      const invoiceSourceRecordId = `synthetic-invoice-source-${randomUUID()}`;
+      const cashSourceRecordId = `synthetic-cash-source-${randomUUID()}`;
+      const stockSourceRecordId = `synthetic-stock-source-${randomUUID()}`;
+      const stockMovementSourceRecordId = `synthetic-stock-movement-source-${randomUUID()}`;
+      const invoiceSourceKey = "synthetic-invoice-source-key";
+      const cashSourceKey = "synthetic-cash-source-key";
+      const stockSourceKey = "synthetic-stock-source-key";
+      const stockMovementSourceKey = "synthetic-stock-movement-source-key";
+      const invoiceContentHash = digest("synthetic-invoice-content");
+      const cashContentHash = digest("synthetic-cash-content");
+      const stockContentHash = digest("synthetic-stock-content");
+      const stockMovementContentHash = digest("synthetic-stock-movement-content");
+      const publicationFingerprint = digest("synthetic-history-publication");
+      const snapshotCoverage = {
+        appSheetCanonical: { captureId, manifestHash, dataHash, sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, stabilityMode: "stable",
+          delta: { globallyStable: true, unresolvedChangedPageCount: 0 } },
+        sheets: [{ sourceTable: "C_Facturacion", sourceRecordCount: 1, factCount: 1, definitionTableMatch: "unique", changedPageIndexes: [] }],
+      };
       await db.legacyImportSnapshot.create({ data: {
-        id: snapshotId, sourceSystem: "appsheet-live-verified", filename: "appsheet-live-capture", fileHash: manifestHash,
-        importerVersion: "synthetic-invoice-sequence-test", status: "reviewed", createdBy: ownerId, reviewedBy: deniedId,
-        captureManifestId: captureId, coverage: {}, controls: {},
+        id: snapshotId, sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, filename: "appsheet-live-capture", fileHash: manifestHash,
+        importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION, status: "reviewed", createdBy: ownerId, reviewedBy: deniedId, reviewedAt: captureNow,
+        captureManifestId: captureId, coverage: snapshotCoverage,
+        controls: { appSheetHistoryStage: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, captureId, manifestHash, dataHash,
+          mappingId: APPSHEET_HISTORY_MAPPING_ID, status: "staged" } },
       } });
-      await db.operationAuthority.upsert({
-        where: { id: "operations" },
-        create: { id: "operations", mode: "active", cutoverProfile: "appsheet-replacement", captureManifestId: captureId },
-        update: { mode: "active", cutoverProfile: "appsheet-replacement", captureManifestId: captureId },
-      });
+      const createSourceRecord = (id: string, sourceTable: string, sourceKey: string, sourceRow: number, contentHash: string, normalized: Prisma.InputJsonValue) =>
+        db.legacySourceRecord.create({ data: { id, snapshotId, sourceTable, sourceKey, sourceRow, fileHash: manifestHash, contentHash,
+          importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION, original: {}, normalized, treatment: "fact_candidate" } });
+      const createFact = (input: { id: string; sourceRecordId: string; sourceTable: string; sourceKey: string; sourceRow: number; sourceHash: string;
+        kind: string; occurredOn?: string; dateState: "known" | "absent" | "invalid" | "not-applicable";
+        amountMinor?: bigint; amountState: "known" | "absent" | "invalid" | "not-applicable";
+        currency?: string; currencyState: "known" | "absent" | "invalid" | "not-applicable";
+        quantity?: string; quantityState: "known" | "absent" | "invalid" | "not-applicable";
+        unit?: string; unitState: "known" | "absent" | "invalid" | "not-applicable"; attributes?: Prisma.InputJsonObject }) =>
+        db.legacyHistoricalFact.create({ data: { id: input.id, snapshotId, sourceRecordId: input.sourceRecordId, sourceTable: input.sourceTable,
+          sourceKey: input.sourceKey, sourceRow: input.sourceRow, sourceHash: input.sourceHash, mappingId: APPSHEET_HISTORY_MAPPING_ID,
+          kind: input.kind, occurredOn: input.occurredOn ?? null, dateState: input.dateState, currency: input.currency ?? null, currencyState: input.currencyState,
+          unit: input.unit ?? null, unitState: input.unitState, amountMinor: input.amountMinor ?? null, amountState: input.amountState,
+          quantity: input.quantity ?? null, quantityState: input.quantityState, attributes: input.attributes ?? {}, createdBy: ownerId } });
+      const historyDate = today;
+      await createSourceRecord(invoiceSourceRecordId, "C_Facturacion", invoiceSourceKey, 2, invoiceContentHash,
+        { columns: [{ header: "Id_Factura", value: invoiceSourceKey }, { header: "Id_Oculto", value: "41", exactDecimal: "41" },
+          { header: "N_factura", value: "2025|FA0040" }, { header: "Fecha", value: today },
+          { header: "Total_Facturado", value: "12.00", exactDecimal: "12.00" }, { header: "Cantidad_Gr", value: "5.000", exactDecimal: "5" }] });
+      await createFact({ id: `synthetic-invoice-fact-${randomUUID()}`, sourceRecordId: invoiceSourceRecordId, sourceTable: "C_Facturacion",
+        sourceKey: invoiceSourceKey, sourceRow: 2, sourceHash: invoiceContentHash, kind: "invoice", occurredOn: historyDate, dateState: "known",
+        amountMinor: 1200n, amountState: "known", currencyState: "absent", quantity: "5", quantityState: "known", unit: "g", unitState: "known" });
+      await createSourceRecord(cashSourceRecordId, "Movimiento", cashSourceKey, 3, cashContentHash,
+        { columns: [{ header: "ID_Movimiento", value: cashSourceKey }, { header: "Fecha", value: today },
+          { header: "Monto", value: "12.00", exactDecimal: "12.00" }, { header: "Tipo_Moneda", value: "ARS" }] });
+      await createFact({ id: `synthetic-cash-fact-${randomUUID()}`, sourceRecordId: cashSourceRecordId, sourceTable: "Movimiento", sourceKey: cashSourceKey,
+        sourceRow: 3, sourceHash: cashContentHash, kind: "cash", occurredOn: historyDate, dateState: "known", amountMinor: 1200n, amountState: "known",
+        currency: "ARS", currencyState: "known", quantityState: "not-applicable", unitState: "not-applicable" });
+      // Synthetic D_Stock is only a gate fixture; no live history rule or physical-count evidence is implied.
+      await createSourceRecord(stockSourceRecordId, "D_Stock", stockSourceKey, 4, stockContentHash,
+        { columns: [{ header: "Cantidad", value: "5", exactDecimal: "5" }, { header: "Unidad", value: "g" }, { header: "Codigo_Detalle", value: "invoice-source-sku" }] });
+      await createFact({ id: `synthetic-stock-fact-${randomUUID()}`, sourceRecordId: stockSourceRecordId, sourceTable: "D_Stock", sourceKey: stockSourceKey,
+        sourceRow: 4, sourceHash: stockContentHash, kind: "stock", dateState: "not-applicable", amountState: "not-applicable", currencyState: "not-applicable",
+        quantity: "5", quantityState: "known", unit: "g", unitState: "known",
+        attributes: { relationships: [{ targetTable: "D_Catalogo_Mercaderia", status: "unique", targetSourceKey: "invoice-source-sku" }] } });
+      // A safe historical movement can carry quantity, grams, and a unique SKU relation, but an Entrada remains a ledger delta.
+      await createSourceRecord(stockMovementSourceRecordId, "Mov_Stock1", stockMovementSourceKey, 5, stockMovementContentHash,
+        { columns: [{ header: "ID_Movimiento", value: stockMovementSourceKey }, { header: "Tipo", value: "Entrada" },
+          { header: "Cantidad_Gr", value: "5.000", exactDecimal: "5" }, { header: "Codigo_Detalle", value: "invoice-source-sku" }] });
+      await createFact({ id: `synthetic-stock-movement-fact-${randomUUID()}`, sourceRecordId: stockMovementSourceRecordId,
+        sourceTable: "Mov_Stock1", sourceKey: stockMovementSourceKey, sourceRow: 5, sourceHash: stockMovementContentHash,
+        kind: "stock", occurredOn: historyDate, dateState: "known", amountState: "not-applicable", currencyState: "not-applicable",
+        quantity: "5", quantityState: "known", unit: "g", unitState: "known",
+        attributes: { relationships: [{ targetTable: "D_Catalogo_Mercaderia", status: "unique", targetSourceKey: "invoice-source-sku" }] } });
+      await db.legacyHistoryPublication.create({ data: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, snapshotId, fileHash: manifestHash,
+        mappingId: APPSHEET_HISTORY_MAPPING_ID, fingerprint: publicationFingerprint, publishedBy: ownerId, evidence: { reference: "synthetic fixture" } } });
+
+      const invoiceRef = { sourceRecordId: invoiceSourceRecordId, sourceRow: 2, sourceHash: invoiceContentHash,
+        sourceKeyHash: digest(invoiceSourceKey), hiddenId: "41" };
+      const sourceBindingHash = digest(canonicalJson({ captureId, manifestHash, dataHash, snapshotId,
+        mappingId: APPSHEET_HISTORY_MAPPING_ID, publicationFingerprint, rows: [{ ...invoiceRef, invoiceNumber: "2025|FA0040" }] }));
+      const validPreviewPayload = { captureId, manifestHash, dataHash, snapshotId, mappingId: APPSHEET_HISTORY_MAPPING_ID, publicationFingerprint,
+        sourceBindingHash, invoiceRecordCount: 1, numberedInvoiceCount: 1, unnumberedInvoiceCount: 0, duplicateInvoiceNumberCount: 0,
+        duplicateHiddenIdCount: 0, maxHiddenId: "41" };
+      const validPreviewDigest = digest(canonicalJson(validPreviewPayload));
 
       const seedRequest = envelope(captureId, "AppSheetInvoiceSequenceSeeded", {
-        captureId, snapshotId, previewDigest: "0".repeat(64), evidence: { note: "Synthetic request must remain blocked until the capture and history reconcile." },
+        captureId, snapshotId, previewDigest: validPreviewDigest, evidence: { note: "Synthetic reviewed seed fixture without its final pause gate." },
       });
       const seedRejected = await send(seedRequest);
       assert.equal(seedRejected.response.status, 423, JSON.stringify(seedRejected.body));
-      assert.equal(seedRejected.body.code, "APP_SHEET_HISTORY_BINDING_INVALID");
+      assert.equal(seedRejected.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
       assert.equal(await db.appSheetInvoiceSequence.count(), 0);
       assert.equal(await db.appSheetInvoiceNumberReservation.count(), 0);
       assert.equal(await db.operationObject.findUnique({ where: { id: captureId } }), null);
       assert.equal(await db.commandReceipt.count({ where: { requestId: seedRequest.requestId } }), 0);
       assert.equal(await db.operationAudit.count({ where: { requestId: seedRequest.requestId } }), 0);
       assert.equal(await db.operationOutbox.count({ where: { requestId: seedRequest.requestId } }), 0);
+
+      const accountId = `appsheet-final-delta-cash-${randomUUID()}`;
+      await command(envelope(accountId, "AccountCreated", { name: "Synthetic preactivation cash", currency: "ARS", kind: "cash", holder: "Fixture", purpose: "Final delta gate test" }));
+      await command(envelope(accountId, "AccountVerified", { evidence: { note: "Synthetic account verification" } }, 1));
+      const skuId = `appsheet-final-delta-sku-${randomUUID()}`;
+      const locationId = `appsheet-final-delta-location-${randomUUID()}`;
+      await db.catalogSku.create({ data: { id: skuId, code: skuId, name: "Synthetic cutover SKU", variety: "Fixture", category: "Fixture", unit: "g", sourceId: "invoice-source-sku" } });
+      await db.location.create({ data: { id: locationId, key: locationId, name: "Synthetic cutover location" } });
+
+      const assertNoCommandEffects = async (request: CommandEnvelope) => {
+        assert.equal(await db.commandReceipt.findUnique({ where: { requestId: request.requestId } }), null);
+        assert.equal(await db.operationAudit.count({ where: { requestId: request.requestId } }), 0);
+        assert.equal(await db.operationOutbox.count({ where: { requestId: request.requestId } }), 0);
+      };
+      const cashOpeningRequest = (suffix: string) => envelope(accountId, "AccountOpeningApproved", {
+        amountMinor: "1200", preparedBy: deniedId, evidence: { note: `Synthetic ${suffix} cash opening` }, sourceRecordId: cashSourceRecordId,
+      }, 2);
+      const requireBlockedOpening = async (request: CommandEnvelope) => {
+        const result = await send(request);
+        assert.equal(result.response.status, 423, JSON.stringify(result.body));
+        assert.equal(result.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
+        await assertNoCommandEffects(request);
+        const account = await db.operationAccount.findUniqueOrThrow({ where: { id: accountId } });
+        assert.equal(account.openingMinor, 0n);
+        assert.equal(account.openingApprovedBy, null);
+        assert.equal(await db.ledgerEvent.count({ where: { kind: "opening", sourceObjectId: accountId } }), 0);
+        assert.equal((await db.operationObject.findUniqueOrThrow({ where: { id: accountId } })).version, 2);
+      };
+      await requireBlockedOpening(cashOpeningRequest("ungated"));
+
+      const stockLotId = `appsheet-final-delta-lot-${randomUUID()}`;
+      const stockRequest = envelope(stockLotId, "StockOpeningRecorded", { skuId, label: "Synthetic source opening", quantity: "5", unitCost: "10",
+        costCurrency: "ARS", receivedDate: today, locationId, preparedBy: deniedId, evidence: { note: "Synthetic ungated stock opening" },
+        sourceRecordId: stockSourceRecordId });
+      const stockRejected = await send(stockRequest);
+      assert.equal(stockRejected.response.status, 423, JSON.stringify(stockRejected.body));
+      assert.equal(stockRejected.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
+      await assertNoCommandEffects(stockRequest);
+      assert.equal(await db.inventoryLot.findUnique({ where: { id: stockLotId } }), null);
+      assert.equal(await db.stockFact.count({ where: { requestId: stockRequest.requestId } }), 0);
+      assert.equal(await db.operationObject.findUnique({ where: { id: stockLotId } }), null, "the provisional lot aggregate rolls back");
+
+      const createFinalDeltaGate = async (options: { bindingCaptureId?: string; authorId?: string; stale?: boolean } = {}) => {
+        const finalDelta = { schemaVersion: 1, manualPauseStartedAt: pauseStartedAt.toISOString(), manualPauseEndedAt: null,
+          manualPauseEvidenceRef: "pause-log:synthetic-final-delta", capture: { captureId, manifestHash, dataHash,
+            firstReadAt: firstReadAt.toISOString(), verificationStartedAt: verificationStartedAt.toISOString(),
+            verificationCompletedAt: verificationCompletedAt.toISOString(), cutoffAt: captureNow.toISOString(), sourceWriteDetected: false },
+          expectedHandoffChanges: { disposition: "separate-review", reference: "delta-review:synthetic-final-delta" } };
+        if (options.stale) finalDelta.capture.manifestHash = "f".repeat(64);
+        const evidence = { humanEvidence: { reference: "synthetic gate author and reviewer" }, appSheetReplacement: { schemaVersion: 1,
+          captureId: options.bindingCaptureId ?? captureId, manifestHash, dataHash, captureDefinitionHash: null, appliedDefinitionHash: "e".repeat(64),
+          gateProof: { finalDelta } } };
+        await db.cutoverGate.upsert({ where: { id: "final-delta-reconciled" },
+          create: { id: "final-delta-reconciled", status: "approved", evidence, captureManifestId: captureId,
+            approvedBy: options.authorId ?? deniedId, reviewedBy: scopedId, approvedAt: new Date() },
+          update: { status: "approved", evidence, captureManifestId: captureId,
+            approvedBy: options.authorId ?? deniedId, reviewedBy: scopedId, approvedAt: new Date() } });
+      };
+      await createFinalDeltaGate({ bindingCaptureId: `appsreal-${"f".repeat(16)}` });
+      await requireBlockedOpening(cashOpeningRequest("wrong-capture"));
+      await createFinalDeltaGate({ stale: true });
+      await requireBlockedOpening(cashOpeningRequest("stale-proof"));
+      const inactiveGateAuthorId = "appsheet-invoice-inactive-gate-author";
+      await db.user.create({ data: { id: inactiveGateAuthorId, name: "Inactive gate author", email: `${inactiveGateAuthorId}@appsheet-invoice.test`,
+        password, role: "viewer", active: false } });
+      await createFinalDeltaGate({ authorId: inactiveGateAuthorId });
+      await requireBlockedOpening(cashOpeningRequest("inactive-gate-author"));
+
+      await createFinalDeltaGate();
+      assert.equal(await db.operationAuthority.findUnique({ where: { id: "operations" } }), null, "openings precede authority activation");
+      const cashflowOpeningRequest = cashOpeningRequest("matching-cashflow-under-approved-gate");
+      const cashflowOpeningRejected = await send(cashflowOpeningRequest);
+      assert.equal(cashflowOpeningRejected.response.status, 423, JSON.stringify(cashflowOpeningRejected.body));
+      assert.equal(cashflowOpeningRejected.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
+      assert.deepEqual(cashflowOpeningRejected.body.details?.blockers, ["cash_opening_source_is_cashflow"]);
+      await assertNoCommandEffects(cashflowOpeningRequest);
+      const accountAfterCashflow = await db.operationAccount.findUniqueOrThrow({ where: { id: accountId } });
+      assert.equal(accountAfterCashflow.openingMinor, 0n);
+      assert.equal(accountAfterCashflow.openingApprovedBy, null);
+      assert.equal((await db.operationObject.findUniqueOrThrow({ where: { id: accountId } })).version, 2);
+      assert.equal(await db.ledgerEvent.count({ where: { kind: "opening", sourceObjectId: accountId } }), 0);
+
+      const movementLotId = `appsheet-final-delta-movement-lot-${randomUUID()}`;
+      const movementRequest = envelope(movementLotId, "StockOpeningRecorded", {
+        skuId, label: "Synthetic ledger movement incorrectly proposed as opening", quantity: "5", unitCost: "10",
+        costCurrency: "ARS", receivedDate: today, locationId, preparedBy: deniedId,
+        evidence: { note: "Synthetic movement must not become an opening balance" }, sourceRecordId: stockMovementSourceRecordId,
+      });
+      const stockStateBeforeMovement = {
+        lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count(),
+        baselineBalance: await db.stockBalance.findUniqueOrThrow({ where: { id: balanceId }, select: { quantity: true, reserved: true } }),
+      };
+      const movementRejected = await send(movementRequest);
+      assert.equal(movementRejected.response.status, 423, JSON.stringify(movementRejected.body));
+      assert.equal(movementRejected.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
+      assert.deepEqual(movementRejected.body.details?.blockers, ["stock_opening_source_is_ledger_movement"]);
+      await assertNoCommandEffects(movementRequest);
+      assert.deepEqual({
+        lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count(),
+        baselineBalance: await db.stockBalance.findUniqueOrThrow({ where: { id: balanceId }, select: { quantity: true, reserved: true } }),
+      }, stockStateBeforeMovement);
+      assert.equal(await db.inventoryLot.findUnique({ where: { id: movementLotId } }), null);
+      assert.equal(await db.stockFact.count({ where: { requestId: movementRequest.requestId } }), 0);
+      assert.equal(await db.operationObject.findUnique({ where: { id: movementLotId } }), null);
+
+      await db.operationAuthority.upsert({
+        where: { id: "operations" },
+        create: { id: "operations", mode: "active", cutoverProfile: "appsheet-replacement", captureManifestId: captureId },
+        update: { mode: "active", cutoverProfile: "appsheet-replacement", captureManifestId: captureId },
+      });
 
       const manualTarget = `appsheet-replacement-manual-${randomUUID()}`;
       const manualRequest = envelope(manualTarget, "InvoiceSaved", invoiceData({ preorder: true }));

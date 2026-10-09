@@ -24,6 +24,18 @@ if(mode==="backup"&&process.env.NODE_ENV==="production"&&!key)throw new Error("E
 process.umask(0o077);
 const db=url?new PrismaClient({datasources:{db:{url:url.toString()}}}):null;
 const hash=bytes=>createHash("sha256").update(bytes).digest("hex");
+function databaseTarget(url){
+ const hostname=url.hostname.toLowerCase().replace(/^\[|\]$/g,"");
+ const host=hostname==="localhost"||hostname==="::1"||hostname.startsWith("127.")?"loopback":hostname;
+ const port=url.port||"5432",database=decodeURIComponent(url.pathname.slice(1)),schema=url.searchParams.get("schema")||"public";
+ if(!database||!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(schema))throw new Error("El destino de base o esquema no es válido");
+ const fingerprint=hash(Buffer.from(JSON.stringify({host,port,database,schema}),"utf8"));
+ return {host,port,database,schema,fingerprint};
+}
+async function requireConnectedTarget(queryable,target){
+ const [session]=await queryable.$queryRawUnsafe("SELECT current_database() AS database, current_schema() AS schema");
+ if(session?.database!==target.database||session?.schema!==target.schema)throw new Error("La conexión PostgreSQL efectiva no coincide con el destino declarado");
+}
 const files=[];
 function within(parent,child){const rel=relative(parent,child);return rel===""||rel!==".."&&!rel.startsWith(`..${sep}`)&&!isAbsolute(rel);}
 function pathsOverlap(left,right){return within(left,right)||within(right,left);}
@@ -58,10 +70,11 @@ async function readStored(manifest,entry){
  if(entry.encryption){if(!key)throw new Error("El paquete requiere su clave de respaldo");const decipher=createDecipheriv("aes-256-gcm",key,Buffer.from(entry.encryption.iv,"base64"));decipher.setAAD(Buffer.from(entry.name));decipher.setAuthTag(Buffer.from(entry.encryption.tag,"base64"));plain=Buffer.concat([decipher.update(bytes),decipher.final()]);}
  if(hash(plain)!==entry.sha256||plain.length!==entry.bytes)throw new Error("Integridad del contenido inválida");return plain;
 }
-function pg(tool,argv){
-  const exe=process.env.PG_BIN?join(process.env.PG_BIN,tool):tool;
-  const env={...process.env,PGHOST:url.hostname,PGPORT:url.port||"5432",PGUSER:decodeURIComponent(url.username),PGDATABASE:decodeURIComponent(url.pathname.slice(1)),PGPASSWORD:decodeURIComponent(url.password)};
-  for(const [parameter,variable] of [["sslmode","PGSSLMODE"],["sslrootcert","PGSSLROOTCERT"],["sslcert","PGSSLCERT"],["sslkey","PGSSLKEY"],["sslcrl","PGSSLCRL"],["ssl_min_protocol_version","PGSSLMINPROTOCOLVERSION"],["ssl_max_protocol_version","PGSSLMAXPROTOCOLVERSION"],["channel_binding","PGCHANNELBINDING"],["connect_timeout","PGCONNECT_TIMEOUT"],["application_name","PGAPPNAME"],["options","PGOPTIONS"]]){const value=url.searchParams.get(parameter);if(value)env[variable]=value;}
+function pg(tool,argv,connectionUrl=url){
+ if(!connectionUrl)throw new Error("Falta la conexión PostgreSQL para el comando de restauración");
+ const exe=process.env.PG_BIN?join(process.env.PG_BIN,tool):tool;
+  const env={...process.env,PGHOST:connectionUrl.hostname,PGPORT:connectionUrl.port||"5432",PGUSER:decodeURIComponent(connectionUrl.username),PGDATABASE:decodeURIComponent(connectionUrl.pathname.slice(1)),PGPASSWORD:decodeURIComponent(connectionUrl.password)};
+  for(const [parameter,variable] of [["sslmode","PGSSLMODE"],["sslrootcert","PGSSLROOTCERT"],["sslcert","PGSSLCERT"],["sslkey","PGSSLKEY"],["sslcrl","PGSSLCRL"],["ssl_min_protocol_version","PGSSLMINPROTOCOLVERSION"],["ssl_max_protocol_version","PGSSLMAXPROTOCOLVERSION"],["channel_binding","PGCHANNELBINDING"],["connect_timeout","PGCONNECT_TIMEOUT"],["application_name","PGAPPNAME"],["options","PGOPTIONS"]]){const value=connectionUrl.searchParams.get(parameter);if(value)env[variable]=value;}
  return new Promise((done,fail)=>{let message="";const child=spawn(exe,argv,{env,stdio:["ignore","ignore","pipe"]});child.stderr.on("data",b=>{message+=b.toString();});child.on("error",()=>fail(new Error(`No se pudo iniciar ${tool}; se requiere cliente PostgreSQL 18`)));child.on("exit",code=>code===0?done():fail(new Error(`${tool} falló (${code}); revisá el destino y permisos sin copiar credenciales (${message.replace(/postgres(?:ql)?:\/\/\S+/g,"[redacted]").slice(0,600)})`)));});
 }
 const counts=async tx=>({orders:await tx.operationOrder.count(),stockFacts:await tx.stockFact.count(),ledgerEvents:await tx.ledgerEvent.count(),commandReceipts:await tx.commandReceipt.count(),legacyRecords:await tx.legacySourceRecord.count(),legacyHistoricalFacts:await tx.legacyHistoricalFact.count(),legacyHistoryPublications:await tx.legacyHistoryPublication.count(),documents:await tx.operationDocument.count(),offlineBackups:await tx.offlineBackup.count()});
@@ -161,6 +174,85 @@ async function requirePostgresServerMajor18(tx){
  if(!Number.isSafeInteger(numeric)||Math.floor(numeric/10000)!==18)throw new Error("La base debe ejecutar PostgreSQL 18 para crear o restaurar el paquete");
  return {major:18,version:String(rows[0].version)};
 }
+function requireLocalValidationConnection(raw){
+ if(typeof raw!=="string"||!raw)throw new Error("La restauración remota requiere RESTORE_VALIDATION_DATABASE_URL loopback para prevalidar el paquete antes de escribir");
+ let validationUrl;
+ try{validationUrl=new URL(raw);}catch{throw new Error("RESTORE_VALIDATION_DATABASE_URL debe ser una conexión PostgreSQL loopback dedicada");}
+ if(!["postgres:","postgresql:"].includes(validationUrl.protocol))throw new Error("RESTORE_VALIDATION_DATABASE_URL debe ser una conexión PostgreSQL loopback dedicada");
+ const target=authorizeRestoreDestination(raw,{});
+ const hostname=validationUrl.hostname.toLowerCase().replace(/^\[|\]$/g,"");
+ const database=decodeURIComponent(validationUrl.pathname.slice(1));
+ if(target.kind!=="loopback-rehearsal"||!(hostname==="localhost"||hostname==="::1"||hostname.startsWith("127."))||!/^bombo_ui_[a-z0-9_-]+$/i.test(database))
+  throw new Error("RESTORE_VALIDATION_DATABASE_URL debe apuntar a una base loopback bombo_ui_ dedicada");
+ validationUrl.searchParams.set("schema","public");
+ return validationUrl;
+}
+async function validateRestoredState(validationDb,expected,manifest){
+ const restoredState=await validationDb.$transaction(async tx=>{
+  await tx.$executeRawUnsafe("SET LOCAL TIME ZONE 'UTC'");
+  return {migrations:await validateAppliedMigrations(tx,expected),financialFingerprints:await financialFingerprints(tx),counts:await counts(tx)};
+ },{isolationLevel:"RepeatableRead",timeout:300000});
+ if(!sameMigrations(restoredState.migrations,manifest.migrations))throw new Error("Las migraciones restauradas en la validación previa no coinciden con el manifiesto");
+ if(!sameFinancialFingerprints(restoredState.financialFingerprints,manifest.financialFingerprints))throw new Error("Las huellas financieras restauradas en la validación previa no coinciden con el manifiesto");
+ if(JSON.stringify(restoredState.counts)!==JSON.stringify(manifest.counts))throw new Error("Los conteos restaurados en la validación previa no coinciden con el manifiesto");
+ return restoredState;
+}
+async function validateRestoredDocuments(validationDb,manifest){
+ const documents=await validationDb.operationDocument.findMany({where:{state:"available"},select:{id:true,objectKey:true,objectVersion:true,checksum:true,bytes:true,mediaType:true}});
+ if(documents.length!==manifest.objects.length||new Set(manifest.objects.map(object=>object?.id)).size!==documents.length)
+  throw new Error("El manifiesto de objetos no coincide con los documentos disponibles de la validación previa");
+ const documentsById=new Map(documents.map(document=>[document.id,document]));
+ for(const object of manifest.objects){
+  const document=object&&typeof object.id==="string"?documentsById.get(object.id):undefined;
+  if(!document||document.objectKey!==object.objectKey||document.objectVersion!==object.objectVersion||document.checksum!==object.checksum||document.bytes!==object.bytes||document.mediaType!==object.mediaType)
+   throw new Error("Las identidades de objetos del manifiesto no coinciden con la base de la validación previa");
+  const entry=manifest.files.find(file=>file.name===object.file);
+  const bytes=await readStored(manifest,entry);
+  if(bytes.length!==document.bytes||hash(bytes)!==document.checksum)
+   throw new Error("El contenido de un objeto no coincide con los metadatos de la validación previa");
+ }
+}
+async function preflightRestore(manifest,expected,dumpPath,validationBaseUrl){
+ const baseTarget=authorizeRestoreDestination(validationBaseUrl.toString(),{});
+ const hostname=validationBaseUrl.hostname.toLowerCase().replace(/^\[|\]$/g,"");
+ if(baseTarget.kind!=="loopback-rehearsal"||!(hostname==="localhost"||hostname==="::1"||hostname.startsWith("127.")))
+  throw new Error("La validación previa requiere un servidor PostgreSQL 18 loopback");
+ const database=decodeURIComponent(validationBaseUrl.pathname.slice(1));
+ if(!/^bombo_ui_[a-z0-9_-]+$/i.test(database))throw new Error("La conexión de validación previa debe apuntar a una base bombo_ui_ dedicada");
+ await requirePostgresMajor18("createdb");
+ await requirePostgresMajor18("dropdb");
+ const baseDb=new PrismaClient({datasources:{db:{url:validationBaseUrl.toString()}}});
+ let validationDb,created=false,primaryError,cleanupError;
+ const validationDatabase=`bombo_ui_restore_validation_${randomBytes(12).toString("hex")}`;
+ try{
+  await requireConnectedTarget(baseDb,databaseTarget(validationBaseUrl));
+  await requirePostgresServerMajor18(baseDb);
+  await pg("createdb",["--maintenance-db=postgres","--template=template0",validationDatabase],validationUrlForDatabase(validationBaseUrl,"postgres"));
+  created=true;
+  const validationUrl=validationUrlForDatabase(validationBaseUrl,validationDatabase);
+  validationUrl.searchParams.set("schema",manifest.schema);
+  validationDb=new PrismaClient({datasources:{db:{url:validationUrl.toString()}}});
+  await requireEmptyRestoreDatabase(validationDb);
+  await requirePostgresServerMajor18(validationDb);
+  await pg("pg_restore",["--clean","--if-exists","--single-transaction","--exit-on-error","--no-owner","--no-privileges","--dbname",validationDatabase,dumpPath],validationUrl);
+  await validateRestoredState(validationDb,expected,manifest);
+  await validateRestoredDocuments(validationDb,manifest);
+ }catch(error){primaryError=error;}
+ try{await validationDb?.$disconnect();}catch(error){cleanupError=error;}
+ if(created){
+  try{await pg("dropdb",["--if-exists","--force","--maintenance-db=postgres",validationDatabase],validationUrlForDatabase(validationBaseUrl,"postgres"));}
+  catch(error){cleanupError=cleanupError?new AggregateError([cleanupError,error]):error;}
+ }
+ try{await baseDb.$disconnect();}catch(error){cleanupError=cleanupError?new AggregateError([cleanupError,error]):error;}
+ if(primaryError&&cleanupError)throw new AggregateError([primaryError,cleanupError],"La validación previa falló y no se pudo limpiar por completo su base temporal");
+ if(cleanupError)throw cleanupError;
+ if(primaryError)throw primaryError;
+}
+function validationUrlForDatabase(baseUrl,database){
+ const connectionUrl=new URL(baseUrl);
+ connectionUrl.pathname=`/${database}`;
+ return connectionUrl;
+}
 async function backupReuseIndex(snapshotAt){
  const path=process.env.BACKUP_OBJECT_REUSE_INDEX;
  if(!path)return undefined;
@@ -175,6 +267,7 @@ async function backupReuseIndex(snapshotAt){
 try{
  const expected=await expectedMigrations();
  if(mode==="backup"){
+  const target=databaseTarget(url);
   const {getPrivateObject}=await import("../dist-server/server/operations/object-store.js");
   try{await stat(directory);throw new Error("El destino ya existe; creá un directorio nuevo");}catch(e){if(e.code!=="ENOENT")throw e;}
   await requirePostgresMajor18("pg_dump");
@@ -183,14 +276,14 @@ try{
   try{
    result=await db.$transaction(async tx=>{
     const database=await requirePostgresServerMajor18(tx);
+    await requireConnectedTarget(tx,target);
     const [row]=await tx.$queryRawUnsafe("SELECT pg_export_snapshot() AS snapshot, statement_timestamp() AS snapshot_at");
     await tx.$executeRawUnsafe("SET LOCAL TIME ZONE 'UTC'");
-    const schema=url.searchParams.get("schema")||"public";
-    if(!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(schema))throw new Error("Esquema inválido");
+    const schema=target.schema;
     const migrations=await validateAppliedMigrations(tx,expected);
     await pg("pg_dump",["--format=custom","--no-owner","--no-privileges",`--schema=${schema}`,`--snapshot=${row.snapshot}`,"--file",temporary]);
     const documents=await tx.operationDocument.findMany({where:{state:"available"},select:{id:true,objectKey:true,objectVersion:true,checksum:true,bytes:true,mediaType:true}});
-    return {schema,database,migrations,financialFingerprints:await financialFingerprints(tx),counts:await counts(tx),documents,snapshotAt:row.snapshot_at.toISOString()};
+    return {schema,targetFingerprint:target.fingerprint,database,migrations,financialFingerprints:await financialFingerprints(tx),counts:await counts(tx),documents,snapshotAt:row.snapshot_at.toISOString()};
    },{isolationLevel:"RepeatableRead",timeout:300000});
    files.push(await storeDumpStream(temporary,join(directory,"database.dump"),"database.dump",key));
   }finally{await rm(temporary,{force:true});}
@@ -204,7 +297,7 @@ try{
   });
   files.push(...objectPlan.files);
   const objects=objectPlan.objects;
-  const manifest={schemaVersion:2,startedAt,snapshotAt:result.snapshotAt,finishedAt:new Date().toISOString(),schema:result.schema,databaseMajor:result.database.major,databaseVersion:result.database.version,migrations:result.migrations,financialFingerprints:result.financialFingerprints,counts:result.counts,files,objects,encrypted:Boolean(key),scope:"confirmed-server-state-only"};
+  const manifest={schemaVersion:2,startedAt,snapshotAt:result.snapshotAt,finishedAt:new Date().toISOString(),schema:result.schema,targetFingerprint:result.targetFingerprint,databaseMajor:result.database.major,databaseVersion:result.database.version,migrations:result.migrations,financialFingerprints:result.financialFingerprints,counts:result.counts,files,objects,encrypted:Boolean(key),scope:"confirmed-server-state-only"};
   await writeFile(join(directory,"manifest.json"),JSON.stringify(manifest,null,2),{flag:"wx",mode:0o600});
   await writeFile(join(directory,"manifest.sha256"),hash(await readFile(join(directory,"manifest.json"))),{flag:"wx",mode:0o600});
   if(key)await writeFile(join(directory,"manifest.hmac"),createHmac("sha256",key).update(await readFile(join(directory,"manifest.json"))).digest("hex"),{flag:"wx",mode:0o600});
@@ -212,6 +305,7 @@ try{
  }else{
   const manifestBytes=await readFile(join(directory,"manifest.json"));if(hash(manifestBytes)!==(await readFile(join(directory,"manifest.sha256"),"utf8")).trim())throw new Error("Manifiesto alterado");
   const manifest=JSON.parse(manifestBytes);if(manifest.schemaVersion!==2||!Array.isArray(manifest.files)||!Array.isArray(manifest.objects))throw new Error("Formato de respaldo no reconocido");
+  if(manifest.targetFingerprint!==undefined&&(typeof manifest.targetFingerprint!=="string"||!/^[a-f0-9]{64}$/.test(manifest.targetFingerprint)))throw new Error("La huella del destino del respaldo es inválida");
   if(!sameMigrations(manifest.migrations,expected))throw new Error("Las migraciones del paquete no coinciden con el esquema esperado");
   if(!validFinancialFingerprints(manifest.financialFingerprints))throw new Error("Las huellas financieras del manifiesto son inválidas");
   if(manifest.encrypted){if(!key)throw new Error("El respaldo requiere su clave");const signature=Buffer.from((await readFile(join(directory,"manifest.hmac"),"utf8")).trim(),"hex"),expected=createHmac("sha256",key).update(manifestBytes).digest();if(signature.length!==expected.length||!timingSafeEqual(signature,expected))throw new Error("Autenticación del manifiesto inválida");}
@@ -236,9 +330,22 @@ try{
     }))throw new Error("Falta un archivo cifrado del paquete y su referencia cloud no está autenticada");
    }
   }
-  if(mode==="verify"){console.log(JSON.stringify({mode:"verify",files:manifest.files.length,integrity:true,migrationsValid:true,scope:manifest.scope}));}
+  if(mode==="verify"){
+   const configuredTarget=url?databaseTarget(url):null;
+   let targetVerified=false;
+   if(configuredTarget&&manifest.targetFingerprint){
+    if(manifest.targetFingerprint!==configuredTarget.fingerprint)throw new Error("El respaldo pertenece a otro destino PostgreSQL");
+    await requireConnectedTarget(db,configuredTarget);
+    targetVerified=true;
+   }
+   console.log(JSON.stringify({mode:"verify",files:manifest.files.length,integrity:true,migrationsValid:true,scope:manifest.scope,...(url?{targetVerified,...(targetVerified?{targetFingerprint:manifest.targetFingerprint}:{})}:{})}));
+  }
   else{
    const restoreTarget=authorizeRestoreDestination(raw,process.env);
+   const validationBaseUrl=restoreTarget.kind==="allowlisted-remote"
+    ?requireLocalValidationConnection(process.env.RESTORE_VALIDATION_DATABASE_URL)
+    :new URL(url);
+   if(restoreTarget.kind==="loopback-rehearsal")validationBaseUrl.searchParams.set("schema","public");
    if(process.env.RESTORE_OBJECT_PROVIDER&&process.env.RESTORE_OBJECT_PROVIDER!=="s3")throw new Error("RESTORE_OBJECT_PROVIDER sólo admite s3 para restauración coordinada");
    const coordinated=process.env.RESTORE_OBJECT_PROVIDER==="s3";
    let restoreBucket,restoreRegion,restoreObjectKmsKeyArn,destinationClient;
@@ -261,14 +368,18 @@ try{
    await requirePostgresServerMajor18(db);
    await requirePostgresMajor18("pg_restore");
    if(!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(manifest.schema))throw new Error("Esquema del paquete inválido");
-   if(restoreObjectRoot){await mkdir(restoreObjectRoot,{recursive:true,mode:0o700});await validateRestoreObjectRoot(directory);process.env.PRIVATE_OBJECT_ROOT=restoreObjectRoot;process.env.PRIVATE_S3_BUCKET="";process.env.PRIVATE_OBJECT_PROVIDER="local";process.env.PRIVATE_OBJECT_IMMUTABLE_WRITES="false";process.env.NODE_ENV="test";}
-   else{process.env.PRIVATE_OBJECT_PROVIDER="s3";process.env.PRIVATE_S3_BUCKET=process.env.RESTORE_OBJECT_BUCKET;process.env.PRIVATE_S3_REGION=process.env.RESTORE_OBJECT_REGION;process.env.PRIVATE_S3_ENDPOINT="";process.env.PRIVATE_S3_PATH_STYLE="false";process.env.PRIVATE_S3_KMS_KEY_ARN=restoreObjectKmsKeyArn;process.env.PRIVATE_OBJECT_IMMUTABLE_WRITES="true";}
-   const {getPrivateObject,putPrivateObject}=await import("../dist-server/server/operations/object-store.js");
-   // A newly created database already has an empty public schema. The dump restores it.
-   // No CASCADE: an unexpected object blocks this operation instead of being removed.
-   await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${manifest.schema}"`);
-   const started=Date.now(),temporary=join(directory,`restore-${randomBytes(8).toString("hex")}.tmp`);
-   try{await verifyDumpStream(join(directory,"database.dump"),manifest.files.find(f=>f.name==="database.dump"),key,temporary);await pg("pg_restore",["--exit-on-error","--no-owner","--no-privileges","--dbname",url.pathname.slice(1),temporary]);}finally{await rm(temporary,{force:true});}
+   const started=Date.now(),temporary=join(directory,`restore-${randomBytes(8).toString("hex")}.tmp`);let objectStore;
+   try{
+    await verifyDumpStream(join(directory,"database.dump"),manifest.files.find(f=>f.name==="database.dump"),key,temporary);
+    await preflightRestore(manifest,expected,temporary,validationBaseUrl);
+    if(restoreObjectRoot){await mkdir(restoreObjectRoot,{recursive:true,mode:0o700});await validateRestoreObjectRoot(directory);process.env.PRIVATE_OBJECT_ROOT=restoreObjectRoot;process.env.PRIVATE_S3_BUCKET="";process.env.PRIVATE_OBJECT_PROVIDER="local";process.env.PRIVATE_OBJECT_IMMUTABLE_WRITES="false";process.env.NODE_ENV="test";}
+    else{process.env.PRIVATE_OBJECT_PROVIDER="s3";process.env.PRIVATE_S3_BUCKET=process.env.RESTORE_OBJECT_BUCKET;process.env.PRIVATE_S3_REGION=process.env.RESTORE_OBJECT_REGION;process.env.PRIVATE_S3_ENDPOINT="";process.env.PRIVATE_S3_PATH_STYLE="false";process.env.PRIVATE_S3_KMS_KEY_ARN=restoreObjectKmsKeyArn;process.env.PRIVATE_OBJECT_IMMUTABLE_WRITES="true";}
+    objectStore=await import("../dist-server/server/operations/object-store.js");
+    // PostgreSQL schema changes are atomic in pg_restore; private object writes have a separate lifecycle.
+    await requireEmptyRestoreDatabase(db);
+    await pg("pg_restore",["--clean","--if-exists","--single-transaction","--exit-on-error","--no-owner","--no-privileges","--dbname",url.pathname.slice(1),temporary]);
+   }finally{await rm(temporary,{force:true});}
+   const {getPrivateObject,putPrivateObject}=objectStore;
    const originalDocuments=await db.operationDocument.findMany({where:{state:"available"},select:{id:true,objectKey:true,objectVersion:true,checksum:true,bytes:true,mediaType:true}});
    if(originalDocuments.length!==manifest.objects.length||new Set(manifest.objects.map(o=>o.id)).size!==originalDocuments.length)throw new Error("El manifiesto omite o duplica documentos");
    const objectMappings=[];
@@ -313,7 +424,7 @@ try{
     const audit=await db.operationAudit.create({data:{actorId:"restore-operator",action:"restore.verification",objectId:"operations",details:{manifestHash,originalSnapshotAt:manifest.snapshotAt,objectCount:orderedMappings.length,objectMappingsSha256,scope:"verification-only"}}});
     auditId=audit.id;
    }
-   console.log(JSON.stringify({mode:"restore",integrity:true,migrationsValid:true,committed:coordinated,financialFingerprints:restoredFinancialFingerprints,counts:restored,objects:manifest.objects.length,objectReferencesCommitted:coordinated,objectReferenceCount:coordinated?orderedMappings.length:0,objectsVerified:orderedMappings.length,objectMappingsSha256,auditId,manifestHash,destinationBucket:coordinated?restoreBucket:undefined,elapsedMilliseconds:Date.now()-started,scope:coordinated?"coordinated-cloud":"verification-only"}));
+   console.log(JSON.stringify({mode:"restore",integrity:true,preflightValidated:true,migrationsValid:true,committed:coordinated,financialFingerprints:restoredFinancialFingerprints,counts:restored,objects:manifest.objects.length,objectReferencesCommitted:coordinated,objectReferenceCount:coordinated?orderedMappings.length:0,objectsVerified:orderedMappings.length,objectMappingsSha256,auditId,manifestHash,destinationBucket:coordinated?restoreBucket:undefined,elapsedMilliseconds:Date.now()-started,scope:coordinated?"coordinated-cloud":"verification-only"}));
   }
  }
 }finally{await db?.$disconnect();key?.fill(0);}

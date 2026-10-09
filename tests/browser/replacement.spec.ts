@@ -275,11 +275,54 @@ test("route-order editing is local until confirmed and stale drafts require a fr
   for (const id of expectedFinalOrder) expect(finalState.versions[id]).toBe(before.versions[id]! + 2);
 });
 
+const replacementCapture = {
+  manifestHash: "a".repeat(64),
+  dataHash: "b".repeat(64),
+  definitionHash: "c".repeat(64),
+  captureId: `appsreal-${"a".repeat(16)}`,
+  sourceSystem: "appsheet-live-verified",
+  stability: {
+    stable: true,
+    metadataStable: true,
+    headersStable: true,
+    pageHashesStable: true,
+    scanComplete: true,
+    cutoverEligible: true,
+    changedPages: 0,
+    failedPages: 0,
+    unresolvedFormulaCount: 0,
+  },
+  cutoffAt: "2026-10-05T12:00:00.000Z",
+  dataSheetCount: 1,
+  dataPageCount: 1,
+  dataRecordCount: 1,
+  dataFormulaCount: 0,
+  dataUnresolvedFormulaCount: 0,
+  definitionTableCount: 1,
+  definitionColumnCount: 1,
+  definitionSliceCount: 0,
+  definitionViewCount: 1,
+  definitionActionCount: 0,
+  definitionBotCount: 0,
+  definitionWorkflowRuleCount: 0,
+  definitionFormatRuleCount: 0,
+};
+
 function gateRecord(id: string) {
   return {
     id,
     status: "approved",
-    evidence: { note: `Revisión sintética de ${id}.` },
+    evidence: {
+      humanEvidence: { note: `Revisión sintética de ${id}.` },
+      appSheetReplacement: {
+        schemaVersion: 1,
+        captureId: replacementCapture.captureId,
+        manifestHash: replacementCapture.manifestHash,
+        dataHash: replacementCapture.dataHash,
+        captureDefinitionHash: replacementCapture.definitionHash,
+      },
+    },
+    captureManifestId: replacementCapture.captureId,
     approvedBy: "01000000-0000-4000-8000-000000000001",
     reviewedBy: "01000000-0000-4000-8000-000000000002",
     approvedAt: "2026-10-05T12:00:00.000Z",
@@ -291,12 +334,12 @@ test("replacement guide shows missing evidence and never declares cutover comple
   const authorityReads: string[] = [];
   const writes: string[] = [];
 
-  // Mirrors GET /api/operations/authority: { authority, gates }.
+  // Mirrors GET /api/operations/authority: { authority, gates, captures, versions }.
   await page.route("**/api/operations/authority", async route => {
     expect(route.request().method()).toBe("GET");
     authorityReads.push(route.request().url());
-    const gates = cutoverGateIds
-      .slice(0, allApproved ? cutoverGateIds.length : cutoverGateIds.length - 1)
+    const reviewableGateIds = cutoverGateIds.filter(id => id !== "legacy-writes-disabled");
+    const gates = (allApproved ? reviewableGateIds : reviewableGateIds.slice(0, -1))
       .map(gateRecord);
     await route.fulfill({
       status: 200,
@@ -309,9 +352,13 @@ test("replacement guide shows missing evidence and never declares cutover comple
           firstRealWriteAt: null,
           approvedBy: null,
           evidence: null,
+          cutoverProfile: "appsheet-replacement",
+          captureManifestId: null,
           updatedAt: "2026-10-05T12:00:00.000Z",
         },
         gates,
+        captures: [replacementCapture],
+        versions: Object.fromEntries([...cutoverGateIds, "operations"].map(id => [id, 0])),
       }),
     });
   });
@@ -328,10 +375,18 @@ test("replacement guide shows missing evidence and never declares cutover comple
   const guide = page.locator(".rr-readiness");
   await expect(guide.getByRole("heading", { name: "Revisión del reemplazo total" })).toBeVisible();
   await expect(guide.locator(".rr-gate")).toHaveCount(14);
-  await expect(guide.getByText("Revisión registrada", { exact: true })).toHaveCount(13);
+  const capturePicker = page.getByLabel("Captura AppSheet registrada");
+  await capturePicker.selectOption(replacementCapture.captureId);
+  await expect(capturePicker).toHaveValue(replacementCapture.captureId);
+  await expect(guide.locator(".rr-authority").filter({ hasText: "Captura seleccionada" }))
+    .toContainText(replacementCapture.captureId);
+  await expect(guide.getByText("Revisión registrada", { exact: true })).toHaveCount(12);
   await expect(guide.getByText("Sin evidencia registrada", { exact: true })).toHaveCount(1);
+  await expect(guide.getByText("No se declara", { exact: true })).toHaveCount(1);
   await expect(guide.locator(".rr-gate").filter({ hasText: "Decisión de traspaso" }))
     .toContainText("Sin evidencia registrada");
+  await expect(guide.locator(".rr-gate").filter({ hasText: "Retiro de escrituras anteriores" }))
+    .toContainText("No se declara");
   await expect(guide.locator(".rr-boundary"))
     .toContainText("la guía no declara por sí sola que el reemplazo esté ejecutado");
 
@@ -341,7 +396,12 @@ test("replacement guide shows missing evidence and never declares cutover comple
   );
   await page.getByRole("button", { name: "Actualizar consola" }).click();
   expect((await refreshedAuthority).status()).toBe(200);
-  await expect(guide.getByText("Revisión registrada", { exact: true })).toHaveCount(14);
+  await expect(capturePicker).toHaveValue(replacementCapture.captureId);
+  await expect(guide.getByText("Revisión registrada", { exact: true })).toHaveCount(13);
+  await expect(guide.getByText("Sin evidencia registrada", { exact: true })).toHaveCount(0);
+  await expect(guide.getByText("No se declara", { exact: true })).toHaveCount(1);
+  await expect(guide.locator(".rr-gate").filter({ hasText: "Retiro de escrituras anteriores" }))
+    .toContainText("No se declara");
   await expect(guide.locator(".rr-boundary"))
     .toContainText("la guía no declara por sí sola que el reemplazo esté ejecutado");
   await expect(guide.getByRole("heading", { name: /reemplazo completado|corte realizado/i })).toHaveCount(0);

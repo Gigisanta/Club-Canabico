@@ -9,7 +9,7 @@ import { APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM, APPSHEET_H
 import { appSheetDefinitionInventorySchema } from "../../shared/operations/appsheet-definition.js";
 import { APPSHEET_EXPECTED_LIVE_APP_ID, appSheetAppliedDefinitionHash } from "./appsheet-canonical.js";
 import { legacyPayloadHash } from "./legacy-upload-contract.js";
-import { registerCommand, OperationError, json, audit, capabilities, requireCapability, objectId, evidence, civilDate, requireMemberScope, requireDocumentScope, objectScope, type CommandContext } from "./core.js";
+import { registerCommand, OperationError, json, audit, capabilities, requireCapability, objectId, evidence, civilDate, requireMemberScope, requireDocumentScope, objectScope, type CommandContext, type Tx } from "./core.js";
 import { commercialAddress, commercialPreferences } from "./member-fields.js";
 import { canManageDecisionInputAttestations } from "./access-snapshot.js";
 const profile = z.enum(["owner","finance","commercial","stock","logistics","driver","cashier","clinical","viewer"]);
@@ -24,8 +24,8 @@ const appSheetReadinessError = (blocker: string, details: Record<string, unknown
  new OperationError(423,"APPSHEET_REPLACEMENT_NOT_READY","La autoridad Bombo requiere evidencia completa y conciliada de AppSheet.",{blockers:[blocker],...details});
 
 /** Revalidate capture fields retained in the database. Ingestion verifies the source manifest, including its private evidence and hash contract. */
-async function requireStableAppSheetCapture(ctx:CommandContext,captureId:string){
- const capture=await ctx.tx.appSheetCaptureManifest.findUnique({where:{captureId}});
+async function requireStableAppSheetCapture(tx:Tx,captureId:string){
+ const capture=await tx.appSheetCaptureManifest.findUnique({where:{captureId}});
  if(!capture||capture.sourceSystem!==APPSHEET_CANONICAL_SOURCE_SYSTEM||capture.sourceId!==capture.spreadsheetId||
     capture.captureId!==`appsreal-${capture.manifestHash.slice(0,16)}`||!hashPattern.test(capture.metadataHash)||!hashPattern.test(capture.headersHash)||
     !hashPattern.test(capture.manifestHash)||!hashPattern.test(capture.dataHash)||capture.definitionHash!==null||capture.definitionCoverage!==null)
@@ -47,7 +47,7 @@ async function requireStableAppSheetCapture(ctx:CommandContext,captureId:string)
   throw appSheetReadinessError("capture_manifest_shape_invalid");
  const stableCounts=["firstPassPages","verifiedPages","matchedPages"] as const;
  if(stability.stable!==true||stability.cutoverEligible!==true||stability.metadataStable!==true||stability.headersStable!==true||stability.pageHashesStable!==true||stability.scanComplete!==true||
-    stability.changedPages!==0||stability.failedPages!==0||stability.missingPages!==0||stability.unresolvedFormulaCount!==0||stability.sourceWriteDetected===true||
+    stability.changedPages!==0||stability.failedPages!==0||stability.missingPages!==0||stability.unresolvedFormulaCount!==0||stability.sourceWriteDetected!==false||
     stableCounts.some(key=>typeof stability[key]!=="number"||stability[key]!==capture.dataPageCount)||
     capture.dataSheetCount!==sheets.length||capture.dataPageCount!==pages.length||capture.dataPageCount===0||capture.dataUnresolvedFormulaCount!==0||
     coverage.metadataStable!==true||coverage.headersStableAll!==true||coverage.failedPages!==0||coverage.changedPages!==0||coverage.unresolvedFormulaCount!==0)
@@ -185,8 +185,35 @@ type AppSheetReplacementProof={
  master:{id:string;fileHash:string;sourceRecords:number;projectionHash:string;commitSha:string;technicalReviewHash:string;backupManifestHash:string};
  history:{id:string;fileHash:string;sourceRecords:number;facts:number;publicationFingerprint:string;projectionHash:string;commitSha:string;technicalReviewHash:string};
 };
+/** Require the final AppSheet pause gate before using capture-backed opening or numbering data. */
+export async function requireApprovedAppSheetFinalDeltaGate(tx:Tx,captureId:string){
+ const gate=await tx.cutoverGate.findUnique({where:{id:"final-delta-reconciled"}});
+ if(!gate||gate.status!=="approved"||gate.captureManifestId!==captureId||!gate.approvedBy||!gate.reviewedBy||
+    gate.approvedBy===gate.reviewedBy||!gate.approvedAt||!Number.isFinite(gate.approvedAt.getTime()))
+  throw appSheetReadinessError("final_delta_gate_missing_or_invalid",{captureId});
+ const author=await tx.user.findUnique({where:{id:gate.approvedBy},select:{id:true,active:true}});
+ const reviewer=await tx.user.findUnique({where:{id:gate.reviewedBy},select:{id:true,active:true}});
+ if(!author?.active||!reviewer?.active||author.id===reviewer.id)
+  throw appSheetReadinessError("final_delta_gate_human_review_invalid",{captureId});
+ const capture=await requireStableAppSheetCapture(tx,captureId);
+ const envelope=asJsonObject(gate.evidence),binding=envelope&&asJsonObject(envelope.appSheetReplacement);
+ if(!binding||binding.schemaVersion!==1||binding.captureId!==capture.captureId||binding.manifestHash!==capture.manifestHash||binding.dataHash!==capture.dataHash)
+  throw appSheetReadinessError("final_delta_capture_binding_mismatch",{captureId});
+ const gateProof=asJsonObject(binding.gateProof),stored=gateProof&&asJsonObject(gateProof.finalDelta);
+ const expectedChanges=stored&&asJsonObject(stored.expectedHandoffChanges);
+ const parsed=stored?finalDeltaReviewInputSchema.safeParse({manualPauseStartedAt:stored.manualPauseStartedAt,
+  manualPauseEndedAt:stored.manualPauseEndedAt,manualPauseEvidenceRef:stored.manualPauseEvidenceRef,
+  expectedHandoffChangesRef:expectedChanges?.reference}):null;
+ if(!stored||!parsed?.success)throw appSheetReadinessError("final_delta_pause_or_fresh_capture_evidence_invalid",{captureId});
+ let current:Record<string,unknown>;
+ try{current=finalDeltaProofForCapture(capture,parsed.data);}catch{
+  throw appSheetReadinessError("final_delta_pause_or_fresh_capture_evidence_invalid",{captureId});
+ }
+ if(hashJson(stored)!==hashJson(current))throw appSheetReadinessError("final_delta_pause_or_fresh_capture_evidence_invalid",{captureId});
+ return capture;
+}
 async function requireVerifiedAppSheetReplacement(ctx:CommandContext,captureId:string,options:{allowPendingObjects?:boolean}={}):Promise<AppSheetReplacementProof>{
- const capture=await requireStableAppSheetCapture(ctx,captureId);
+ const capture=await requireStableAppSheetCapture(ctx.tx,captureId);
  const masters=await ctx.tx.legacyImportSnapshot.findMany({where:{sourceSystem:APPSHEET_CANONICAL_SOURCE_SYSTEM,captureManifestId:capture.captureId,fileHash:capture.manifestHash,importerVersion:APPSHEET_CANONICAL_IMPORTER_VERSION}});
  if(masters.length!==1)throw appSheetReadinessError("canonical_master_snapshot_missing_or_ambiguous");
  const master=masters[0]!;
@@ -383,7 +410,7 @@ export async function requireAppSheetOpeningSourceRecord(ctx:CommandContext,sour
   throw appSheetReadinessError("opening_source_record_not_historical_capture");
  if(captureId&&captureId!==source.snapshot.captureManifestId)throw appSheetReadinessError("opening_source_record_capture_mismatch");
  captureId=source.snapshot.captureManifestId;
- const capture=await requireStableAppSheetCapture(ctx,captureId);
+ const capture=await requireApprovedAppSheetFinalDeltaGate(ctx.tx,captureId);
  if(source.fileHash!==capture.manifestHash||source.snapshot.importerVersion!==APPSHEET_HISTORY_IMPORTER_VERSION||source.snapshot.status!=="reviewed"||!source.snapshot.reviewedBy||source.snapshot.createdBy===source.snapshot.reviewedBy)
   throw appSheetReadinessError("opening_source_record_not_reviewed_for_capture");
  const reviewer=await ctx.tx.user.findUnique({where:{id:source.snapshot.reviewedBy},select:{active:true}});
@@ -396,9 +423,11 @@ export async function requireAppSheetOpeningSourceRecord(ctx:CommandContext,sour
  if(!publication||publication.snapshotId!==source.snapshotId||publication.fileHash!==capture.manifestHash||publication.mappingId!==APPSHEET_HISTORY_MAPPING_ID||fact?.sourceHash!==source.contentHash||openExceptions!==0)
   throw appSheetReadinessError("opening_source_history_publication_or_hash_missing");
  if(expected.kind==="cash"){
+  if(["Movimiento","Movimiento_Nueva"].includes(source.sourceTable))throw appSheetReadinessError("cash_opening_source_is_cashflow");
   if(!["Movimiento","Movimiento_Nueva"].includes(source.sourceTable)||fact.kind!=="cash"||fact.amountState!=="known"||fact.currencyState!=="known"||fact.amountMinor!==expected.amountMinor||fact.currency!==expected.currency)
    throw appSheetReadinessError("cash_opening_source_value_mismatch");
  }else{
+  if(source.sourceTable==="Mov_Stock1")throw appSheetReadinessError("stock_opening_source_is_ledger_movement");
   if(fact.quantityState!=="known"||fact.unitState!=="known"||!fact.quantity?.equals(expected.quantity??"")||fact.unit!==expected.unit)
    throw appSheetReadinessError("stock_opening_source_quantity_or_unit_mismatch");
   const attributes=asJsonObject(fact.attributes),relationships=attributes&&Array.isArray(attributes.relationships)?attributes.relationships.map(asJsonObject):[];

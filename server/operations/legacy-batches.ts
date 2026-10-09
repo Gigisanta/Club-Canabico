@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import { db } from "../db.js";
 import { executeCommand, registerCommand, requireCapability, OperationError, envelopeSchema, json, wire, type CommandContext } from "./core.js";
+import { requireFullLegacySourceScope } from "./legacy-source-policy.js";
 import { sourceRecordSchema } from "./legacy-source-contract.js";
 import { containsRecognizableCredential } from "./legacy-reader.js";
 import { LEGACY_CHUNK_BYTES, LEGACY_CHUNK_RECORDS, LEGACY_UPLOAD_BYTES, legacyPayloadHash } from "./legacy-upload-contract.js";
@@ -150,10 +151,23 @@ for (const [suffix, command] of [["chunks", "LegacyUploadChunkStored"], ["finali
   res.json(await executeCommand(req.user, envelope, async ctx => { ctx.requestBytes = req.rawBodyBytes; }));
 });
 legacyBatchRoutes.get("/:id", async (req, res) => {
-  await requireCapability(db, req.user, "imports.write").catch(async () => requireCapability(db, req.user, "imports.review"));
-  const snapshot = await db.legacyImportSnapshot.findUnique({ where: { id: id.parse(req.params.id) }, include: { upload: { include: { chunks: { select: { index: true, contentHash: true, recordCount: true }, orderBy: { index: "asc" } } } } } });
+  let canWrite = true;
+  try { await requireCapability(db, req.user, "imports.write"); }
+  catch (error) {
+    if (!(error instanceof OperationError) || error.code !== "CAPABILITY_REQUIRED") throw error;
+    canWrite = false;
+    await requireCapability(db, req.user, "imports.review");
+    await requireFullLegacySourceScope(db, req.user);
+  }
+  const snapshotId = id.parse(req.params.id);
+  const identity = await db.legacyImportSnapshot.findUnique({ where: { id: snapshotId }, select: { createdBy: true } });
+  if (!identity) throw new OperationError(404, "IMPORT_BATCH_NOT_FOUND", "Lote no encontrado.");
+  if (identity.createdBy !== req.user.id) {
+    if (!canWrite) await requireCapability(db, req.user, "imports.review");
+    await requireFullLegacySourceScope(db, req.user);
+  }
+  const snapshot = await db.legacyImportSnapshot.findUnique({ where: { id: snapshotId }, include: { upload: { include: { chunks: { select: { index: true, contentHash: true, recordCount: true }, orderBy: { index: "asc" } } } } } });
   if (!snapshot?.upload) throw new OperationError(404, "IMPORT_BATCH_NOT_FOUND", "Lote no encontrado.");
-  if (snapshot.createdBy !== req.user.id) await requireCapability(db, req.user, "imports.review");
   const object = await db.operationObject.findUnique({ where: { id: snapshot.id }, select: { version: true } });
   res.json(wire({ ...snapshot.upload, fileHash: snapshot.fileHash, importerVersion: snapshot.importerVersion, status: snapshot.status, version: object?.version ?? 0 }));
 });

@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,12 @@ function requireRestoreTestDatabase() {
   assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(url.hostname), "RESTORE_TEST_DATABASE_URL must use loopback");
   assert.match(url.pathname, /^\/bombo_ui_restore(?:_[a-z0-9_-]+)?$/i, "RESTORE_TEST_DATABASE_URL must name a dedicated bombo_ui_restore database");
   return url;
+}
+
+function databaseTargetIdentity(url: URL) {
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const host = hostname === "localhost" || hostname === "::1" || hostname.startsWith("127.") ? "loopback" : hostname;
+  return JSON.stringify([host, url.port || "5432", decodeURIComponent(url.pathname.slice(1))]);
 }
 
 function processEnvironment(values: Record<string, string | undefined>) {
@@ -162,6 +168,57 @@ function safeOutput(result: { stdout: string; stderr: string }) {
   return `${result.stdout}\n${result.stderr}`.replace(/postgres(?:ql)?:\/\/[^\s"']+/gi, "[database URL]");
 }
 
+async function truncateAuthenticatedDump(directory: string, keyHex: string) {
+  const manifestPath = join(directory, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    files: Array<{
+      name: string;
+      sha256: string;
+      storedSha256: string;
+      bytes: number;
+      encryption?: { algorithm: string; iv: string; tag: string };
+    }>;
+  };
+  const entry = manifest.files.find((candidate) => candidate.name === "database.dump");
+  assert.ok(entry?.encryption, "the rollback fixture requires an authenticated encrypted dump");
+  const key = Buffer.from(keyHex, "hex");
+  const ciphertext = await readFile(join(directory, entry.name));
+  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(entry.encryption.iv, "base64"));
+  decipher.setAAD(Buffer.from(entry.name));
+  decipher.setAuthTag(Buffer.from(entry.encryption.tag, "base64"));
+  const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  assert.ok(plaintext.length > 256, "the custom-format fixture must contain enough archive data to truncate its tail");
+  const damagedPlaintext = plaintext.subarray(0, plaintext.length - 64);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  cipher.setAAD(Buffer.from(entry.name));
+  const damagedCiphertext = Buffer.concat([cipher.update(damagedPlaintext), cipher.final()]);
+  entry.bytes = damagedPlaintext.length;
+  entry.sha256 = createHash("sha256").update(damagedPlaintext).digest("hex");
+  entry.storedSha256 = createHash("sha256").update(damagedCiphertext).digest("hex");
+  entry.encryption = { algorithm: "AES-256-GCM", iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64") };
+  await writeFile(join(directory, entry.name), damagedCiphertext);
+  const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2));
+  await writeFile(manifestPath, manifestBytes);
+  await writeFile(join(directory, "manifest.sha256"), `${createHash("sha256").update(manifestBytes).digest("hex")}\n`);
+  await writeFile(join(directory, "manifest.hmac"), `${createHmac("sha256", key).update(manifestBytes).digest("hex")}\n`);
+}
+
+async function writeAuthenticatedManifest(directory: string, keyHex: string, manifest: unknown) {
+  const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2));
+  const key = Buffer.from(keyHex, "hex");
+  await writeFile(join(directory, "manifest.json"), manifestBytes);
+  await writeFile(join(directory, "manifest.sha256"), `${createHash("sha256").update(manifestBytes).digest("hex")}\n`);
+  await writeFile(join(directory, "manifest.hmac"), `${createHmac("sha256", key).update(manifestBytes).digest("hex")}\n`);
+}
+
+async function restoreValidationDatabaseNames(database: PrismaClient) {
+  const rows = await database.$queryRawUnsafe<Array<{ name: string }>>(
+    "SELECT datname AS name FROM pg_database WHERE datname LIKE 'bombo_ui_restore_validation_%' ORDER BY datname",
+  );
+  return rows.map(row => row.name);
+}
+
 async function writeDumpStub(directory: string, exitCode: number) {
   await mkdir(directory, { recursive: true });
   const executable = join(directory, "pg_dump");
@@ -229,17 +286,30 @@ test("backup CLI removes a partial snapshot after pg_dump and transaction failur
 });
 
 test("restore CLI rejects unsafe roots before database changes and stores objects locally", {
-  skip: !process.env.RESTORE_TEST_DATABASE_URL || process.env.OPERATIONS_BACKUP_RESTORE_E2E !== "true",
+  skip: !process.env.TEST_DATABASE_URL || !process.env.RESTORE_TEST_DATABASE_URL || process.env.OPERATIONS_BACKUP_RESTORE_E2E !== "true",
 }, async (t) => {
+  const sourceUrl = requireTestDatabase();
   const baseUrl = requireRestoreTestDatabase();
+  assert.notEqual(databaseTargetIdentity(sourceUrl), databaseTargetIdentity(baseUrl),
+    "RESTORE_TEST_DATABASE_URL must target a different database from TEST_DATABASE_URL");
   const schema = `ops_restore_${randomUUID().replaceAll("-", "")}`;
+  sourceUrl.searchParams.set("schema", schema);
   baseUrl.searchParams.set("schema", schema);
   const db = new PrismaClient({ datasources: { db: { url: baseUrl.toString() } } });
+  const sourceDb = new PrismaClient({ datasources: { db: { url: sourceUrl.toString() } } });
+  const sourceBaseUrl = new URL(sourceUrl);
+  sourceBaseUrl.searchParams.delete("schema");
+  const sourceBaseDb = new PrismaClient({ datasources: { db: { url: sourceBaseUrl.toString() } } });
+  const restoreBaseUrl = new URL(baseUrl);
+  restoreBaseUrl.searchParams.delete("schema");
+  const restoreBaseDb = new PrismaClient({ datasources: { db: { url: restoreBaseUrl.toString() } } });
   const temporaryRoot = await mkdtemp(join(tmpdir(), "bombo-restore-cli-test-"));
   const sourceRoot = join(temporaryRoot, "normal-objects");
   const workerBackupRoot = join(temporaryRoot, "scheduled-backups");
+  const damagedBackupDirectory = join(temporaryRoot, "damaged-restore-package");
   let backupDirectory = join(temporaryRoot, "backup-package");
   const restoreRoot = join(temporaryRoot, "restore-objects");
+  const failedRestoreRoot = join(temporaryRoot, "failed-restore-objects");
   const documentId = randomUUID();
   const backupEncryptionKey = "b".repeat(64);
   const objectBytes = Buffer.from("%PDF-1.4\nSynthetic restore rehearsal evidence\n%%EOF");
@@ -248,25 +318,26 @@ test("restore CLI rejects unsafe roots before database changes and stores object
   const s3Requests: string[] = [];
 
   try {
-    const preexistingCatalogObjects = await restoreCatalogObjectCount(db);
+    const preexistingCatalogObjects = await restoreCatalogObjectCount(restoreBaseDb);
+    const validationDatabaseNamesBefore = await restoreValidationDatabaseNames(restoreBaseDb);
 
-    await db.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
+    await sourceBaseDb.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
     const migrationsRoot = new URL("../prisma/migrations/", import.meta.url);
     const migrations = (await readdir(migrationsRoot, { withFileTypes: true }))
       .filter((entry) => entry.isDirectory())
       .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
     for (const migration of migrations) {
       const source = await readFile(new URL(`${migration.name}/migration.sql`, migrationsRoot), "utf8");
-      for (const statement of splitSqlStatements(source)) await db.$executeRawUnsafe(statement);
+      for (const statement of splitSqlStatements(source)) await sourceDb.$executeRawUnsafe(statement);
     }
-    const appliedMigrations = await seedMigrationHistory(db, schema);
+    const appliedMigrations = await seedMigrationHistory(sourceDb, schema);
 
     process.env.NODE_ENV = "test";
     process.env.PRIVATE_OBJECT_ROOT = sourceRoot;
     delete process.env.PRIVATE_S3_BUCKET;
     const { putPrivateObject } = await import("../server/operations/object-store.js");
     const originalObject = await putPrivateObject(objectKey, objectBytes, "application/pdf");
-    await db.operationDocument.create({
+    await sourceDb.operationDocument.create({
       data: {
         id: documentId,
         kind: "synthetic-restore-test",
@@ -281,10 +352,10 @@ test("restore CLI rejects unsafe roots before database changes and stores object
         createdBy: "restore-boundary-test",
       },
     });
-    await seedSnapshotFacts(db);
+    await seedSnapshotFacts(sourceDb);
 
     const backup = await runBackupWorker({
-      DATABASE_URL: baseUrl.toString(),
+      DATABASE_URL: sourceUrl.toString(),
       BACKUP_ROOT: workerBackupRoot,
       BACKUP_ENCRYPTION_KEY: backupEncryptionKey,
       PRIVATE_OBJECT_ROOT: sourceRoot,
@@ -303,15 +374,18 @@ test("restore CLI rejects unsafe roots before database changes and stores object
       databaseMajor: number;
       databaseVersion: string;
       schema: string;
+      targetFingerprint: string;
       migrations: Array<{ name: string; checksum: string }>;
       counts: Record<string, number>;
       financialFingerprints: Record<string, { sha256: string; rowCounts: Record<string, number> }>;
+      objects: Array<{ id: string; objectKey: string; objectVersion: string; checksum: string; bytes: number; mediaType: string; file: string }>;
     };
     assert.equal(manifest.schemaVersion, 2);
     assert.equal(manifest.databaseMajor, 18);
     assert.match(manifest.databaseVersion, /^18(?:\.|$)/);
     assert.equal((JSON.parse(manifestBytes.toString("utf8")) as { encrypted: boolean }).encrypted, true);
     assert.equal(manifest.schema, schema);
+    assert.match(manifest.targetFingerprint, /^[a-f0-9]{64}$/);
     assert.deepEqual(manifest.migrations, appliedMigrations);
     assert.equal(manifest.counts.legacyHistoricalFacts, 1);
     assert.equal(manifest.counts.legacyHistoryPublications, 1);
@@ -322,14 +396,95 @@ test("restore CLI rejects unsafe roots before database changes and stores object
     }
 
     const originalManifestHash = createHash("sha256").update(manifestBytes).digest("hex");
+    const manifestHmacBytes = await readFile(join(backupDirectory, "manifest.hmac"));
     const invalidManifestBytes = Buffer.from(JSON.stringify({ ...manifest, migrations: manifest.migrations.slice(1) }, null, 2));
     await writeFile(join(backupDirectory, "manifest.json"), invalidManifestBytes);
     await writeFile(join(backupDirectory, "manifest.sha256"), createHash("sha256").update(invalidManifestBytes).digest("hex"));
+    await writeFile(join(backupDirectory, "manifest.hmac"), createHmac("sha256", Buffer.from(backupEncryptionKey, "hex")).update(invalidManifestBytes).digest("hex"));
     const invalidMigrationPackage = await runBackupCli("verify", backupDirectory, { BACKUP_ENCRYPTION_KEY: backupEncryptionKey });
     assert.notEqual(invalidMigrationPackage.code, 0);
     assert.match(safeOutput(invalidMigrationPackage), /migraci|migration/i);
     await writeFile(join(backupDirectory, "manifest.json"), manifestBytes);
     await writeFile(join(backupDirectory, "manifest.sha256"), `${originalManifestHash}\n`);
+    await writeFile(join(backupDirectory, "manifest.hmac"), manifestHmacBytes);
+
+    const beforeWrongKeyRestore = await restoreCatalogObjectCount(restoreBaseDb);
+    const sourceDocumentCountBeforeWrongKeyRestore = await sourceDb.operationDocument.count({ where: { id: documentId } });
+    const wrongKeyRestore = await runBackupCli("restore", backupDirectory, {
+      RESTORE_DATABASE_URL: baseUrl.toString(),
+      BACKUP_ENCRYPTION_KEY: "c".repeat(64),
+    });
+    assert.notEqual(wrongKeyRestore.code, 0);
+    assert.match(safeOutput(wrongKeyRestore), /Autenticación del manifiesto inválida/);
+    assert.equal(await restoreCatalogObjectCount(restoreBaseDb), beforeWrongKeyRestore, "wrong-key restore must not alter destination catalog objects");
+    assert.equal(await sourceDb.operationDocument.count({ where: { id: documentId } }), sourceDocumentCountBeforeWrongKeyRestore,
+      "wrong-key restore must not alter its distinct source database");
+
+    if (preexistingCatalogObjects === 0) {
+      await cp(backupDirectory, damagedBackupDirectory, { recursive: true });
+      await truncateAuthenticatedDump(damagedBackupDirectory, backupEncryptionKey);
+      await mkdir(failedRestoreRoot);
+      const beforeDamagedRestore = await restoreCatalogObjectCount(restoreBaseDb);
+      const damagedRestore = await runBackupCli("restore", damagedBackupDirectory, {
+        RESTORE_DATABASE_URL: baseUrl.toString(),
+        BACKUP_ENCRYPTION_KEY: backupEncryptionKey,
+        RESTORE_PRIVATE_OBJECT_ROOT: failedRestoreRoot,
+        PRIVATE_OBJECT_ROOT: sourceRoot,
+      });
+      assert.notEqual(damagedRestore.code, 0);
+      assert.match(safeOutput(damagedRestore), /pg_restore falló/i,
+        "the authenticated but truncated archive must reach pg_restore and fail there");
+      assert.equal(await restoreCatalogObjectCount(restoreBaseDb), beforeDamagedRestore,
+        "pg_restore failure must roll back schema and table writes in the empty destination database");
+      assert.deepEqual(await readdir(failedRestoreRoot), [], "a failed database restore must not publish object files");
+      assert.deepEqual(await restoreValidationDatabaseNames(restoreBaseDb), validationDatabaseNamesBefore,
+        "a failed preflight must drop only its temporary validation database");
+      assert.equal(await sourceDb.operationDocument.count({ where: { id: documentId } }), sourceDocumentCountBeforeWrongKeyRestore,
+        "a failed restore must not alter its distinct source database");
+
+      const restoreOriginalManifest = async () => {
+        await writeFile(join(backupDirectory, "manifest.json"), manifestBytes);
+        await writeFile(join(backupDirectory, "manifest.sha256"), `${originalManifestHash}\n`);
+        await writeFile(join(backupDirectory, "manifest.hmac"), manifestHmacBytes);
+      };
+      const assertPreflightRejected = async (tamperedManifest: typeof manifest, expected: RegExp, label: string) => {
+        const objectRoot = join(temporaryRoot, `${label}-objects-must-not-exist`);
+        await writeAuthenticatedManifest(backupDirectory, backupEncryptionKey, tamperedManifest);
+        const beforeCatalog = await restoreCatalogObjectCount(restoreBaseDb);
+        const preflightDatabaseNames = await restoreValidationDatabaseNames(restoreBaseDb);
+        const result = await runBackupCli("restore", backupDirectory, {
+          RESTORE_DATABASE_URL: baseUrl.toString(),
+          BACKUP_ENCRYPTION_KEY: backupEncryptionKey,
+          RESTORE_PRIVATE_OBJECT_ROOT: objectRoot,
+          PRIVATE_OBJECT_ROOT: sourceRoot,
+        });
+        assert.notEqual(result.code, 0, `${label} package unexpectedly restored`);
+        assert.match(safeOutput(result), expected, `${label} mismatch was not rejected by preflight`);
+        assert.equal(await restoreCatalogObjectCount(restoreBaseDb), beforeCatalog,
+          `${label} preflight rejection must not modify the destination database`);
+        await assert.rejects(lstat(objectRoot), { code: "ENOENT" },
+          `${label} preflight rejection must not create the destination object root`);
+        assert.deepEqual(await restoreValidationDatabaseNames(restoreBaseDb), preflightDatabaseNames,
+          `${label} preflight must remove its temporary validation database`);
+        await restoreOriginalManifest();
+      };
+
+      const mismatchedCounts = structuredClone(manifest);
+      mismatchedCounts.counts.legacyRecords += 1;
+      await assertPreflightRejected(mismatchedCounts, /conteos restaurados en la validación previa/i, "count-mismatch");
+
+      const mismatchedFingerprints = structuredClone(manifest);
+      mismatchedFingerprints.financialFingerprints.ledger.sha256 =
+        mismatchedFingerprints.financialFingerprints.ledger.sha256 === "0".repeat(64) ? "1".repeat(64) : "0".repeat(64);
+      await assertPreflightRejected(mismatchedFingerprints,
+        /huellas financieras restauradas en la validación previa/i, "fingerprint-mismatch");
+
+      const mismatchedObjects = structuredClone(manifest);
+      assert.ok(mismatchedObjects.objects[0], "the fixture must contain an available document");
+      mismatchedObjects.objects[0].objectKey += ".tampered";
+      await assertPreflightRejected(mismatchedObjects,
+        /identidades de objetos del manifiesto no coinciden con la base de la validación previa/i, "object-mismatch");
+    }
 
     const nonEmptyRoot = join(temporaryRoot, "non-empty-restore");
     await mkdir(nonEmptyRoot);
@@ -358,7 +513,7 @@ test("restore CLI rejects unsafe roots before database changes and stores object
       });
       assert.notEqual(result.code, 0, `${rootCase.label} root unexpectedly restored`);
       assert.match(safeOutput(result), rootCase.expected, `${rootCase.label} root was rejected for an unrelated reason`);
-      assert.equal(await db.operationDocument.count({ where: { id: documentId } }), 1, `${rootCase.label} root changed the test database`);
+      assert.equal(await sourceDb.operationDocument.count({ where: { id: documentId } }), 1, `${rootCase.label} root changed the source database`);
     }
 
     await mkdir(restoreRoot);
@@ -369,12 +524,29 @@ test("restore CLI rejects unsafe roots before database changes and stores object
       PRIVATE_OBJECT_ROOT: sourceRoot,
       PRIVATE_S3_BUCKET: "synthetic-normal-bucket-must-not-be-used",
     });
-    assert.notEqual(acceptedEmptyRoot.code, 0);
-    assert.match(safeOutput(acceptedEmptyRoot), /El destino contiene objetos/);
-    assert.deepEqual(await readdir(restoreRoot), []);
-    assert.equal(await db.operationDocument.count({ where: { id: documentId } }), 1);
-
-    await db.$executeRawUnsafe(`DROP SCHEMA "${schema}" CASCADE`);
+    if (preexistingCatalogObjects === 0) {
+      assert.equal(acceptedEmptyRoot.code, 0, safeOutput(acceptedEmptyRoot));
+      const acceptedReport = JSON.parse(acceptedEmptyRoot.stdout) as {
+        preflightValidated?: boolean;
+        counts?: typeof manifest.counts;
+        financialFingerprints?: typeof manifest.financialFingerprints;
+      };
+      assert.equal(acceptedReport.preflightValidated, true);
+      assert.deepEqual(acceptedReport.counts, manifest.counts);
+      assert.deepEqual(acceptedReport.financialFingerprints, manifest.financialFingerprints);
+      assert.deepEqual(await restoreValidationDatabaseNames(restoreBaseDb), validationDatabaseNamesBefore,
+        "a successful preflight must drop its temporary validation database");
+      assert.ok(await db.operationDocument.findUnique({ where: { id: documentId } }),
+        "a verified backup must restore into a distinct empty database");
+      await restoreBaseDb.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await rm(restoreRoot, { recursive: true, force: true });
+      await mkdir(restoreRoot);
+    } else {
+      assert.notEqual(acceptedEmptyRoot.code, 0);
+      assert.match(safeOutput(acceptedEmptyRoot), /El destino contiene objetos/);
+      assert.deepEqual(await readdir(restoreRoot), []);
+      assert.equal(await sourceDb.operationDocument.count({ where: { id: documentId } }), 1);
+    }
 
     await t.test("restore rejects a standalone user schema and enum in an otherwise empty database", {
       skip: preexistingCatalogObjects > 0 ? "the authorized restore test database already contains user catalog objects" : false,
@@ -472,8 +644,9 @@ test("restore CLI rejects unsafe roots before database changes and stores object
     });
   } finally {
     if (s3Server?.listening) await new Promise<void>((resolveClose, reject) => s3Server!.close((error) => error ? reject(error) : resolveClose()));
-    await db.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-    await db.$disconnect();
+    await sourceBaseDb.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await restoreBaseDb.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await Promise.all([db.$disconnect(), sourceDb.$disconnect(), sourceBaseDb.$disconnect(), restoreBaseDb.$disconnect()]);
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });

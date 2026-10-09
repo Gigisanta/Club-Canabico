@@ -157,6 +157,13 @@ export async function objectScope(tx:Tx,actor:User):Promise<{accountIds?:string[
  const grant=await tx.operationAccess.findUnique({where:{userId:actor.id}});
  return (grant?.scope&&typeof grant.scope==="object"&&!Array.isArray(grant.scope)?grant.scope:{}) as {accountIds?:string[];memberIds?:string[];locationIds?:string[];custodianIds?:string[]};
 }
+export async function requireFullLegacySourceScope(tx:Tx,actor:User):Promise<void>{
+ const scope=await objectScope(tx,actor);
+ const access=await tx.operationAccess.findUnique({where:{userId:actor.id},select:{profile:true}});
+ const profile=access?.profile??actor.role;
+ if(Object.values(scope).some(value=>value!==undefined)||profile==="driver"||profile==="cashier")
+  throw new OperationError(403,"LEGACY_SOURCE_FULL_SCOPE_REQUIRED","La conciliación de fuentes requiere alcance operativo completo");
+}
 /** Resolve every declared link, including delivery-only documents; inconsistent links never grant access. */
 export async function resolveDocumentMember(tx:Tx,link:{memberId?:string|null;orderId?:string|null;deliveryId?:string|null}):Promise<string|undefined>{
  let memberId=link.memberId??undefined;
@@ -190,6 +197,7 @@ export async function requireCustodianScope(tx:Tx,actor:User,custodianIds:string
 /** Shared scope enforcement also runs before replay, so no handler can accidentally omit it. */
 async function requireCommandScope(ctx:CommandContext,kind:string){
  const {tx,actor,envelope:e}=ctx;
+ if(kind==="legacyImport")await requireFullLegacySourceScope(tx,actor);
  const accountIds=["accountId","fromAccountId","toAccountId","commissionAccountId","custodianAccountId"].flatMap(k=>typeof e.data[k]==="string"?[e.data[k] as string]:[]);
  if(kind==="account")accountIds.push(e.targetId);
  if(kind==="accountBootstrap"&&Array.isArray(e.data.accounts))for(const item of e.data.accounts)if(item&&typeof item==="object"&&typeof (item as {id?:unknown}).id==="string")accountIds.push((item as {id:string}).id);

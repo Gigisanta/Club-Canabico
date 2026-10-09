@@ -5,6 +5,7 @@ import { APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../
 import { prepareAppSheetCaptureManifest } from "../../shared/operations/appsheet-canonical.js";
 import { formatAppSheetInvoiceNumberForYear } from "../../shared/operations/appsheet-invoice-rules.js";
 import { OperationError, json, requireCapability, type Tx } from "./core.js";
+import { requireApprovedAppSheetFinalDeltaGate } from "./access.js";
 
 const INT64_MAX = 9_223_372_036_854_775_807n;
 const HASH = /^[a-f0-9]{64}$/;
@@ -150,8 +151,7 @@ function referenceOnly(row: InvoiceSourceRow): InvoiceSourceRef {
 }
 
 async function prepareSeed(tx: Tx, captureId: string, snapshotId: string): Promise<PreparedSeed> {
-  const capture = await tx.appSheetCaptureManifest.findUnique({ where: { captureId } });
-  if (!capture) fail("APP_SHEET_CAPTURE_NOT_FOUND");
+  const capture = await requireApprovedAppSheetFinalDeltaGate(tx, captureId);
   const preparedCapture = parseCapture(capture);
 
   const snapshot = await tx.legacyImportSnapshot.findUnique({ where: { id: snapshotId }, include: { upload: { select: { completedAt: true } } } });

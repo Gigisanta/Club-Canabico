@@ -18,6 +18,7 @@ jobs:
       DATABASE_URL: postgresql://raiz@localhost:5432/raiz?schema=public
       TEST_DATABASE_URL: postgresql://raiz@localhost:5432/bombo_ui_ci?schema=public
       RESTORE_TEST_DATABASE_URL: postgresql://raiz@localhost:5432/bombo_ui_restore_ci?schema=public
+      WRONG_TARGET_TEST_DATABASE_URL: postgresql://raiz@localhost:5432/bombo_ui_wrong_target_ci?schema=public
       OPERATIONS_BACKUP_RESTORE_E2E: "true"
       PG_BIN: /usr/lib/postgresql/18/bin
       NODE_ENV: test
@@ -46,6 +47,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-client-18
           /usr/lib/postgresql/18/bin/createdb --host localhost --username raiz bombo_ui_restore_ci
+          /usr/lib/postgresql/18/bin/createdb --host localhost --username raiz bombo_ui_wrong_target_ci
       - run: npm run build
       - run: npm test
       - run: npx playwright install --with-deps chromium

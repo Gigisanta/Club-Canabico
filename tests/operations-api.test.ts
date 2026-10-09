@@ -9,6 +9,7 @@ import { splitSqlStatements } from "./migration-sql.js";
 import { readLegacyWorkbook, legacyReaderVersion } from "../server/operations/legacy-reader.js";
 import { legacyPayloadHash } from "../server/operations/legacy-upload-contract.js";
 import { cutoverGateIds, type CommandEnvelope } from "../shared/operations/contracts.js";
+import { APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
 // Primary owner: observable API effects, receipts and authorization. Fixtures establish only pre-existing objects.
 test("canonical financial commands preserve cash custody, debt and global replay",{skip:!process.env.TEST_DATABASE_URL},async t=>{
  const url=new URL(process.env.TEST_DATABASE_URL!);assert.ok(["127.0.0.1","localhost","[::1]"].includes(url.hostname));assert.match(url.pathname,/test|ci/i);
@@ -42,6 +43,18 @@ test("canonical financial commands preserve cash custody, debt and global replay
  }
  try{
   for(const id of ["owner","finance","driver","cashier","importer"])await login(id);
+  await t.test("AppSheet history exposes stock-kind facts through the filtered read route",async()=>{
+   const snapshotId=`appsheet-stock-route-${randomUUID()}`,sourceRecordId=`appsheet-stock-record-${randomUUID()}`;
+   const before=await db.legacyHistoricalFact.count();
+   await db.legacyImportSnapshot.create({data:{id:snapshotId,sourceSystem:APPSHEET_HISTORY_SOURCE_SYSTEM,filename:"synthetic-stock-route-fixture",fileHash:"a".repeat(64),importerVersion:"stock-route-fixture",createdBy:"importer",coverage:{},controls:{}}});
+   await db.legacySourceRecord.create({data:{id:sourceRecordId,snapshotId,sourceTable:"Mov_Stock1",sourceKey:"stock-route-fixture",sourceRow:2,fileHash:"a".repeat(64),contentHash:"b".repeat(64),importerVersion:"stock-route-fixture",original:{columns:[]},normalized:{columns:[]},treatment:"fact_candidate"}});
+   await db.legacyHistoricalFact.create({data:{id:`fact-${sourceRecordId}`,snapshotId,sourceRecordId,sourceTable:"Mov_Stock1",sourceKey:"stock-route-fixture",sourceRow:2,sourceHash:"b".repeat(64),mappingId:"stock-route-fixture",kind:"stock",occurredOn:"2026-10-01",dateState:"known",currencyState:"not-applicable",unit:"g",unitState:"known",amountState:"not-applicable",quantity:"1.25",quantityState:"known",attributes:{sourceClassification:{field:"Tipo_Registro_Mercaderia",value:"Venta",state:"known"},financialEffect:"historical-fact-only"},createdBy:"importer"}});
+   const filtered=await call(`/operations/appsheet-migration/snapshots/${snapshotId}/history?kind=stock`,"finance");assert.equal(filtered.status,200,await filtered.clone().text());
+   const body=await filtered.json() as {items?:Array<{kind?:string;quantity?:string;unit?:string;sourceTable?:string}>};
+   assert.equal(body.items?.length,1);assert.deepEqual({kind:body.items?.[0]?.kind,quantity:body.items?.[0]?.quantity,unit:body.items?.[0]?.unit,sourceTable:body.items?.[0]?.sourceTable},{kind:"stock",quantity:"1.25",unit:"g",sourceTable:"Mov_Stock1"});
+   const rejected=await call(`/operations/appsheet-migration/snapshots/${snapshotId}/history?kind=not-a-kind`,"finance");assert.equal(rejected.status,400);
+   assert.equal(await db.legacyHistoricalFact.count(),before+1,"filtered history reads do not write additional facts");
+  });
   await t.test("cutover requires active authors and reviewers and rolls back stale approvals",async()=>{
    const passphrase=pass;
    for(const [id,active] of [["cutover-author",true],["cutover-reviewer",true],["cutover-inactive-author",false],["cutover-activator",true]] as const)
@@ -196,6 +209,73 @@ test("canonical financial commands preserve cash custody, debt and global replay
    await db.legacyImportSnapshot.create({data:{id:historicalId,sourceSystem:historicalToken,filename:historicalToken,fileHash:"0".repeat(64),importerVersion:"historical-test-fixture",createdBy:"importer",coverage:{sheets:[{name:historicalToken}]},controls:{note:historicalToken}}});
    await db.legacySourceRecord.create({data:{id:randomUUID().replaceAll("-","").padEnd(64,"0"),snapshotId:historicalId,sourceTable:historicalToken,sourceKey:"ordinary-key",sourceRow:2,fileHash:"0".repeat(64),contentHash:"1".repeat(64),importerVersion:"historical-test-fixture",original:{columns:[{header:"Nombre",value:"Visible history"}]},normalized:{columns:[]},treatment:"archive_only"}});
    for(const path of ["/legacy-imports/coverage",`/legacy-imports/staged-records?snapshotId=${historicalId}`]){const projected=await call(path,"finance");assert.equal(projected.status,200);assert.equal(JSON.stringify(await projected.json()).includes(historicalToken),false);}
+  });
+  await t.test("legacy source review and metadata require full source scope before lookup or mutation",async()=>{
+   const workbook=new ExcelJS.Workbook(),sheet=workbook.addWorksheet("C_Cliente");sheet.addRow(["Id_Cliente","Nombre"]);sheet.addRow(["scope-fixture","Scope fixture"]);
+   const staged=await stageWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()),`scope-guard-${randomUUID()}`);
+   const snapshot=await db.legacyImportSnapshot.findUniqueOrThrow({where:{id:staged.snapshotId}});
+   const financeGrant=await db.operationAccess.findUniqueOrThrow({where:{userId:"finance"}});
+   const importerGrant=await db.operationAccess.findUniqueOrThrow({where:{userId:"importer"}});
+   const review=e(snapshot.id,"LegacySnapshotReviewed",{fileHash:snapshot.fileHash,changedContentReviewed:false,evidence:{reference:"scope-guard-review"}},staged.version);
+   try{
+    await db.operationAccess.update({where:{userId:"finance"},data:{scope:{memberIds:["outside-source"]}}});
+    const denied=await call("/operations/commands","finance",review);assert.equal(denied.status,403);assert.equal((await denied.json()).code,"LEGACY_SOURCE_FULL_SCOPE_REQUIRED");
+    assert.equal(await db.commandReceipt.findUnique({where:{requestId:review.requestId}}),null);
+    assert.equal(await db.operationAudit.count({where:{requestId:review.requestId}}),0);assert.equal(await db.operationOutbox.count({where:{requestId:review.requestId}}),0);
+    assert.equal((await db.operationObject.findUniqueOrThrow({where:{id:snapshot.id}})).version,staged.version);
+    assert.equal((await db.legacyImportSnapshot.findUniqueOrThrow({where:{id:snapshot.id}})).status,"staged");
+
+    const nonexistent=`scope-denied-${randomUUID()}`;
+    for(const path of [
+     `/legacy-imports/${nonexistent}/review`,
+     `/legacy-imports/${nonexistent}/mappings`,
+     `/legacy-imports/${nonexistent}/exceptions/${randomUUID()}/resolve`,
+     `/legacy-imports/${nonexistent}/activate-master`,
+    ]){
+     const response=await call(path,"finance",{});assert.equal(response.status,403,path);assert.equal((await response.json()).code,"LEGACY_SOURCE_FULL_SCOPE_REQUIRED",path);
+    }
+    for(const path of [
+     "/legacy-imports/history/publications",
+     `/legacy-imports/history/publication-preview?snapshotId=${nonexistent}`,
+     `/legacy-imports/history/projection-status?snapshotId=${nonexistent}`,
+    ]){
+     const response=await call(path,"finance");assert.equal(response.status,403,path);assert.equal((await response.json()).code,"LEGACY_SOURCE_FULL_SCOPE_REQUIRED",path);
+    }
+    const foreignBatch=await call(`/legacy-imports/batches/${snapshot.id}`,"finance");assert.equal(foreignBatch.status,403);assert.equal((await foreignBatch.json()).code,"LEGACY_SOURCE_FULL_SCOPE_REQUIRED");
+
+    await db.operationAccess.update({where:{userId:"finance"},data:{capabilities:["imports.review"],scope:{memberIds:["outside-source"]}}});
+    const reviewOnlyMissingBatch=await call(`/legacy-imports/batches/${nonexistent}`,"finance");assert.equal(reviewOnlyMissingBatch.status,403);assert.equal((await reviewOnlyMissingBatch.json()).code,"LEGACY_SOURCE_FULL_SCOPE_REQUIRED");
+
+    await db.operationAccess.update({where:{userId:"importer"},data:{scope:{memberIds:["uploader-scope"]}}});
+    const ownBatch=await call(`/legacy-imports/batches/${snapshot.id}`,"importer");assert.equal(ownBatch.status,200,"a scoped uploader with imports.write can still inspect their own upload");
+
+    await db.operationAccess.update({where:{userId:"finance"},data:{capabilities:financeGrant.capabilities,scope:financeGrant.scope??{}}});
+    const accepted=await call("/operations/commands","finance",review);assert.equal(accepted.status,200,await accepted.clone().text());
+    const reviewedSnapshot=await db.legacyImportSnapshot.findUniqueOrThrow({where:{id:snapshot.id}});assert.equal(reviewedSnapshot.status,"reviewed");
+    const receipt=await db.commandReceipt.findUniqueOrThrow({where:{requestId:review.requestId}}),object=await db.operationObject.findUniqueOrThrow({where:{id:snapshot.id}});
+    const auditCount=await db.operationAudit.count({where:{requestId:review.requestId}}),outboxCount=await db.operationOutbox.count({where:{requestId:review.requestId}});
+
+    await db.operationAccess.update({where:{userId:"importer"},data:{scope:importerGrant.scope??{}}});
+    const directStaged=await stageWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()),`scope-direct-${randomUUID()}`);
+    const directSnapshot=await db.legacyImportSnapshot.findUniqueOrThrow({where:{id:directStaged.snapshotId}});
+    const directReview={requestId:randomUUID(),fileHash:directSnapshot.fileHash,changedContentReviewed:false,evidence:{reference:"full-scope-route-review"}};
+    const directAccepted=await call(`/legacy-imports/${directSnapshot.id}/review`,"finance",directReview);
+    assert.equal(directAccepted.status,200,await directAccepted.clone().text());
+    assert.equal((await db.legacyImportSnapshot.findUniqueOrThrow({where:{id:directSnapshot.id}})).status,"reviewed");
+
+    await db.operationAccess.update({where:{userId:"finance"},data:{scope:{memberIds:["outside-source"]}}});
+    const replay=await call("/operations/commands","finance",review);assert.equal(replay.status,403);assert.equal((await replay.json()).code,"LEGACY_SOURCE_FULL_SCOPE_REQUIRED");
+    assert.equal(await db.commandReceipt.count({where:{requestId:review.requestId}}),1,"the scope denial must happen before a stored receipt is replayed");
+    assert.equal(await db.operationAudit.count({where:{requestId:review.requestId}}),auditCount);assert.equal(await db.operationOutbox.count({where:{requestId:review.requestId}}),outboxCount);
+    assert.equal((await db.operationObject.findUniqueOrThrow({where:{id:snapshot.id}})).version,object.version);
+    const afterReplay=await db.legacyImportSnapshot.findUniqueOrThrow({where:{id:snapshot.id}});
+    assert.equal(afterReplay.status,"reviewed");assert.equal(afterReplay.reviewedAt?.getTime(),reviewedSnapshot.reviewedAt?.getTime());
+    assert.equal(afterReplay.reviewedBy,"finance");assert.equal(afterReplay.fileHash,snapshot.fileHash);
+    assert.ok(receipt.response);
+   }finally{
+    await db.operationAccess.update({where:{userId:"finance"},data:{capabilities:financeGrant.capabilities,scope:financeGrant.scope??{}}});
+    await db.operationAccess.update({where:{userId:"importer"},data:{scope:importerGrant.scope??{}}});
+   }
   });
   await t.test("catalog SKU commands accept request evidence and persist it only in audit",async()=>{
    const skuId=`sku-${randomUUID()}`,code=`SKU-${randomUUID()}`;

@@ -204,7 +204,8 @@ export function appSheetHistoryCoverageFingerprint(coverage: Record<string, unkn
   // fingerprint payload; no amount or exception data is discarded.
   const totals = rest.totals as Record<string, unknown> | undefined;
   const kindCounts = totals?.kindCounts as Record<string, unknown> | undefined;
-  const { cash, ...otherKinds } = kindCounts ?? {};
+  const { cash: rawCash, ...otherKinds } = kindCounts ?? {};
+  const cash = rawCash === undefined ? 0 : rawCash;
   if (typeof cash !== "number" || !Number.isSafeInteger(cash) || cash < 0) fail("coverage_cash_fact_count_invalid");
   return digest({
     ...rest,
@@ -975,6 +976,7 @@ function resolveRelationships(records: PreparedRecord[]): void {
   for (const record of records) {
     const rule = appSheetHistoryRule(record.sourceTable);
     if (!rule) continue;
+    const identityGroups = new Map<string, { sourceField: string; targetSourceRecordId: string }[]>();
     for (const relationship of rule.relationships) {
       const foreignCells = cellsByHeader(record, relationship.sourceField);
       const foreign = foreignCells.length === 1 ? effectiveCellValue(foreignCells[0]!) : null;
@@ -982,7 +984,11 @@ function resolveRelationships(records: PreparedRecord[]): void {
       const targetIndex = sourceIndex.get(relationship.targetTable);
       const matches = foreign !== null ? targetIndex?.get(`${targetKey}\0${foreign}`) ?? [] : [];
       const uniqueMatches = [...new Map(matches.map((item) => [item.id, item])).values()];
-      const status = foreign === null ? "missing" : uniqueMatches.length === 1 ? "unique" : uniqueMatches.length === 0 ? "missing" : "ambiguous";
+      const sourceFieldAmbiguous = foreignCells.length > 1;
+      const sourceValueProvided = foreign !== null && foreign.trim() !== "";
+      const status = sourceFieldAmbiguous ? "ambiguous"
+        : !sourceValueProvided ? relationship.required === false ? "not_provided" : "missing"
+        : uniqueMatches.length === 1 ? "unique" : uniqueMatches.length === 0 ? "missing" : "ambiguous";
       const relationshipEntry: Record<string, JSONValue> = {
         sourceField: relationship.sourceField,
         targetTable: relationship.targetTable,
@@ -994,7 +1000,21 @@ function resolveRelationships(records: PreparedRecord[]): void {
         targetSourceRecordId: uniqueMatches.length === 1 ? uniqueMatches[0]!.id : null,
       };
       record.relationshipData.push(relationshipEntry);
-      if (status !== "unique") appendSourceException(record, status === "ambiguous" ? "foreign_relationship_ambiguous" : "foreign_relationship_missing", "blocking", { targetTable: relationship.targetTable, sourceField: relationship.sourceField });
+      if (status === "unique" && relationship.identityGroup) {
+        const links = identityGroups.get(relationship.identityGroup) ?? [];
+        links.push({ sourceField: relationship.sourceField, targetSourceRecordId: uniqueMatches[0]!.id });
+        identityGroups.set(relationship.identityGroup, links);
+      }
+      if (status !== "unique" && status !== "not_provided")
+        appendSourceException(record, status === "ambiguous" ? "foreign_relationship_ambiguous" : "foreign_relationship_missing", "blocking", {
+          targetTable: relationship.targetTable, sourceField: relationship.sourceField,
+        });
+    }
+    for (const [identityGroup, links] of identityGroups) {
+      if (links.length < 2 || new Set(links.map((link) => link.targetSourceRecordId)).size < 2) continue;
+      appendSourceException(record, "foreign_relationship_conflict", "blocking", {
+        identityGroup, sourceFields: links.map((link) => link.sourceField).sort().join(","),
+      });
     }
   }
 }
@@ -1309,6 +1329,13 @@ function makeHistoricalFact(record: PreparedRecord): PreparedFact {
     const text = effectiveCellValue(cell);
     return text !== null && text.trim() !== "";
   }));
+  const classificationCells = rule.classificationField === undefined ? [] : cellsByHeader(record, rule.classificationField);
+  const classificationValue = classificationCells.length === 1 ? effectiveCellValue(classificationCells[0]!) : null;
+  const classificationState = classificationCells.length > 1 ? "ambiguous"
+    : classificationValue === null || classificationValue.trim() === "" ? "absent"
+    : rule.classificationValues && !rule.classificationValues.includes(classificationValue) ? "unrecognized" : "known";
+  if (rule.classificationField && classificationState !== "known")
+    appendSourceException(record, "source_classification_unresolved", "blocking", { field: rule.classificationField });
   const sourceAmounts: { field: string; currency: "ARS" | "USD"; amountMinor: string | null; state: "known" | "invalid" | "absent" }[] = [];
   if (record.sourceTable === "C_OperacionUSD") {
     for (const [field, currencyName] of [["MontoARS", "ARS"], ["MontoUSD", "USD"]] as const) {
@@ -1333,6 +1360,8 @@ function makeHistoricalFact(record: PreparedRecord): PreparedFact {
     financialEffect: record.ruleKind === "archive" ? "archive-only" : "historical-fact-only",
     relationships: relationshipLinks(record),
     unverifiedStatusFields: unverified,
+    ...(rule.classificationField ? { sourceClassification: { field: rule.classificationField, value: classificationValue,
+      state: classificationState } } : {}),
     ...(record.normalized.pendingReconciliation ? { pendingReconciliation: record.normalized.pendingReconciliation } : {}),
     ...(sourceAmounts.length ? { sourceAmounts } : {}),
     ...(record.sourceTable === "C_OperacionUSD" ? { exchangeRateField: "Tipo_Cambio", exchangeRate: effectiveCellValue(uniqueCell(record, "Tipo_Cambio")) } : {}),

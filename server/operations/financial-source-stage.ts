@@ -334,7 +334,14 @@ interface VerifiedBackup {
   snapshotAt: string;
 }
 
-function runBackupVerifier(scriptPath: string, backupPath: string): Promise<{ mode: string; integrity: boolean; migrationsValid: boolean; scope: string }> {
+function runBackupVerifier(scriptPath: string, backupPath: string): Promise<{
+  mode: string;
+  integrity: boolean;
+  migrationsValid: boolean;
+  scope: string;
+  targetVerified?: boolean;
+  targetFingerprint?: string;
+}> {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(process.execPath, [scriptPath, "verify", backupPath], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
@@ -352,7 +359,14 @@ function runBackupVerifier(scriptPath: string, backupPath: string): Promise<{ mo
     child.on("exit", (code) => {
       if (code !== 0 || outputBytes > 64 * 1024) return rejectPromise(new FinancialSourceStageError("backup_verification_failed"));
       try {
-        const result = JSON.parse(stdout.trim()) as { mode: string; integrity: boolean; migrationsValid: boolean; scope: string };
+        const result = JSON.parse(stdout.trim()) as {
+          mode: string;
+          integrity: boolean;
+          migrationsValid: boolean;
+          scope: string;
+          targetVerified?: boolean;
+          targetFingerprint?: string;
+        };
         resolvePromise(result);
       } catch {
         rejectPromise(new FinancialSourceStageError("backup_verifier_output_invalid"));
@@ -393,7 +407,8 @@ export async function verifyBackupReference(value: string): Promise<VerifiedBack
   const scriptPath = fileURLToPath(new URL("../../scripts/operations-backup.mjs", import.meta.url));
   const verification = await runBackupVerifier(scriptPath, backupPath);
   if (verification.mode !== "verify" || verification.integrity !== true || verification.migrationsValid !== true ||
-      verification.scope !== "confirmed-server-state-only")
+      verification.scope !== "confirmed-server-state-only" || verification.targetVerified !== true ||
+      typeof verification.targetFingerprint !== "string" || !hashPattern.test(verification.targetFingerprint))
     throw new FinancialSourceStageError("backup_verification_failed");
 
   const afterVerification = await readBackupManifest(backupPath);
@@ -402,11 +417,12 @@ export async function verifyBackupReference(value: string): Promise<VerifiedBack
   const manifestBytes = afterVerification.bytes;
   const manifestHashFile = afterVerification.sha256;
   const actualHash = createHash("sha256").update(manifestBytes).digest("hex");
-  let manifest: { databaseMajor?: unknown; encrypted?: unknown; snapshotAt?: unknown; scope?: unknown };
+  let manifest: { databaseMajor?: unknown; encrypted?: unknown; snapshotAt?: unknown; scope?: unknown; targetFingerprint?: unknown };
   try { manifest = JSON.parse(manifestBytes.toString("utf8")) as typeof manifest; }
   catch { throw new FinancialSourceStageError("backup_manifest_invalid"); }
   if (!hashPattern.test(manifestHashFile) || actualHash !== manifestHashFile || manifest.databaseMajor !== 18 ||
       manifest.encrypted !== true || manifest.scope !== "confirmed-server-state-only" ||
+      manifest.targetFingerprint !== verification.targetFingerprint ||
       typeof manifest.snapshotAt !== "string" || Number.isNaN(Date.parse(manifest.snapshotAt)))
     throw new FinancialSourceStageError("backup_manifest_invalid");
   return { manifestHash: manifestHashFile, snapshotAt: manifest.snapshotAt };

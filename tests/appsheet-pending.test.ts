@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -12,8 +12,11 @@ import {
   type AppSheetPendingCaptureContext,
   type AppSheetPendingSourceRecord,
 } from "../shared/operations/appsheet-pending.js";
+import { APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
+import { canonicalJson } from "../shared/operations/exact.js";
 import {
   AppSheetPendingPreviewError,
+  prepareAppSheetPendingPreview,
   writeAppSheetPendingPreviewPrivate,
   type AppSheetPendingPreview,
 } from "../server/operations/appsheet-pending.js";
@@ -46,6 +49,141 @@ function resultFor(rows: AppSheetPendingSourceRecord[], table: string, sourceRow
   assert.ok(result, `missing preview result for ${table}:${sourceRow}`);
   return result.reconciliation;
 }
+
+function hashCanonical(value: unknown): string {
+  return sha256(canonicalJson(value));
+}
+
+async function writePrivateJson(path: string, value: unknown): Promise<void> {
+  await writeFile(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+}
+
+async function createPendingCaptureWithBlankAndFormulaRows(directory: string): Promise<void> {
+  const spreadsheetId = "synthetic-pending-preview-sheet";
+  const sheetId = 41;
+  const title = "Pre_Venta";
+  const sourceSystem = APPSHEET_HISTORY_SOURCE_SYSTEM;
+  const schemaVersion = {
+    manifest: "appsheet-capture-manifest/v1",
+    headers: "appsheet-sheet-headers/v1",
+    page: "appsheet-sheet-page/v1",
+  };
+  const safeColumnIndexes = [1, 2, 3];
+  const headerSheet = {
+    sheetId, title, mode: "table", hidden: false, headerRow: 1, gridRows: 3, gridColumns: 3,
+    bodyExcluded: false, pageCount: 1, safeColumnIndexes, omittedColumnIndexes: [],
+    columns: [
+      { columnIndex: 1, header: "Id_Preventa", sensitive: false },
+      { columnIndex: 2, header: "Estado_Preventa", sensitive: false },
+      { columnIndex: 3, header: "Id_facturado", sensitive: false },
+    ],
+  };
+  const headers = { schemaVersion: schemaVersion.headers, spreadsheetId, sheets: [headerSheet] };
+  const metadata = { schemaVersion: "appsheet-spreadsheet-metadata/v1", sourceSystem, spreadsheet: { spreadsheetId } };
+  const rows = [
+    { sourceRow: 2, cells: [], unresolvedFormulaCells: [] as (string | number)[] },
+    { sourceRow: 3, cells: [{ columnIndex: 2, userEnteredValue: { formulaValue: "=1+1" } }], unresolvedFormulaCells: [2] },
+  ].map(row => ({ ...row, rowHash: hashCanonical({ ...row, safeColumnIndexes }) }));
+  const counts = { rowsSerialized: rows.length, formulaCellCount: 1, unresolvedFormulaCount: 1 };
+  const pageBody = {
+    schemaVersion: schemaVersion.page,
+    spreadsheetId,
+    sourceSystem,
+    sheet: { sheetId, title, mode: "table", hidden: false, headerRow: 1, gridRows: 3, gridColumns: 3 },
+    page: { index: 0, startRow: 2, endRow: 3, a1Ranges: ["A2:C3"], safeColumnIndexes, omittedColumnIndexes: [], cellFields: "source-values-and-formulas" },
+    rows,
+    counts,
+  };
+  const pageHash = hashCanonical(pageBody);
+  const page = { ...pageBody, pageHash };
+  const path = "pages/41-2-3.json";
+  const pageReference = { path, sheetId, title, pageIndex: 0, startRow: 2, endRow: 3, pageHash, verifiedPageHash: pageHash, stable: true, counts };
+  const dataHash = hashCanonical([{ path, sheetId, pageIndex: 0, startRow: 2, endRow: 3, pageHash, counts }]);
+  const coverage = {
+    bodySheetsCaptured: 1, totalPages: 1, rowsWithValues: 1, formulaCellCount: 1, unresolvedFormulaCount: 1,
+    sheets: [{ sheetId, title, hidden: false, mode: "table", pageCount: 1 }],
+  };
+  const timestamps = {
+    firstReadAt: "2026-10-09T12:00:00.000Z",
+    verificationStartedAt: "2026-10-09T12:01:00.000Z",
+    verificationCompletedAt: "2026-10-09T12:02:00.000Z",
+    cutoffAt: "2026-10-09T12:03:00.000Z",
+  };
+  const stability = { stable: true, metadataStable: true, headersStable: true, pageHashesStable: true, scanComplete: true };
+  const verification = {
+    schemaVersion: "appsheet-sheet-verification/v1",
+    verifiedPages: 1,
+    totalPagesExpected: 1,
+    bodyPersisted: false,
+    pages: [{ sheetId, title, pageIndex: 0, path, pageHashFirst: pageHash, pageHashVerified: pageHash, stable: true, counts }],
+    mismatches: [],
+  };
+  const verificationBytes = `${JSON.stringify(verification)}\n`;
+  const evidence = {
+    verificationPass2: { path: "verification-pass2.json", sha256: sha256(verificationBytes) },
+  };
+  const hashContract = { page: "canonical-sha256-v1" };
+  const metadataHash = hashCanonical(metadata.spreadsheet);
+  const headersHash = hashCanonical({ schemaVersion: schemaVersion.headers, spreadsheetId, sheets: headers.sheets });
+  const manifestHash = hashCanonical({
+    schemaVersion: schemaVersion.manifest,
+    sourceSystem,
+    sourceId: spreadsheetId,
+    spreadsheetId,
+    metadataHash,
+    headersHash,
+    dataHash,
+    definitionHash: null,
+    stability,
+    coverage,
+    pages: [pageReference],
+    evidence,
+    hashContract,
+  });
+  const manifest = {
+    schemaVersion: schemaVersion.manifest,
+    captureId: `appsreal-${manifestHash.slice(0, 16)}`,
+    sourceSystem,
+    sourceId: spreadsheetId,
+    spreadsheetId,
+    manifestHash,
+    dataHash,
+    metadataHash,
+    headersHash,
+    definitionHash: null,
+    timestamps,
+    timestampGaps: [],
+    stability,
+    coverage,
+    pages: [pageReference],
+    evidence,
+    hashContract,
+  };
+
+  await mkdir(directory, { mode: 0o700 });
+  await mkdir(join(directory, "pages"), { mode: 0o700 });
+  await writePrivateJson(join(directory, "headers.json"), headers);
+  await writePrivateJson(join(directory, "metadata.json"), metadata);
+  await writePrivateJson(join(directory, "manifest.json"), manifest);
+  await writePrivateJson(join(directory, path), page);
+  await writeFile(join(directory, evidence.verificationPass2.path), verificationBytes, { mode: 0o600 });
+}
+
+test("pending preview excludes fully blank source rows but retains unresolved formula evidence", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "appsheet-pending-empty-row-test-"));
+  const captureDirectory = join(workspace, "capture");
+  try {
+    await createPendingCaptureWithBlankAndFormulaRows(captureDirectory);
+    const preview = await prepareAppSheetPendingPreview(captureDirectory);
+    assert.equal(preview.summary.rowCount, 1);
+    assert.deepEqual(preview.summary.tableCounts, { Pre_Venta: 1 });
+    assert.deepEqual(preview.records.map(record => record.sourceRow), [3]);
+    assert.equal(preview.records[0]?.reconciliation.dimensions.preSale.status, "needs_review");
+    assert.deepEqual(preview.records[0]?.reconciliation.dimensions.preSale.reasonCodes, ["presale_source_evidence_unresolved"]);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
 
 test("confirmed pre-sale needs both an explicit state and linked detail rows", () => {
   const rows = [

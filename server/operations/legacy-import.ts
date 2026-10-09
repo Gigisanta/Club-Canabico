@@ -550,6 +550,7 @@ legacyImportRoutes.get("/staged-records", async (req, res) => {
 });
 
 legacyImportRoutes.post("/:snapshotId/review", async (req, res) => {
+  await requireFullLegacySourceScope(db, req.user);
   await requireCapability(db, req.user, "imports.review");
   const params = z.strictObject({ snapshotId: z.string().min(1).max(100) }).parse(req.params);
   const body = z.strictObject({ requestId: z.uuid(), fileHash: hash, changedContentReviewed: z.boolean(), evidence: reviewEvidence }).parse(req.body);
@@ -561,6 +562,7 @@ legacyImportRoutes.post("/:snapshotId/review", async (req, res) => {
 });
 
 legacyImportRoutes.post("/:snapshotId/mappings", async (req, res) => {
+  await requireFullLegacySourceScope(db, req.user);
   await requireCapability(db, req.user, "imports.review");
   const params = z.strictObject({ snapshotId: z.string().min(1).max(100) }).parse(req.params);
   const body = z.strictObject({ requestId: z.uuid(), mappings: z.array(z.strictObject({
@@ -577,6 +579,7 @@ legacyImportRoutes.post("/:snapshotId/mappings", async (req, res) => {
 });
 
 legacyImportRoutes.post("/:snapshotId/exceptions/:exceptionId/resolve", async (req, res) => {
+  await requireFullLegacySourceScope(db, req.user);
   await requireCapability(db, req.user, "imports.review");
   const params = z.strictObject({ snapshotId: z.string().min(1).max(100), exceptionId: z.string().min(1).max(100) }).parse(req.params);
   const body = z.strictObject({
@@ -595,6 +598,7 @@ legacyImportRoutes.post("/:snapshotId/exceptions/:exceptionId/resolve", async (r
 });
 
 legacyImportRoutes.post("/:snapshotId/activate-master", async (req, res) => {
+  await requireFullLegacySourceScope(db, req.user);
   await requireCapability(db, req.user, "imports.review");
   const params = z.strictObject({ snapshotId: z.string().min(1).max(100) }).parse(req.params);
   const body = masterActivationRequestSchema.parse(req.body);

@@ -6,7 +6,7 @@ import { db } from "../db.js";
 import { registerCommand, requireCapability, objectId, evidence, json, wire, OperationError, type Tx } from "./core.js";
 import { legacyPayloadHash } from "./legacy-upload-contract.js";
 import { isCredentialBearingHeader } from "./legacy-reader.js";
-import { assertLegacyHistorySourceAllowed } from "./legacy-source-policy.js";
+import { assertLegacyHistorySourceAllowed, requireFullLegacySourceScope } from "./legacy-source-policy.js";
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const state = z.enum(["known", "absent", "invalid", "not-applicable"]);
@@ -150,8 +150,9 @@ registerCommand("LegacyHistoryCorrected", { kind: "legacyImport", capability: "i
   },
 });
 export const legacyHistoryRoutes = Router();
-legacyHistoryRoutes.get("/publications", async (req, res) => { await requireCapability(db, req.user, "imports.review"); res.json(wire({ items: await db.legacyHistoryPublication.findMany({ orderBy: { sourceSystem: "asc" } }) })); });
+legacyHistoryRoutes.get("/publications", async (req, res) => { await requireFullLegacySourceScope(db, req.user); await requireCapability(db, req.user, "imports.review"); res.json(wire({ items: await db.legacyHistoryPublication.findMany({ orderBy: { sourceSystem: "asc" } }) })); });
 legacyHistoryRoutes.get("/publication-preview", async (req, res) => {
+  await requireFullLegacySourceScope(db, req.user);
   await requireCapability(db, req.user, "imports.review");
   const snapshotId = objectId.parse(req.query.snapshotId), snapshot = await db.legacyImportSnapshot.findUnique({ where: { id: snapshotId }, select: { sourceSystem: true, fileHash: true, status: true } });
   if (!snapshot) throw new OperationError(423, "HISTORY_SOURCE_PENDING", "La fuente requiere una revisión independiente.");
@@ -160,6 +161,7 @@ legacyHistoryRoutes.get("/publication-preview", async (req, res) => {
   res.json(wire({ snapshotId, fileHash: snapshot.fileHash, replacement: await replacementEvidence(db, snapshot.sourceSystem, snapshotId) }));
 });
 legacyHistoryRoutes.get("/projection-status", async (req, res) => {
+  await requireFullLegacySourceScope(db, req.user);
   await requireCapability(db, req.user, "imports.review");
   const query = z.strictObject({ snapshotId: objectId, mappingId: objectId.optional() }).parse(req.query);
   const result = await db.$transaction(async tx => {

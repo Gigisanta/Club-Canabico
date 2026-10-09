@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,6 +45,35 @@ function requireTestDatabase() {
   assert.ok(hostname === "localhost" || hostname === "::1" || hostname.startsWith("127."), "TEST_DATABASE_URL must use loopback");
   assert.match(url.pathname, /^\/bombo_ui_[a-z0-9_-]+$/i, "TEST_DATABASE_URL must name a dedicated bombo_ui_ database");
   assert.ok(process.env.PG_BIN, "PG_BIN must point to the PostgreSQL 18 client tools");
+  return url;
+}
+
+function optionalWrongTargetDatabase(testDatabase: URL) {
+  const raw = process.env.WRONG_TARGET_TEST_DATABASE_URL;
+  if (!raw) return new URL(testDatabase);
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    assert.fail("WRONG_TARGET_TEST_DATABASE_URL must be a valid PostgreSQL URL");
+  }
+  assert.ok(["postgres:", "postgresql:"].includes(url.protocol), "the wrong-target test database must be a PostgreSQL URL");
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  assert.ok(hostname === "localhost" || hostname === "::1" || hostname.startsWith("127."), "the wrong-target test database must use loopback");
+  assert.match(url.pathname, /^\/bombo_ui_[a-z0-9_-]+$/i, "the wrong-target test database must name a dedicated bombo_ui_ database");
+  assert.notEqual(databaseTargetIdentity(testDatabase), databaseTargetIdentity(url),
+    "WRONG_TARGET_TEST_DATABASE_URL must name a different database from TEST_DATABASE_URL");
+  const restoreRaw = process.env.RESTORE_TEST_DATABASE_URL;
+  if (restoreRaw) {
+    let restoreUrl: URL;
+    try {
+      restoreUrl = new URL(restoreRaw);
+    } catch {
+      assert.fail("RESTORE_TEST_DATABASE_URL must be a valid PostgreSQL URL");
+    }
+    assert.notEqual(databaseTargetIdentity(url), databaseTargetIdentity(restoreUrl),
+      "the wrong-target test database must remain separate from the empty restore rehearsal database");
+  }
   return url;
 }
 
@@ -236,17 +265,27 @@ test("financial source staging is scoped, digest checked, atomic, and idempotent
     "different credentials, schema, or loopback aliases must not disguise the same database target",
   );
   const schema = `financial_stage_${randomUUID().replaceAll("-", "")}`;
+  const wrongTargetDatabase = optionalWrongTargetDatabase(testDatabase);
+  assertSeparateDatabaseTargets(wrongTargetDatabase, originalDatabaseUrl);
+  const wrongSchema = `financial_wrong_target_${randomUUID().replaceAll("-", "")}`;
   const temporaryRoot = await mkdtemp(join(tmpdir(), "bombo-financial-source-stage-"));
   const backupDirectory = join(temporaryRoot, "verified-backup");
+  const legacyBackupDirectory = join(temporaryRoot, "legacy-unbound-backup");
   const privateObjectRoot = join(temporaryRoot, "private-objects");
   let schemaCreated = false;
+  let wrongSchemaCreated = false;
   let base: PrismaClient | undefined;
   let db: PrismaClient | undefined;
+  let wrongBase: PrismaClient | undefined;
+  let wrongDb: PrismaClient | undefined;
 
   try {
     const schemaState = await createSchema(testDatabase, schema);
     ({ base, db } = schemaState);
     schemaCreated = true;
+    const wrongSchemaState = await createSchema(wrongTargetDatabase, wrongSchema);
+    ({ base: wrongBase, db: wrongDb } = wrongSchemaState);
+    wrongSchemaCreated = true;
     await mkdir(privateObjectRoot, { recursive: true });
 
     const backup = await runBackupCli("backup", backupDirectory, {
@@ -268,14 +307,29 @@ test("financial source staging is scoped, digest checked, atomic, and idempotent
     assert.deepEqual(JSON.parse(verified.stdout), {
       mode: "verify", files: 1, integrity: true, migrationsValid: true, scope: "confirmed-server-state-only",
     });
+    const equivalentLoopbackUrl = new URL(schemaState.scopedUrl);
+    equivalentLoopbackUrl.hostname = "localhost";
+    const boundVerification = await runBackupCli("verify", backupDirectory, {
+      DATABASE_URL: equivalentLoopbackUrl.toString(),
+      BACKUP_ENCRYPTION_KEY: backupEncryptionKey,
+    });
+    assert.equal(boundVerification.code, 0, safeCliOutput(boundVerification));
+    const boundVerificationSummary = JSON.parse(boundVerification.stdout) as {
+      mode: string; targetVerified: boolean; targetFingerprint: string;
+    };
+    assert.equal(boundVerificationSummary.mode, "verify");
+    assert.equal(boundVerificationSummary.targetVerified, true);
+    assert.match(boundVerificationSummary.targetFingerprint, /^[a-f0-9]{64}$/);
     const backupManifestBytes = await readFile(join(backupDirectory, "manifest.json"));
     const backupManifest = JSON.parse(backupManifestBytes.toString("utf8")) as {
-      databaseMajor: number; databaseVersion: string; encrypted: boolean; schema: string; scope: string;
+      databaseMajor: number; databaseVersion: string; encrypted: boolean; schema: string; scope: string; targetFingerprint: string;
     };
     const backupManifestHash = createHash("sha256").update(backupManifestBytes).digest("hex");
     assert.equal(backupManifest.databaseMajor, 18);
     assert.equal(backupManifest.encrypted, true);
     assert.equal(backupManifest.schema, schema);
+    assert.equal(backupManifest.targetFingerprint, boundVerificationSummary.targetFingerprint);
+    assert.match(backupManifest.targetFingerprint, /^[a-f0-9]{64}$/);
     assert.equal(backupManifest.scope, "confirmed-server-state-only");
     assert.match(backupManifest.databaseVersion, /^18(?:\.|$)/);
     assert.equal((await readFile(join(backupDirectory, "manifest.sha256"), "utf8")).trim(), backupManifestHash);
@@ -332,6 +386,53 @@ test("financial source staging is scoped, digest checked, atomic, and idempotent
         { month: "2026-09", currency: "USD", count: 1, inflowMinor: "1000", outflowMinor: "0", netMovementMinor: "1000" },
       ],
     });
+
+    const originalDatabaseUrlForStage = process.env.DATABASE_URL;
+    const originalBackupKeyForStage = process.env.BACKUP_ENCRYPTION_KEY;
+    process.env.BACKUP_ENCRYPTION_KEY = backupEncryptionKey;
+    const wrongConnection = await wrongDb.$queryRawUnsafe<Array<{ database: string; schema: string }>>(
+      "SELECT current_database() AS database, current_schema() AS schema",
+    );
+    assert.equal(wrongConnection[0]?.database, decodeURIComponent(wrongTargetDatabase.pathname.slice(1)));
+    assert.equal(wrongConnection[0]?.schema, wrongSchema);
+    const beforeWrongTarget = await operationState(wrongDb);
+    const beforeOriginWrongTarget = await operationState(db);
+    process.env.DATABASE_URL = wrongSchemaState.scopedUrl.toString();
+    await assert.rejects(
+      stageFinancialSource(prepared, {
+        filename: prepared.filename,
+        reviewManifest,
+        backupReference: backupDirectory,
+      }),
+      (error: unknown) => error instanceof FinancialSourceStageError && error.code === "backup_verification_failed",
+      "a same-version backup must be rejected when the configured live destination differs",
+    );
+    assert.deepEqual(await operationState(wrongDb), beforeWrongTarget, "a wrong-target rejection must not write into the configured destination");
+    assert.deepEqual(await operationState(db), beforeOriginWrongTarget, "a wrong-target rejection must not write into the backup source either");
+
+    await cp(backupDirectory, legacyBackupDirectory, { recursive: true });
+    const legacyManifest = JSON.parse(await readFile(join(legacyBackupDirectory, "manifest.json"), "utf8")) as Record<string, unknown>;
+    delete legacyManifest.targetFingerprint;
+    const legacyManifestBytes = Buffer.from(JSON.stringify(legacyManifest, null, 2));
+    await writeFile(join(legacyBackupDirectory, "manifest.json"), legacyManifestBytes);
+    await writeFile(join(legacyBackupDirectory, "manifest.sha256"), `${createHash("sha256").update(legacyManifestBytes).digest("hex")}\n`);
+    await writeFile(join(legacyBackupDirectory, "manifest.hmac"), `${createHmac("sha256", Buffer.from(backupEncryptionKey, "hex")).update(legacyManifestBytes).digest("hex")}\n`);
+    process.env.DATABASE_URL = schemaState.scopedUrl.toString();
+    const beforeLegacyTarget = await operationState(db);
+    await assert.rejects(
+      stageFinancialSource(prepared, {
+        filename: prepared.filename,
+        reviewManifest,
+        backupReference: legacyBackupDirectory,
+      }),
+      (error: unknown) => error instanceof FinancialSourceStageError && error.code === "backup_verification_failed",
+      "a correctly authenticated historical manifest without destination binding must not authorize application",
+    );
+    assert.deepEqual(await operationState(db), beforeLegacyTarget, "a legacy unbound backup must reject before writes");
+    if (originalDatabaseUrlForStage === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = originalDatabaseUrlForStage;
+    if (originalBackupKeyForStage === undefined) delete process.env.BACKUP_ENCRYPTION_KEY;
+    else process.env.BACKUP_ENCRYPTION_KEY = originalBackupKeyForStage;
 
     const beforeRejectedManifest = await operationState(db);
     const mismatchedReviewManifest = structuredClone(reviewManifest) as typeof reviewManifest;
@@ -495,6 +596,13 @@ test("financial source staging is scoped, digest checked, atomic, and idempotent
       await base?.$disconnect();
     }
     await db?.$disconnect();
+    await wrongDb?.$disconnect();
+    if (wrongSchemaCreated && wrongBase) {
+      try { await wrongBase.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${wrongSchema}" CASCADE`); }
+      finally { await wrongBase.$disconnect(); }
+    } else {
+      await wrongBase?.$disconnect();
+    }
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
