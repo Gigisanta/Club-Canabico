@@ -101,6 +101,6 @@ export function BreakEvenCard({ data, money }: { data: BreakEvenResult; money: (
         {covered ? " · desde acá es ganancia del mes" : data.salesPerDay !== null ? ` · faltan ≈ ${money(data.salesPerDay)} por día en ventas` : ` · faltan ${money(data.remaining)} de margen`}</p>
     </div>
     <Track data={data} label={title} />
-    <Link to="/app/finanzas">Ver equilibrio <ArrowRight size={16} aria-hidden="true" /></Link>
+    <Link to="/app/finanzas?view=summary">Ver equilibrio <ArrowRight size={16} aria-hidden="true" /></Link>
   </section>;
 }

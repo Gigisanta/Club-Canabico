@@ -1,0 +1,115 @@
+.app-shell .financial-statements { display: grid; gap: 18px; min-width: 0; color: var(--bo-ink); }
+.app-shell .financial-statements-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px 24px; padding-bottom: 16px; border-bottom: 1px solid var(--bo-rule); }
+.app-shell .financial-statements-head h2 { margin: 2px 0 5px; font-size: clamp(22px, 2.4vw, 30px); line-height: 1.14; letter-spacing: -.035em; }
+.app-shell .financial-statements-head p { max-width: 68ch; margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.app-shell .financial-report-eyebrow { display: block; color: var(--brand-olive-mid); font-size: 13px; font-weight: 700; letter-spacing: .015em; }
+.app-shell .financial-report-print, .app-shell .financial-report-update, .app-shell .financial-report-error button, .app-shell .financial-report-empty-actions a {
+  display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 9px 14px; border: 1px solid var(--bo-rule-strong); border-radius: 9px;
+  background: var(--bo-paper); color: var(--bo-ink); font: inherit; font-size: 14px; font-weight: 700; text-decoration: none; cursor: pointer;
+}
+.app-shell .financial-report-print:hover, .app-shell .financial-report-error button:hover, .app-shell .financial-report-empty-actions a:hover { background: #f0e9d2; }
+.app-shell .financial-report-print:disabled { opacity: .55; cursor: not-allowed; }
+.app-shell .financial-report-filters { display: grid; grid-template-columns: repeat(2, minmax(150px, 1fr)) minmax(120px, .75fr) auto; align-items: end; gap: 12px; padding: 14px; border: 1px solid var(--bo-rule); border-radius: 12px; background: var(--bo-paper); }
+.app-shell .financial-report-filters label, .app-shell .financial-scenario-inputs label { display: grid; gap: 5px; min-width: 0; color: var(--bo-ink-soft); font-size: 13px; font-weight: 700; }
+.app-shell .financial-report-filters input, .app-shell .financial-report-filters select, .app-shell .financial-scenario-inputs input {
+  width: 100%; min-width: 0; min-height: 44px; padding: 9px 10px; border: 1px solid var(--bo-rule-strong); border-radius: 8px; background: #fffdf6; color: var(--bo-ink); font: inherit; font-size: 15px;
+}
+.app-shell .financial-report-filters input[aria-invalid="true"] { border-color: #a74722; }
+.app-shell .financial-report-update { border-color: var(--brand-olive); background: var(--brand-olive); color: #fffaf0; }
+.app-shell .financial-report-update:hover { background: var(--brand-olive-mid); }
+.app-shell .financial-report-filters :is(input, select, button):focus-visible, .app-shell .financial-report-print:focus-visible, .app-shell .financial-report-error button:focus-visible, .app-shell .financial-report-empty-actions a:focus-visible, .app-shell .financial-scenario-inputs input:focus-visible { outline: 3px solid var(--brand-orange); outline-offset: 2px; }
+.app-shell .financial-report-period-note { margin: -5px 0 0; color: var(--muted); font-size: 13px; }
+.app-shell .financial-report-content { display: grid; gap: 16px; min-width: 0; }
+.app-shell .financial-report-card { min-width: 0; padding: clamp(16px, 2.2vw, 22px); border: 1px solid var(--bo-rule); border-radius: 13px; background: var(--bo-paper); }
+.app-shell .financial-report-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px 18px; margin-bottom: 10px; }
+.app-shell .financial-report-card-head h3 { margin: 2px 0 0; font-size: clamp(18px, 2vw, 23px); line-height: 1.2; letter-spacing: -.025em; }
+.app-shell .financial-report-coverage { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 7px 10px; }
+.app-shell .financial-report-state { display: inline-flex; align-items: center; min-height: 28px; padding: 4px 9px; border: 1px solid transparent; border-radius: 99px; font-size: 12px; font-weight: 750; white-space: nowrap; }
+.app-shell .financial-report-state.is-complete { background: #e6eed8; color: #304c21; }
+.app-shell .financial-report-state.is-partial { background: #fff0d8; color: #66410e; }
+.app-shell .financial-report-state.is-unavailable { background: #f3ead8; color: #514b3a; }
+.app-shell .financial-report-state.is-scenario { border-color: var(--bo-rule-strong); background: transparent; color: var(--bo-ink-soft); }
+.app-shell .financial-report-coverage details { position: relative; }
+.app-shell .financial-report-coverage summary { min-height: 32px; padding: 7px 0; color: var(--brand-olive); font-size: 12px; font-weight: 700; cursor: pointer; }
+.app-shell .financial-report-coverage-list { display: grid; gap: 8px; width: min(64vw, 540px); max-width: calc(100vw - 48px); margin: 6px 0 0; padding: 0; list-style: none; }
+.app-shell .financial-report-coverage-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 4px 10px; padding: 9px 10px; border: 1px solid var(--bo-rule); border-radius: 8px; background: #fffdf6; }
+.app-shell .financial-report-coverage-list li > span:first-child { display: grid; gap: 2px; min-width: 0; }
+.app-shell .financial-report-coverage-list strong { color: var(--bo-ink); font-size: 12px; }
+.app-shell .financial-report-coverage-list small { color: var(--muted); font-size: 11px; line-height: 1.4; }
+.app-shell .financial-report-coverage-list .financial-report-state { min-height: 24px; padding: 3px 7px; font-size: 10px; }
+.app-shell .financial-report-coverage-list .is-unverified, .app-shell .financial-report-coverage-list .is-unknown { background: #f3ead8; color: #514b3a; }
+.app-shell .financial-report-coverage-reason { grid-column: 1 / -1; }
+.app-shell .financial-report-method, .app-shell .financial-report-copy { max-width: 88ch; margin: 8px 0 14px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.app-shell .financial-report-table-wrap { width: 100%; overflow-x: auto; border: 1px solid var(--bo-rule); border-radius: 9px; }
+.app-shell .financial-report-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.app-shell .financial-report-table th, .app-shell .financial-report-table td { padding: 11px 12px; border-bottom: 1px solid var(--bo-rule); text-align: right; vertical-align: top; font-variant-numeric: tabular-nums; }
+.app-shell .financial-report-table thead th { background: #f4eedc; color: var(--bo-ink-soft); font-size: 12px; font-weight: 750; }
+.app-shell .financial-report-table th:first-child, .app-shell .financial-report-table td:first-child { text-align: left; }
+.app-shell .financial-report-table tbody th { font-weight: 650; }
+.app-shell .financial-report-table tbody tr:last-child > * { border-bottom: 0; }
+.app-shell .financial-report-table .financial-report-total { background: #f4eedc; font-weight: 750; }
+.app-shell .financial-report-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 14px 0 0; border: 1px solid var(--bo-rule); border-radius: 10px; overflow: hidden; }
+.app-shell .financial-report-metrics > div { display: grid; align-content: start; gap: 6px; min-width: 0; padding: 13px 15px; border-bottom: 1px solid var(--bo-rule); }
+.app-shell .financial-report-metrics > div:not(:nth-child(3n + 1)) { border-left: 1px solid var(--bo-rule); }
+.app-shell .financial-report-metrics dt { color: var(--bo-ink-soft); font-size: 13px; line-height: 1.35; }
+.app-shell .financial-report-metrics dd { margin: 0; color: var(--bo-ink); font-size: clamp(15px, 1.8vw, 19px); font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.app-shell .financial-report-reasons { display: grid; gap: 6px; margin: 8px 0 0; padding-left: 19px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.app-shell .financial-report-coverage .financial-report-reasons { max-width: 50ch; margin: 4px 0 0; }
+.app-shell .financial-report-empty, .app-shell .financial-report-blocked, .app-shell .financial-report-loading, .app-shell .financial-report-inline-error, .app-shell .financial-report-pending, .app-shell .financial-report-error {
+  display: grid; gap: 5px; margin: 12px 0 0; padding: 15px 16px; border: 1px solid var(--bo-rule); border-radius: 10px; background: #f8f2e3; color: var(--bo-ink-soft); font-size: 14px; line-height: 1.5;
+}
+.app-shell .financial-report-empty strong, .app-shell .financial-report-blocked strong { color: var(--bo-ink); }
+.app-shell .financial-report-empty-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 6px; }
+.app-shell .financial-report-gap { display: grid; gap: 6px; padding: 15px 16px; border: 1px solid var(--bo-rule); border-radius: 10px; background: #f8f2e3; }
+.app-shell .financial-report-gap strong { color: var(--bo-ink); font-size: 14px; }
+.app-shell .financial-report-gap p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.app-shell .financial-report-blocked { border-color: #d2b47a; background: #fff7e4; }
+.app-shell .financial-report-inline-error, .app-shell .financial-report-error { border-color: #c77e5c; background: #fff0e9; color: #5f2e1b; }
+.app-shell .financial-report-error { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.app-shell .financial-report-error p { margin: 0; }
+.app-shell .financial-report-error button { min-height: 40px; }
+.app-shell .financial-report-loading { display: flex; align-items: center; }
+.app-shell .financial-report-loading::before { width: 12px; height: 12px; border: 2px solid var(--bo-rule-strong); border-top-color: var(--brand-olive); border-radius: 50%; content: ""; animation: financial-report-spin .7s linear infinite; }
+@keyframes financial-report-spin { to { transform: rotate(360deg); } }
+.app-shell .financial-obligation-weeks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 14px 0 0; padding: 0; list-style: none; }
+.app-shell .financial-obligation-weeks li { min-width: 0; padding: 12px 13px; border: 1px solid var(--bo-rule); border-radius: 9px; }
+.app-shell .financial-obligation-week-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 3px 8px; padding-bottom: 8px; border-bottom: 1px solid var(--bo-rule); font-size: 13px; }
+.app-shell .financial-obligation-week-head span { color: var(--muted); }
+.app-shell .financial-obligation-weeks dl { display: grid; gap: 8px; margin: 9px 0 0; }
+.app-shell .financial-obligation-weeks dl > div { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.app-shell .financial-obligation-weeks dt { color: var(--bo-ink-soft); font-size: 12px; line-height: 1.35; }
+.app-shell .financial-obligation-weeks dd { margin: 0; color: var(--bo-ink); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
+.app-shell .financial-result-scenario { border-top: 3px solid var(--brand-olive); }
+.app-shell .financial-scenario-inputs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.app-shell .financial-scenario-inputs label { padding: 10px; border: 1px solid var(--bo-rule); border-radius: 9px; background: #fffdf6; }
+.app-shell .financial-scenario-inputs input { background: white; }
+.app-shell .financial-report-pending { background: #f3ead8; }
+@media (max-width: 850px) {
+  .app-shell .financial-report-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .app-shell .financial-report-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .app-shell .financial-report-metrics > div:not(:nth-child(3n + 1)) { border-left: 0; }
+  .app-shell .financial-report-metrics > div:nth-child(2n) { border-left: 1px solid var(--bo-rule); }
+}
+@media (max-width: 620px) {
+  .app-shell .financial-statements-head { align-items: stretch; flex-direction: column; }
+  .app-shell .financial-report-print { align-self: flex-start; }
+  .app-shell .financial-report-filters { grid-template-columns: minmax(0, 1fr); }
+  .app-shell .financial-report-filters label, .app-shell .financial-report-update { width: 100%; }
+  .app-shell .financial-report-card-head { align-items: flex-start; flex-direction: column; }
+  .app-shell .financial-report-coverage { justify-content: flex-start; }
+  .app-shell .financial-report-coverage-list { width: min(100%, 540px); max-width: calc(100vw - 48px); }
+  .app-shell .financial-report-metrics, .app-shell .financial-obligation-weeks, .app-shell .financial-scenario-inputs { grid-template-columns: minmax(0, 1fr); }
+  .app-shell .financial-report-metrics > div:nth-child(n) { border-left: 0; }
+  .app-shell .financial-report-table { font-size: 12px; }
+  .app-shell .financial-report-table th, .app-shell .financial-report-table td { padding: 9px 7px; }
+  .app-shell .financial-report-table thead th { font-size: 11px; }
+  .app-shell .financial-report-error { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-shell .financial-report-loading::before { animation-duration: .01ms; }
+}
+@media print {
+  .app-shell .finance-nav, .app-shell .financial-report-filters, .app-shell .financial-report-print { display: none !important; }
+  .app-shell .financial-report-card { break-inside: avoid; box-shadow: none; }
+  .app-shell .financial-obligation-weeks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

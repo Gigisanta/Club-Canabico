@@ -1182,13 +1182,29 @@ async function managementContribution(range: ReportDateRange, scope: ReportScope
     ORDER BY p."kind", p."currency", p."verified", p."accrualPeriod", p."evidence"->>'costTreatment'
   `) : [];
   const variableCosts = moneyTotals();
+  const fixedOperatingCosts = moneyTotals();
+  let fixedOperatingCostPendingCount = 0;
+  let fixedOperatingCostClassifiedCount = 0;
   let pendingCostCount = 0;
   let classifiedCostCount = 0;
   for (const cost of costGroups) {
     const rowCount = Number(cost.rowCount);
-    if (cost.kind === "operating_expense" && cost.costTreatment === "fixed" && cost.verified) continue;
+    if (cost.kind === "operating_expense" && cost.costTreatment === "fixed" && cost.verified) {
+      if (cost.accrualPeriod && ((range.from && cost.accrualPeriod < range.from.slice(0, 7)) || (range.to && cost.accrualPeriod > range.to.slice(0, 7)))) continue;
+      if (!cost.accrualPeriod) {
+        fixedOperatingCostPendingCount += rowCount;
+        continue;
+      }
+      addMoney(fixedOperatingCosts, cost.currency, BigInt(cost.amountMinor));
+      fixedOperatingCostClassifiedCount += rowCount;
+      continue;
+    }
     if (cost.accrualPeriod && ((range.from && cost.accrualPeriod < range.from.slice(0, 7)) || (range.to && cost.accrualPeriod > range.to.slice(0, 7)))) continue;
-    if (!cost.verified || !cost.accrualPeriod || (cost.kind !== "courier_fee" && cost.costTreatment !== "variable")) {
+    if (!cost.verified || !cost.accrualPeriod) {
+      pendingCostCount += rowCount;
+      continue;
+    }
+    if (cost.kind !== "courier_fee" && (cost.kind !== "operating_expense" || cost.costTreatment !== "variable")) {
       pendingCostCount += rowCount;
       continue;
     }
@@ -1204,11 +1220,16 @@ async function managementContribution(range: ReportDateRange, scope: ReportScope
     for (const row of asMoneyBuckets(charges)) addMoney(totals, row.currency, BigInt(row.minor));
     for (const row of asMoneyBuckets(variableCosts)) addMoney(totals, row.currency, -BigInt(row.minor));
   }
+  const actualOperatingCosts = moneyTotals();
+  for (const row of asMoneyBuckets(variableCosts)) addMoney(actualOperatingCosts, row.currency, BigInt(row.minor));
+  for (const row of asMoneyBuckets(fixedOperatingCosts)) addMoney(actualOperatingCosts, row.currency, BigInt(row.minor));
   return {
     recognizedDeliveryAndSurchargeByCurrency: asMoneyBuckets(charges),
     pendingAppSheetDeliveryTariffByCurrency: asMoneyBuckets(pendingDeliveryTariffs),
     pendingAppSheetDeliveryTariffRecognized: false,
     approvedAccruedVariableCostsByCurrency: scope.memberIds === undefined ? asMoneyBuckets(variableCosts) : null,
+    approvedAccruedFixedOperatingCostsByCurrency: scope.memberIds === undefined ? asMoneyBuckets(fixedOperatingCosts) : null,
+    approvedAccruedOperatingCostsByCurrency: scope.memberIds === undefined ? asMoneyBuckets(actualOperatingCosts) : null,
     managementContributionBeforeFixedCostsByCurrency: ready ? asMoneyBuckets(totals) : null,
     managementCoverage: {
       state: ready ? attestation?.sourcePeriodCompletenessAttested ? "attested" : "unverified" : "partial",
@@ -1221,6 +1242,14 @@ async function managementContribution(range: ReportDateRange, scope: ReportScope
       pendingCostCount: scope.memberIds === undefined ? pendingCostCount : null,
       classifiedCostCount: scope.memberIds === undefined ? classifiedCostCount : null,
       costQueryComplete: scope.memberIds === undefined ? true : null,
+      costClassificationCoverage: scope.memberIds === undefined ? {
+        state: pendingCostCount === 0 && fixedOperatingCostPendingCount === 0 ? "complete" as const : "partial" as const,
+        classifiedRows: classifiedCostCount + fixedOperatingCostClassifiedCount,
+        unresolvedRows: pendingCostCount + fixedOperatingCostPendingCount,
+        variableRows: classifiedCostCount,
+        fixedRows: fixedOperatingCostClassifiedCount,
+        actualFixedOperatingCostsByCurrency: asMoneyBuckets(fixedOperatingCosts),
+      } : null,
       costRecognition: "verified-variable-obligations-by-explicit-accrual-month; payments-not-added",
       chargeRecognition: "frozen-net-charges-on-completed-fulfillment; staff-confirmed-AppSheet-moto-client-total-is-explicit; partial-positive-charges-require-review",
       reason: scope.memberIds !== undefined ? "general-costs-withheld-by-member-scope" : ready ? attestation?.sourcePeriodCompletenessAttested ? null : "source-period-completeness-not-attested" : "cost-allocation-or-charge-coverage-pending",
@@ -2860,6 +2889,142 @@ async function obligationsThirteenWeeks(range: ReportDateRange) {
     ? coverage("13-week-payables", payableCount, payableCount)
     : partialCoverage("13-week-payables", Number(payableSummary?.validCount ?? 0n), payableCount, "invalid-payable-source-data-or-summary-count-mismatch"),
   coverage("visible-13-week-payable-details", payables.length, payableCount), coverage("club-and-custody-accounts", accounts.length, activeAccountCount)]);
+}
+
+/** Cash-flow detail for the consolidated statement. Kept inside the same read snapshot as
+ * the canonical cash-ledger report; custody accounts remain outside club cash. */
+async function financialCashFlow(range: ReportDateRange) {
+  const from = range.from ?? civilDateAt(new Date());
+  const to = range.to ?? from;
+  const start = reportCivilDateStartUtc(from);
+  const eventRange = timestampFilter({ from, to });
+  const endExclusive = eventRange.lt ?? reportCivilDateStartUtc(addDays(to, 1));
+  const eventPredicates: Prisma.Sql[] = [];
+  if (eventRange.gte) eventPredicates.push(Prisma.sql`e."occurredAt" >= ${rawSqlUtcTimestamp(eventRange.gte)}`);
+  if (eventRange.lt) eventPredicates.push(Prisma.sql`e."occurredAt" < ${rawSqlUtcTimestamp(eventRange.lt)}`);
+  type OpeningAccount = {
+    accountId: string;
+    currency: string;
+    verified: boolean;
+    openingApproved: boolean;
+    openingMinor: string;
+    openingEventCount: bigint;
+    openingAt: Date | null;
+    openingEventMinor: string;
+    openingCurrencyMismatchCount: bigint;
+    prePeriodBalanceMinor: string;
+    prePeriodCurrencyMismatchCount: bigint;
+  };
+  type EventKindTotal = {
+    kind: string;
+    currency: string;
+    eventCount: bigint;
+    legCount: bigint;
+    inMinor: string;
+    outMinor: string;
+    currencyMismatchCount: bigint;
+  };
+  const accounts = await reportDb().$queryRaw<OpeningAccount[]>(Prisma.sql`
+    SELECT a."id" AS "accountId", a."currency", a."verified",
+      (a."openingApprovedBy" IS NOT NULL) AS "openingApproved",
+      a."openingMinor"::text AS "openingMinor",
+      COUNT(l."id") FILTER (WHERE e."kind" = 'opening')::bigint AS "openingEventCount",
+      MIN(e."occurredAt") FILTER (WHERE e."kind" = 'opening') AS "openingAt",
+      COALESCE(SUM(l."amountMinor") FILTER (WHERE e."kind" = 'opening' AND l."currency" = a."currency"), 0)::text AS "openingEventMinor",
+      COUNT(l."id") FILTER (WHERE e."kind" = 'opening' AND l."currency" <> a."currency")::bigint AS "openingCurrencyMismatchCount",
+      COALESCE(SUM(l."amountMinor") FILTER (WHERE e."occurredAt" < ${rawSqlUtcTimestamp(start)} AND l."currency" = a."currency"), 0)::text AS "prePeriodBalanceMinor",
+      COUNT(l."id") FILTER (WHERE e."occurredAt" < ${rawSqlUtcTimestamp(start)} AND l."currency" <> a."currency")::bigint AS "prePeriodCurrencyMismatchCount"
+    FROM "OperationAccount" AS a
+    LEFT JOIN "LedgerLeg" AS l ON l."accountId" = a."id"
+    LEFT JOIN "LedgerEvent" AS e ON e."id" = l."eventId"
+    WHERE a."kind" <> 'custody'
+      AND (a."active" = TRUE OR EXISTS (
+        SELECT 1 FROM "LedgerLeg" AS prior_l
+        JOIN "LedgerEvent" AS prior_e ON prior_e."id" = prior_l."eventId"
+        WHERE prior_l."accountId" = a."id" AND prior_e."occurredAt" < ${rawSqlUtcTimestamp(endExclusive)}
+      ))
+    GROUP BY a."id", a."currency", a."verified", a."openingApprovedBy", a."openingMinor"
+    ORDER BY a."currency" ASC, a."id" ASC
+  `);
+  const eventKinds = await reportDb().$queryRaw<EventKindTotal[]>(Prisma.sql`
+    SELECT e."kind", a."currency", COUNT(DISTINCT e."id")::bigint AS "eventCount",
+      COUNT(l."id")::bigint AS "legCount",
+      COALESCE(SUM(l."amountMinor") FILTER (WHERE l."currency" = a."currency" AND l."amountMinor" > 0), 0)::text AS "inMinor",
+      COALESCE(SUM(-l."amountMinor") FILTER (WHERE l."currency" = a."currency" AND l."amountMinor" < 0), 0)::text AS "outMinor",
+      COUNT(l."id") FILTER (WHERE l."currency" <> a."currency")::bigint AS "currencyMismatchCount"
+    FROM "LedgerEvent" AS e
+    JOIN "LedgerLeg" AS l ON l."eventId" = e."id"
+    JOIN "OperationAccount" AS a ON a."id" = l."accountId"
+    WHERE a."kind" <> 'custody'
+      ${eventPredicates.length ? Prisma.sql`AND ${Prisma.join(eventPredicates, " AND ")}` : Prisma.empty}
+    GROUP BY e."kind", a."currency"
+    ORDER BY e."kind" ASC, a."currency" ASC
+  `);
+  const accountIds = accounts.map(row => row.accountId);
+  const reconciliations = accountIds.length ? await reportDb().$queryRaw<Array<{
+    accountId: string;
+    date: string;
+    countedMinor: string;
+    calculatedMinor: string;
+    differenceMinor: string;
+  }>>(Prisma.sql`
+    SELECT DISTINCT ON ("accountId") "accountId", "date",
+      "countedMinor"::text AS "countedMinor", "calculatedMinor"::text AS "calculatedMinor",
+      "differenceMinor"::text AS "differenceMinor"
+    FROM "AccountReconciliation"
+    WHERE "accountId" IN (${Prisma.join(accountIds)}) AND "date" <= ${to}
+    ORDER BY "accountId" ASC, "date" DESC, "createdAt" DESC, "id" DESC
+  `) : [];
+  const closeByAccount = new Map(reconciliations.map(row => [row.accountId, row]));
+  return {
+    accounts: accounts.map(row => ({
+      accountId: row.accountId,
+      currency: row.currency,
+      verified: row.verified,
+      openingApproved: row.openingApproved,
+      openingMinor: row.openingMinor,
+      openingEventCount: Number(row.openingEventCount),
+      openingDate: row.openingAt ? civilDateAt(row.openingAt) : null,
+      openingEventMinor: row.openingEventMinor,
+      openingCurrencyMismatchCount: Number(row.openingCurrencyMismatchCount),
+      prePeriodBalanceMinor: row.prePeriodBalanceMinor,
+      prePeriodCurrencyMismatchCount: Number(row.prePeriodCurrencyMismatchCount),
+      reconciliation: closeByAccount.get(row.accountId) ?? null,
+    })),
+    eventKinds: eventKinds.map(row => ({
+      kind: row.kind,
+      currency: row.currency,
+      eventCount: Number(row.eventCount),
+      legCount: Number(row.legCount),
+      inMinor: row.inMinor,
+      outMinor: row.outMinor,
+      currencyMismatchCount: Number(row.currencyMismatchCount),
+    })),
+    range: { from, to },
+    custodyExcluded: true as const,
+    currenciesCombined: false as const,
+  };
+}
+
+/** Compose all financial statement inputs under one read-only RepeatableRead snapshot. */
+export async function queryFinancialReportSources(range: ReportDateRange, scope: ReportScope = {}) {
+  for (const area of ["sales-revenue", "product-contribution", "operating-expenses", "cash-ledger", "obligations-13-weeks"] as const) {
+    assertReportScope(area, scope);
+  }
+  return primaryDb.$transaction(async tx => {
+    await tx.$executeRawUnsafe("SET TRANSACTION READ ONLY");
+    return reportSnapshot.run(tx, async () => {
+      const [sales, product, expenses, cashLedgerReport, obligations, cashFlow] = await Promise.all([
+        salesRevenue(range, scope),
+        productContribution(range, scope),
+        operatingExpenses(range, scope),
+        cashLedger(range, scope),
+        obligationsThirteenWeeks(range),
+        financialCashFlow(range),
+      ]);
+      return { sales, product, expenses, cashLedger: cashLedgerReport, obligations, cashFlow };
+    });
+  }, { isolationLevel: "RepeatableRead", timeout: 30000 });
 }
 
 export async function queryOperationsReport(area: ReportAreaId, range: ReportDateRange = {}, scope: ReportScope = {}) {
