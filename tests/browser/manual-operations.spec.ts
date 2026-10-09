@@ -639,7 +639,9 @@ test("a confirmed reservation remains preparable by lot after its SKU is deactiv
     });
     expect(opening.result.lot).toMatchObject({ id: ownLotId, label: ownLotLabel, skuId });
     const ownStock = opening.result.balance as StockBalance;
-    expect(ownStock).toMatchObject({ id: expect.any(String), quantity: "5.000", reserved: "0.000", locationId: sharedSeedBalance.locationId, custodianId: owner.userId });
+    expect(ownStock).toMatchObject({ id: expect.any(String), locationId: sharedSeedBalance.locationId, custodianId: owner.userId });
+    expect(gramsInMilliunits(ownStock.quantity)).toBe(5000n);
+    expect(gramsInMilliunits(ownStock.reserved)).toBe(0n);
     expect(opening.result.opening).toMatchObject({ preparedBy: "ops-stock", approvedBy: owner.userId });
     expectGrams(opening.result.opening.quantity, "5");
 
