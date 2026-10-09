@@ -90,6 +90,11 @@ const note = (values: Record<string, string | boolean>, key = "evidence") => {
   if (!value) throw new Error("Agregá la evidencia o el motivo requerido.");
   return { note: value };
 };
+function localDateTimeToIso(value: string, label: string): string {
+  const parsed = new Date(value);
+  if (!value || !Number.isFinite(parsed.getTime())) throw new Error(`${label}: ingresá una fecha y hora válidas.`);
+  return parsed.toISOString();
+}
 const uuid = () => crypto.randomUUID();
 const fields = (...items: ActionField[]) => items;
 const field = (name: string, label: string, type: ActionField["type"] = "text", extra: Partial<ActionField> = {}): ActionField => ({ name, label, type, ...extra });
@@ -747,6 +752,8 @@ function ListTable({ title, rows, columns, renderActions, compactRows = false, s
 
 export function OperationalWorkspace(props: Props) {
   const { pageId, context, refreshKey, runCommand, openAction, onNotice, onRefresh } = props;
+  const [selectedCutoverProfile, setSelectedCutoverProfile] = useState<"legacy" | "appsheet-replacement">("appsheet-replacement");
+  const [selectedCutoverCaptureId, setSelectedCutoverCaptureId] = useState("");
   const [returnOrderId, setReturnOrderId] = useState("");
   const [ledgerAccountId, setLedgerAccountId] = useState("");
   const [reconciliationAccountId, setReconciliationAccountId] = useState("");
@@ -795,6 +802,10 @@ export function OperationalWorkspace(props: Props) {
   const pricing = useRemote<Record<string, unknown>>((pageId === "orders" || pageId === "commercial") && (hasCapability(context, "orders.write") || hasCapability(context, "prices.propose")) ? "/api/operations/policies" : null, refreshKey);
   const access = useRemote<Record<string, unknown>>(hasCapability(context, "access.manage") && ["routes", "accounts", "gates"].includes(pageId) ? "/api/operations/access" : null, refreshKey);
   const gates = useRemote<Record<string, unknown>>(pageId === "gates" ? "/api/operations/authority" : null, refreshKey);
+  useEffect(() => {
+    const available = rowsOf(gates.data, "captures").map(capture => textValue(capture.captureId, "")).filter(Boolean);
+    if (!available.includes(selectedCutoverCaptureId)) setSelectedCutoverCaptureId(available[0] ?? "");
+  }, [gates.data, selectedCutoverCaptureId]);
   const audit = useRemote<Record<string, unknown>>(pageId === "gates" && hasCapability(context, "access.manage") ? "/api/operations/audit" : null, refreshKey);
   const documents = useRemote<Record<string, unknown>>(pageId === "members" && hasCapability(context, "documents.read") ? "/api/operations/documents" : null, refreshKey);
   const settlementRoutes = useRemote<Record<string, unknown>>(pageId === "settlements" && hasCapability(context, "logistics.write") ? "/api/operations/routes" : null, refreshKey);
@@ -982,18 +993,44 @@ export function OperationalWorkspace(props: Props) {
     if (!gateId || !(cutoverGateIds as readonly string[]).includes(gateId)) continue;
     gateRowsById.set(gateId, gateRowsById.has(gateId) ? null : gate);
   }
+  const captureRows = rowsOf(gates.data, "captures");
+  const selectedCapture = captureRows.find(capture => textValue(capture.captureId, "") === selectedCutoverCaptureId) ?? null;
+  const replacementGateIds = selectedCutoverProfile === "appsheet-replacement"
+    ? cutoverGateIds.filter(gateId => gateId !== "legacy-writes-disabled")
+    : cutoverGateIds;
+  const gateMatchesSelectedCapture = (gate: Row | null | undefined) => {
+    if (selectedCutoverProfile !== "appsheet-replacement") return true;
+    const replacementEvidence = objectValue(objectValue(gate?.evidence).appSheetReplacement);
+    const captureId = textValue(selectedCapture?.captureId, "");
+    return Boolean(selectedCutoverCaptureId && gate?.captureManifestId === selectedCutoverCaptureId
+      && replacementEvidence.captureId === selectedCutoverCaptureId
+      && replacementEvidence.manifestHash === selectedCapture?.manifestHash
+      && replacementEvidence.dataHash === selectedCapture?.dataHash
+      && replacementEvidence.captureDefinitionHash === selectedCapture?.definitionHash
+      && captureId === selectedCutoverCaptureId);
+  };
   const activeGateUserIds = new Set(rowsOf(access.data, "users")
     .filter(user => user.active === true)
     .map(idOf)
     .filter(Boolean));
-  const approvedGateCount = cutoverGateIds.filter(gateId => gateRowsById.get(gateId)?.status === "approved").length;
-  const gatesHaveIndependentActiveReview = cutoverGateIds.every(gateId => {
+  const approvedGateCount = replacementGateIds.filter(gateId => {
+    const gate = gateRowsById.get(gateId);
+    return gate?.status === "approved" && gateMatchesSelectedCapture(gate);
+  }).length;
+  const gatesHaveIndependentActiveReview = replacementGateIds.every(gateId => {
     const gate = gateRowsById.get(gateId);
     const authorId = typeof gate?.approvedBy === "string" ? gate.approvedBy : "";
     const reviewerId = typeof gate?.reviewedBy === "string" ? gate.reviewedBy : "";
-    return gate?.status === "approved" && authorId.length > 0 && reviewerId.length > 0
+    return gate?.status === "approved" && gateMatchesSelectedCapture(gate) && authorId.length > 0 && reviewerId.length > 0
       && authorId !== reviewerId && activeGateUserIds.has(authorId) && activeGateUserIds.has(reviewerId);
   });
+  const selectedCaptureStability = objectValue(selectedCapture?.stability);
+  const selectedCaptureStable = selectedCapture !== null && selectedCaptureStability.stable === true
+    && selectedCaptureStability.metadataStable === true && selectedCaptureStability.headersStable === true
+    && selectedCaptureStability.pageHashesStable === true && selectedCaptureStability.scanComplete === true
+    && selectedCaptureStability.cutoverEligible === true && selectedCaptureStability.changedPages === 0
+    && selectedCaptureStability.failedPages === 0 && selectedCaptureStability.unresolvedFormulaCount === 0
+    && selectedCapture.dataUnresolvedFormulaCount === 0 && typeof selectedCapture.cutoffAt === "string";
   const authorityRow = recordValue(gates.data, "authority");
   const serverAuthorityMode = authorityRow === null ? "shadow"
     : typeof recordValue(authorityRow, "mode") === "string" ? String(recordValue(authorityRow, "mode")) : "unknown";
@@ -1011,7 +1048,10 @@ export function OperationalWorkspace(props: Props) {
     : !access.data ? "No hay una lista actual de personas para validar autores y revisores."
     : serverAuthorityMode === "active" ? "La autoridad ya figura activa en el servidor."
     : serverAuthorityMode !== "shadow" ? "El estado de autoridad no se pudo confirmar como sombra."
-    : approvedGateCount !== cutoverGateIds.length ? `Hay ${approvedGateCount} de ${cutoverGateIds.length} controles aprobados; el servidor exige que estén aprobados todos.`
+    : selectedCutoverProfile === "appsheet-replacement" && !selectedCutoverCaptureId ? "Elegí una captura identificada para revisar el reemplazo de AppSheet."
+    : selectedCutoverProfile === "appsheet-replacement" && !selectedCapture ? "La captura seleccionada no aparece en el inventario vigente; actualizá la vista."
+    : selectedCutoverProfile === "appsheet-replacement" && !selectedCaptureStable ? "La captura seleccionada no demuestra estabilidad completa; el servidor mantendrá bloqueada la activación."
+    : approvedGateCount !== replacementGateIds.length ? `Hay ${approvedGateCount} de ${replacementGateIds.length} controles aprobados para el perfil seleccionado; el servidor exige que estén aprobados todos.`
     : !gatesHaveIndependentActiveReview ? "Cada control debe conservar una persona autora y otra revisora, distintas y activas."
     : null;
   const canActivateAuthority = pageId === "gates"
@@ -1055,12 +1095,25 @@ export function OperationalWorkspace(props: Props) {
     "AuthorityActivated",
     "Activar autoridad del circuito",
     fields(evidenceField("Evidencia humana explícita de la decisión de activar autoridad")),
-    values => ({ evidence: note(values) }),
-    undefined,
-    "El servidor volverá a validar la configuración operativa, los 14 controles aprobados y las personas autoras y revisoras activas. La autoridad sólo cambia después de guardar el comando y su comprobante.",
+    values => ({
+      cutoverProfile: selectedCutoverProfile,
+      ...(selectedCutoverProfile === "appsheet-replacement" ? { captureId: selectedCutoverCaptureId } : {}),
+      evidence: note(values),
+    }),
+    authorityRow && typeof authorityRow === "object" ? authorityRow as Row : undefined,
+    `El servidor volverá a validar el perfil ${selectedCutoverProfile}, su captura y controles aprobados, además de las personas autoras y revisoras activas. La autoridad sólo cambia después de guardar el comando y su comprobante.`,
     true,
     undefined,
     { targetId: "operations", requestIdIsTarget: false },
+  );
+  const suspendAuthority = () => runAction(
+    "AuthoritySuspended",
+    "Suspender autoridad del circuito",
+    fields(field("reason", "Motivo humano de la suspensión", "textarea", { required: true, help: "El motivo queda en auditoría. La suspensión conserva operaciones y evidencias; no restaura ni borra datos." })),
+    values => ({ reason: str(values, "reason").trim() }),
+    authorityRow && typeof authorityRow === "object" ? authorityRow as Row : { id: "operations" },
+    "El servidor verificará propietario, autoridad activa y versión vigente. El circuito pasa a sombra y conserva su historial.",
+    false,
   );
   const reconcileAccount = (account: Row) => runAction("AccountReconciled", "Registrar arqueo de cuenta", fields(
     field("date", "Fecha del arqueo", "date", { required: true, defaultValue: localDate() }),
@@ -1604,7 +1657,14 @@ export function OperationalWorkspace(props: Props) {
       });
     }
     if (pageId === "members") buttons.push({ label: "Ficha e historial", onClick: () => setSelectedMemberId(id) });
-    if (pageId === "accounts" && row.verified && !row.openingApprovedBy && hasCommand(context, "AccountOpeningApproved")) buttons.push({ label: "Aprobar apertura", onClick: () => runAction("AccountOpeningApproved", "Aprobar saldo de apertura con dos personas", fields(field("amount", "Saldo de apertura conocido", "amount", { required: true }), userRows.length ? select("preparedBy", "Preparó el saldo (otra persona activa)", optionsOf(userRows.filter(user => user.id !== context.userId), ["name", "id"])) : field("preparedBy", "UUID de otra persona activa que preparó el saldo", "text", { required: true }), evidenceField("Evidencia de apertura")), v => ({ amountMinor: amountFormToMinor(str(v, "amount")), preparedBy: str(v, "preparedBy"), evidence: note(v) }), row, "El saldo seguirá desconocido hasta que esta apertura sea aprobada por una persona distinta de quien la preparó." ) });
+    if (pageId === "accounts" && row.verified && !row.openingApprovedBy && hasCommand(context, "AccountOpeningApproved")) buttons.push({ label: "Aprobar apertura", onClick: () => runAction(
+      "AccountOpeningApproved", "Aprobar saldo de apertura con dos personas", fields(
+        field("amount", "Saldo de apertura conocido", "amount", { required: true }),
+        userRows.length ? select("preparedBy", "Preparó el saldo (otra persona activa)", optionsOf(userRows.filter(user => user.id !== context.userId), ["name", "id"])) : field("preparedBy", "UUID de otra persona activa que preparó el saldo", "text", { required: true }),
+        ...(context.authority.cutoverProfile === "appsheet-replacement" ? [field("sourceRecordId", "ID de fila histórica AppSheet vinculada", "text", { required: true, help: "La apertura debe enlazar una fila histórica revisada del mismo corte." })] : []),
+        evidenceField("Evidencia de apertura"),
+      ), v => ({ amountMinor: amountFormToMinor(str(v, "amount")), preparedBy: str(v, "preparedBy"), ...(context.authority.cutoverProfile === "appsheet-replacement" ? { sourceRecordId: str(v, "sourceRecordId") } : {}), evidence: note(v) }),
+      row, "El saldo seguirá desconocido hasta que esta apertura sea aprobada por una persona distinta de quien la preparó." ) });
     if (pageId === "accounts" && row.openingApprovedBy && hasCommand(context, "AccountTransferred")) buttons.push({ label: "Transferir", onClick: () => runAction("AccountTransferred", "Transferir entre cuentas", fields(select("toAccountId", "Cuenta de destino en la misma moneda", optionsOf(accountRows.filter(a => a.id !== id && a.currency === row.currency), ["name", "id"])), field("amount", "Importe", "amount", { required: true }), field("reason", "Concepto", "textarea", { required: true })), v => ({ toAccountId: str(v, "toAccountId"), amountMinor: amountFormToMinor(str(v, "amount")), reason: str(v, "reason") }), row, "Un depósito de efectivo en banco se registra como una transferencia separada y evidenciada." ) });
     if (pageId === "collections" && row.status === "reported" && hasCommand(context, "CollectionVerified")) buttons.push({ label: "Verificar recepción", onClick: () => runAction("CollectionVerified", "Verificar recepción bancaria o de caja", fields(
       select("accountId", "Cuenta donde se recibió físicamente", optionsOf(accountRows.filter(account => account.currency === row.currency && (row.method === "cash" ? row.custodianId ? account.kind === "custody" && account.custodianId === row.custodianId : account.kind === "cash" : account.kind === "bank")), ["name", "id"])),
@@ -1633,7 +1693,32 @@ export function OperationalWorkspace(props: Props) {
       if (pair && row.status === "draft" && hasCommand(context, pair[0])) buttons.push({ label: pair[1], onClick: () => runAction(pair[0], pair[1], fields(evidenceField()), v => ({ evidence: note(v) }), row, "La aprobación es manual y conserva la evidencia de la persona revisora." ) });
     }
     if (pageId === "configuration" && row.kind !== "period_coverage" && row.state === "proposed" && hasCommand(context, "ConfigurationApproved")) buttons.push({ label: "Aprobar versión", onClick: () => runAction("ConfigurationApproved", "Aprobar configuración propuesta", fields(evidenceField()), v => ({ evidence: note(v) }), row, "Las versiones aprobadas quedan inmutables; un cambio requiere otra propuesta." ) });
-    if (pageId === "gates" && row.status !== "approved" && hasCommand(context, "CutoverGateReviewed")) buttons.push({ label: "Revisar habilitación", onClick: () => runAction("CutoverGateReviewed", "Registrar revisión humana de la habilitación", fields(userRows.length ? select("authorId", "Persona autora de la evidencia", optionsOf(userRows.filter(user => user.id !== context.userId), ["name", "id"])) : field("authorId", "UUID de la persona autora (distinta del revisor)", "text", { required: true }), evidenceField("Evidencia revisada")), v => ({ gateId: id, authorId: str(v, "authorId"), evidence: note(v) }), row, "Este registro manual de revisión no activa autoridad ni realiza el corte." ) });
+    const needsCaptureBoundRereview = pageId === "gates" && selectedCutoverProfile === "appsheet-replacement"
+      && row.status === "approved" && !gateMatchesSelectedCapture(row);
+    if (pageId === "gates" && (row.status !== "approved" || needsCaptureBoundRereview) && hasCommand(context, "CutoverGateReviewed")
+      && !(selectedCutoverProfile === "appsheet-replacement" && id === "legacy-writes-disabled")) buttons.push({ label: "Revisar habilitación", onClick: () => {
+        if (selectedCutoverProfile === "appsheet-replacement" && !selectedCutoverCaptureId) { onNotice("Elegí una captura antes de revisar controles del reemplazo de AppSheet."); return; }
+        const finalDeltaFields = selectedCutoverProfile === "appsheet-replacement" && id === "final-delta-reconciled" ? [
+          field("manualPauseStartedAt", "Inicio de la pausa manual de AppSheet", "datetime-local", { required: true, help: "La captura seleccionada debe comenzar después de esta fecha y hora." }),
+          field("manualPauseEndedAt", "Fin de la pausa (si ya ocurrió)", "datetime-local", { help: "Dejalo vacío si AppSheet sigue pausado; no registra por sí solo que la pausa ocurrió." }),
+          field("manualPauseEvidenceRef", "Referencia verificable de la pausa", "text", { required: true, help: "Indicá una referencia específica que otra persona pueda revisar." }),
+          field("expectedHandoffChangesRef", "Referencia separada para cambios del legado", "text", { required: true, help: "Los cambios posteriores permanecen separados para revisión." }),
+        ] : [];
+        runAction("CutoverGateReviewed", "Registrar revisión humana de la habilitación", fields(
+          userRows.length ? select("authorId", "Persona autora de la evidencia", optionsOf(userRows.filter(user => user.id !== context.userId), ["name", "id"])) : field("authorId", "UUID de la persona autora (distinta del revisor)", "text", { required: true }),
+          evidenceField("Evidencia revisada"), ...finalDeltaFields,
+        ), v => ({
+          gateId: id, cutoverProfile: selectedCutoverProfile,
+          ...(selectedCutoverProfile === "appsheet-replacement" ? { captureId: selectedCutoverCaptureId } : {}),
+          authorId: str(v, "authorId"), evidence: note(v),
+          ...(finalDeltaFields.length ? {
+            manualPauseStartedAt: localDateTimeToIso(str(v, "manualPauseStartedAt"), "Inicio de la pausa"),
+            manualPauseEndedAt: str(v, "manualPauseEndedAt") ? localDateTimeToIso(str(v, "manualPauseEndedAt"), "Fin de la pausa") : null,
+            manualPauseEvidenceRef: str(v, "manualPauseEvidenceRef").trim(),
+            expectedHandoffChangesRef: str(v, "expectedHandoffChangesRef").trim(),
+          } : {}),
+        }), row, "El servidor coteja la pausa con una captura estable posterior y conserva por separado los cambios esperados del legado; esta revisión no activa autoridad." );
+      } });
     if (pageId === "orders" && Number(row.quoteVersion) > 0) {
       const confirmationIndex = buttons.findIndex(button => button.label === "Confirmar pedido");
       const quoteIndex = buttons.findIndex(button => button.label === "Cotizar");
@@ -1694,7 +1779,7 @@ export function OperationalWorkspace(props: Props) {
         {needsCatalogChoices && catalogChoices.error && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={catalogChoices.retry}>Reintentar catálogo</button>}
       </InfoBand>}
     </>}
-    {pageId === "gates" && <InfoBand tone="warning" title="Activar autoridad exige una revisión completa"><p>El servidor exige los 14 controles aprobados, cada uno con autor y revisor distintos y activos, además de la habilitación del servidor para operar. La activación requiere evidencia humana explícita y el servidor vuelve a validar esas condiciones al registrar el cambio.</p></InfoBand>}
+    {pageId === "gates" && <InfoBand tone="warning" title="Activar autoridad exige una revisión completa"><p>El servidor exige {replacementGateIds.length} controles del perfil seleccionado, cada uno con autor y revisor distintos y activos, además de evidencia verificable de captura e historia para AppSheet. La activación requiere evidencia humana explícita y el servidor vuelve a validar esas condiciones al registrar el cambio.</p></InfoBand>}
     {pageId === "accounts" && <InfoBand title="Saldo desconocido hasta una apertura conciliada"><p>Crear o verificar la titularidad no asigna saldo. Efectivo reportado se verifica en caja o custodia; el depósito bancario es una transferencia independiente.</p></InfoBand>}
     {pageId === "collections" && <InfoBand title="Reporte y verificación son pasos separados"><p>Un cobro reportado no modifica una cuenta. Verificá la recepción en caja/custodia para efectivo o en banco para transferencia, Mercado Pago o tarjeta.</p></InfoBand>}
     {pageId === "payables" && <InfoBand title="Devengamiento y clasificación antes del objetivo"><p>Indicá el mes YYYY-MM al que corresponde cada obligación. Un gasto operativo requiere clasificación variable o fija y verificación; si falta cualquiera de esos datos, la contribución frente al objetivo queda desconocida o sin avance.</p>{pendingManagementPayables.length > 0 && <p>{pendingManagementPayables.length} obligaciones variables o gastos operativos visibles siguen pendientes de verificación, período o clasificación.</p>}</InfoBand>}
@@ -1706,11 +1791,20 @@ export function OperationalWorkspace(props: Props) {
     {pageId === "gates" && audit.error && <InfoBand tone="info" title="Auditoría"><p>El historial general requiere permisos de gestión de accesos. {audit.error}</p></InfoBand>}
     {pageId === "gates" && <section className="ops-sheet" aria-label="Activación de autoridad">
       <SectionHeading eyebrow="Autoridad del circuito" title="Activar autoridad" detail="La acción queda disponible sólo cuando el servidor confirma todos los requisitos vigentes." />
+      <div className="ops-dialog-fields" aria-label="Perfil y captura del corte">
+        <label className="ops-field"><span>Perfil del corte</span><select value={selectedCutoverProfile} onChange={event => setSelectedCutoverProfile(event.target.value as "legacy" | "appsheet-replacement")}><option value="appsheet-replacement">Reemplazo verificado de AppSheet</option><option value="legacy">Perfil legado compatible</option></select></label>
+        {selectedCutoverProfile === "appsheet-replacement" && <label className="ops-field"><span>Captura AppSheet registrada</span><select value={selectedCutoverCaptureId} onChange={event => setSelectedCutoverCaptureId(event.target.value)}><option value="">Elegí una captura</option>{captureRows.map(capture => {
+          const stability = objectValue(capture.stability);
+          const captureId = textValue(capture.captureId, "");
+          return <option key={captureId} value={captureId}>{captureId || "Captura sin identificador"} · {stability.stable === true ? "estable según captura" : "estabilidad no confirmada"} · {textValue(capture.dataPageCount, "?")} páginas</option>;
+        })}</select></label>}
+      </div>
+      {selectedCutoverProfile === "appsheet-replacement" && <InfoBand tone="warning" title="AppSheet permanece intacto"><p>Bombo será la autoridad elegida; los cambios posteriores del legado quedan separados para revisión. La selección de una captura no certifica su integridad ni completa las revisiones humanas.</p>{selectedCapture && <p>Captura {textValue(selectedCapture.captureId, "ID no disponible")} · {selectedCaptureStable ? "lectura estable según sus metadatos" : "sin estabilidad completa"} · {textValue(selectedCapture.dataSheetCount, "?")} hojas · {textValue(selectedCapture.dataPageCount, "?")} páginas · {textValue(selectedCapture.dataRecordCount, "?")} filas con datos · {textValue(selectedCapture.dataFormulaCount, "?")} fórmulas · {textValue(selectedCapture.dataUnresolvedFormulaCount, "?")} resultados pendientes.</p>}</InfoBand>}
       {gates.loading && <LoadingState label="Consultando estado de autoridad…" />}
       {gates.error && <ErrorState message={`No se pudo confirmar el estado vigente de la autoridad. ${gates.error}`} retry={gates.retry} />}
-      {!gates.loading && !gates.error && gates.data && serverAuthorityMode === "active" && <InfoBand title="La autoridad ya figura activa en el servidor"><p>Estado leído desde la respuesta vigente de Habilitación y auditoría. Actualizá la vista para volver a consultar el registro guardado.</p></InfoBand>}
+      {!gates.loading && !gates.error && gates.data && serverAuthorityMode === "active" && <InfoBand title="La autoridad ya figura activa en el servidor"><p>Estado leído desde la respuesta vigente de Habilitación y auditoría. Suspenderla pasa el circuito a sombra y conserva las operaciones, las aprobaciones, la captura y la fecha de primera escritura.</p>{context.isOwner && hasCapability(context, "cutover.approve") && hasCommand(context, "AuthoritySuspended") && <ActionButton quiet onClick={suspendAuthority}>Suspender autoridad</ActionButton>}</InfoBand>}
       {!gates.loading && !gates.error && gates.data && serverAuthorityMode !== "active" && <>
-        <p><StatusTag tone={approvedGateCount === cutoverGateIds.length ? "good" : "warn"}>{approvedGateCount} de {cutoverGateIds.length} controles aprobados</StatusTag></p>
+        <p><StatusTag tone={approvedGateCount === replacementGateIds.length ? "good" : "warn"}>{approvedGateCount} de {replacementGateIds.length} controles aprobados</StatusTag></p>
         {access.loading && <LoadingState label="Comprobando si autores y revisores siguen activos…" />}
         {access.error && <ErrorState message={`No se pudo comprobar el estado activo de autores y revisores. ${access.error}`} retry={access.retry} />}
         {!canActivateAuthority && <InfoBand tone="warning" title="Activación pausada"><p>{authorityActivationBlocker ?? "Actualizá el estado de autoridad antes de continuar."}</p></InfoBand>}
@@ -1722,7 +1816,7 @@ export function OperationalWorkspace(props: Props) {
           : "El servidor aún no está habilitado para activar autoridad y aceptar escrituras reales. Esta pantalla no cambia esa habilitación."}</p>
       </InfoBand>
     </section>}
-    {pageId === "gates" && query.data && <ReplacementReadiness context={context} gates={rowsOf(gates.data, "gates")} stale={gates.loading || Boolean(gates.error)} />}
+    {pageId === "gates" && query.data && <ReplacementReadiness context={context} cutoverProfile={selectedCutoverProfile} capture={selectedCapture} gates={rowsOf(gates.data, "gates")} stale={gates.loading || Boolean(gates.error)} />}
     {pageId === "accounts" && query.data && <AccountSetup context={context} snapshot={query.data} loading={query.loading} snapshotError={query.error} runCommand={runCommand} onRefresh={onRefresh} onNotice={onNotice} />}
     {needsCatalogChoices && catalogChoices.loading && !catalogChoices.data && <LoadingState label="Cargando productos para los selectores…" />}
     {needsCatalogChoices && catalogChoices.error && <ErrorState message={catalogChoices.error} retry={catalogChoices.retry} />}

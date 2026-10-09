@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { OperationError } from "./core.js";
 import { containsRecognizableCredential, isCredentialBearingHeader } from "./legacy-reader.js";
+import { appSheetPendingReconciliationSchema } from "../../shared/operations/appsheet-pending.js";
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const exceptionSchema = z.strictObject({
   kind: z.string().min(1).max(120),
@@ -31,6 +32,7 @@ export const sourceRecordSchema = z.strictObject({
       status: z.enum(["exact_legacy_fields", "different_legacy_fields", "missing_reference", "ambiguous_reference", "comparison_incomplete"]),
       comparedFields: z.number().int().min(0).max(7),
     }).optional(),
+    pendingReconciliation: appSheetPendingReconciliationSchema.optional(),
   }),
   treatment: z.enum(["fact_candidate", "archive_only", "overlap_evidence"]),
   exceptions: z.array(exceptionSchema).max(10_000),
@@ -40,4 +42,3 @@ export const sourceRecordSchema = z.strictObject({
     throw new OperationError(422, "IMPORT_CREDENTIAL_HEADER_REJECTED", "El lote contiene encabezados de credenciales que no se pueden importar.");
   return record;
 });
-

@@ -26,7 +26,7 @@ const authCanary = "SYNTHETIC_AUTH_CANARY_MUST_NOT_BE_STAGED";
 
 const fixturePrimaryKeyHeaders: Record<string, string> = {
   C_Cliente: "Id_Cliente",
-  D_Catalogo_Mercaderia: "Codigo_Detalle",
+  D_Catalogo_Mercaderia: "CatalogoID",
   C_Facturacion: "Id_Factura",
   C_Detalle_Fact: "Id_Detalle",
   C_Moto: "Id_Moto",
@@ -556,10 +556,44 @@ test("AppSheet archive staging persists a scoped snapshot atomically and replays
     firstControlSheet.recordCount = originalControlCount + 1;
     assert.equal(tamperedArchiveControls.controlManifestHash, prepared.controlManifestHash,
       "the scalar manifest hash stays unchanged while its stored semantic content is altered");
-    await db.legacyImportSnapshot.update({
+    const beforeImmutableControlsUpdate = await operationState(db);
+    await assert.rejects(
+      db.legacyImportSnapshot.update({
+        where: { id: staged.snapshotId },
+        data: { controls: tamperedControls as Prisma.InputJsonValue },
+      }),
+      (error: unknown) => error instanceof Error && error.message.includes("23514") &&
+        error.message.includes("Snapshot source and capture linkage are immutable"),
+      "the database must reject changes to captured snapshot controls",
+    );
+    const snapshotAfterBlockedControlUpdate = await db.legacyImportSnapshot.findUnique({
       where: { id: staged.snapshotId },
-      data: { controls: tamperedControls as Prisma.InputJsonValue },
+      select: { controls: true },
     });
+    assert.deepEqual(snapshotAfterBlockedControlUpdate?.controls, originalControls,
+      "the rejected mutation must leave the snapshot controls unchanged");
+    assert.deepEqual(await operationState(db), beforeImmutableControlsUpdate,
+      "rejecting a control mutation must not change staged state");
+
+    const writeSnapshotControlsWithTestBypass = async (controls: Prisma.InputJsonValue) => {
+      await db.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(`ALTER TABLE "${schema}"."LegacyImportSnapshot" DISABLE TRIGGER "LegacyImportSnapshot_source_capture_immutable"`);
+        try {
+          await tx.legacyImportSnapshot.update({ where: { id: staged.snapshotId }, data: { controls } });
+        } finally {
+          await tx.$executeRawUnsafe(`ALTER TABLE "${schema}"."LegacyImportSnapshot" ENABLE TRIGGER "LegacyImportSnapshot_source_capture_immutable"`);
+        }
+      });
+      const triggerState = await db.$queryRaw<Array<{ tgenabled: string }>>`
+        SELECT tgenabled FROM pg_trigger
+        WHERE tgname = 'LegacyImportSnapshot_source_capture_immutable'
+          AND tgrelid = to_regclass(quote_ident(${schema}) || '.' || quote_ident('LegacyImportSnapshot'))
+          AND NOT tgisinternal
+      `;
+      assert.deepEqual(triggerState.map(({ tgenabled }) => tgenabled), ["O"],
+        "the test-only bypass must leave the immutable trigger enabled");
+    };
+    await writeSnapshotControlsWithTestBypass(tamperedControls as Prisma.InputJsonValue);
     const persistedTamperedSnapshot = await db.legacyImportSnapshot.findUnique({
       where: { id: staged.snapshotId },
       select: { controls: true },
@@ -581,10 +615,7 @@ test("AppSheet archive staging persists a scoped snapshot atomically and replays
     assert.deepEqual(controlsAfterRejectedReplay?.controls, tamperedControls,
       "the rejected replay must leave the pre-existing altered snapshot untouched");
 
-    await db.legacyImportSnapshot.update({
-      where: { id: staged.snapshotId },
-      data: { controls: originalControls as Prisma.InputJsonValue },
-    });
+    await writeSnapshotControlsWithTestBypass(originalControls as Prisma.InputJsonValue);
     const restoredSnapshot = await db.legacyImportSnapshot.findUnique({
       where: { id: staged.snapshotId },
       select: { controls: true },

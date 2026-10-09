@@ -1,4 +1,4 @@
-import type { CommandEnvelope } from "../../shared/operations/contracts";
+import type { CommandEnvelope, CutoverProfile } from "../../shared/operations/contracts";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -12,6 +12,7 @@ export interface OperationsContext {
   rehearsal: boolean;
   authority: {
     mode: "shadow" | "active" | string;
+    cutoverProfile?: CutoverProfile;
     epoch: number;
     firstRealWriteAt: string | null;
   };

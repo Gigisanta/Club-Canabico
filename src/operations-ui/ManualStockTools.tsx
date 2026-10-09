@@ -151,6 +151,7 @@ function openingAction(
     selectField("locationId", "Ubicación visible", optionsOf(activeLocations, row => `${labelOf(row)}${row.isDefault === true ? " · predeterminada" : ""}`)),
     selectField("custodianId", "Custodia (opcional; por defecto, quien aprueba)", [{ value: "", label: "Usar a la persona que aprueba" }, ...optionsOf(visibleCustodians)], false),
     selectField("preparedBy", "Persona que preparó el relevamiento (distinta de quien aprueba)", optionsOf(otherPreparers), true, "La persona preparadora debe estar activa y no puede ser quien aprueba esta apertura."),
+    ...(context.authority.cutoverProfile === "appsheet-replacement" ? [textField("sourceRecordId", "ID de fila histórica AppSheet vinculada", true, "", "La apertura debe enlazar una fila histórica revisada del mismo corte.")] : []),
     evidenceField(),
   ];
   openAction({
@@ -179,7 +180,9 @@ function openingAction(
         skuId: value(values, "skuId"), label: value(values, "label"), quantity, unitCost,
         costCurrency: currency, receivedDate, ...(expiresOn ? { expiresOn } : {}),
         locationId: value(values, "locationId"), ...(custodianId ? { custodianId } : {}),
-        preparedBy, evidence: note(values),
+        preparedBy,
+        ...(context.authority.cutoverProfile === "appsheet-replacement" ? { sourceRecordId: value(values, "sourceRecordId") } : {}),
+        evidence: note(values),
       };
     },
     targetId: crypto.randomUUID(), expectedVersion: 0, requestIdIsTarget: true, submitLabel: "Registrar y aprobar apertura",

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { formatDecimal, moneyForQuantity, parseDecimal, parseQuantity, roundHalfUp, type QuantityUnit } from "../../shared/operations/exact.js";
 import { audit, civilDate, currency, decimal, evidence, json, objectId, objectScope, registerCommand, touchAggregate, OperationError, type CommandContext } from "./core.js";
 import { resolveStockAvailability, type StockAvailabilityChannel, type StockAvailabilityResolution } from "./stock-availability.js";
+import { requireAppSheetOpeningSourceRecord } from "./access.js";
 
 export interface StockPreparationAllocationInput {
   lineId: string;
@@ -1303,11 +1304,20 @@ const stockOpeningSchema = z.strictObject({
   custodianId: objectId.optional(),
   preparedBy: objectId,
   evidence,
+  sourceRecordId: objectId.optional(),
 });
 
 registerCommand("StockOpeningRecorded", {
   kind: "lot", capability: "openings.approve", create: true, administrative: true,
   schema: stockOpeningSchema,
+  authorize: async (ctx) => {
+    const input = stockOpeningSchema.parse(ctx.envelope.data);
+    const sku = await ctx.tx.catalogSku.findFirst({ where: { id: input.skuId, active: true }, select: { id: true, unit: true, sourceId: true } });
+    if (!sku) throw new OperationError(422, "STOCK_OPENING_SKU_REQUIRED", "Elegí un producto de catálogo activo");
+    await requireAppSheetOpeningSourceRecord(ctx, input.sourceRecordId, {
+      kind: "stock", quantity: input.quantity, unit: sku.unit, skuSourceId: sku.sourceId ?? undefined,
+    });
+  },
   execute: async (ctx) => {
     const input = stockOpeningSchema.parse(ctx.envelope.data);
     if (input.preparedBy === ctx.actor.id)
@@ -1326,6 +1336,10 @@ registerCommand("StockOpeningRecorded", {
     if (!custodian) throw new OperationError(422, "STOCK_OPENING_CUSTODIAN_REQUIRED", "Elegí una persona activa responsable de la custodia");
     await requireStockObjectScope(ctx,[location.id],[custodian.id]);
     const quantity = positiveQuantity(input.quantity, sku.unit, "Cantidad de apertura");
+    const sourceRecordId = input.sourceRecordId;
+    await requireAppSheetOpeningSourceRecord(ctx, sourceRecordId, {
+      kind: "stock", quantity: formatQ(quantity, sku.unit), unit: sku.unit, skuSourceId: sku.sourceId ?? undefined,
+    });
     positiveUnitCost(input.unitCost);
     const costMinor = checkDatabaseMinor(moneyForQuantity(formatQ(quantity, sku.unit), input.unitCost));
     const lot = await ctx.tx.inventoryLot.create({ data: {
@@ -1360,8 +1374,9 @@ registerCommand("StockOpeningRecorded", {
       reason: "independently_reconciled_stock_opening",
       actorId: ctx.actor.id,
       occurredAt: ctx.now,
+      ...(sourceRecordId ? { sourceRecordId } : {}),
     } });
-    await audit(ctx, "StockOpeningRecorded", { preparedBy: author.id, custodianId: custodian.id, evidence: input.evidence });
+    await audit(ctx, "StockOpeningRecorded", { preparedBy: author.id, custodianId: custodian.id, ...(sourceRecordId ? { sourceRecordId } : {}), evidence: input.evidence });
     return {
       lot,
       balance,

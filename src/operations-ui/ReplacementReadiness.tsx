@@ -1,6 +1,7 @@
 import { useId } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { cutoverGateIds } from "../../shared/operations/contracts";
+import type { CutoverProfile } from "../../shared/operations/contracts";
 import { hasCapability } from "./api";
 import type { OperationsContext } from "./types";
 import "./replacement-readiness.css";
@@ -44,8 +45,8 @@ const stepCopy: Record<StepId, { title: string; description: string; sections: S
     sections: ["orders", "routes", "reports", "permissions"],
   },
   handoff: {
-    title: "Retiro de escrituras y traspaso",
-    description: "Revisar las colas, el retiro de escrituras anteriores y la decisión de traspaso.",
+    title: "Cambios posteriores y traspaso",
+    description: "Revisar las colas, la cuarentena de cambios posteriores del legado y la decisión de traspaso.",
     sections: ["imports", "gates"],
   },
 };
@@ -158,13 +159,26 @@ function canonicalGateMap(gates: GateRecord[]): Map<GateId, GateRecord | null> {
   return byId;
 }
 
-export function ReplacementReadiness({ context, gates, stale = false }: {
+export function ReplacementReadiness({ context, gates, stale = false, cutoverProfile, capture = null }: {
   context: OperationsContext;
   gates: Record<string, unknown>[];
   stale?: boolean;
+  cutoverProfile?: CutoverProfile;
+  capture?: GateRecord | null;
 }) {
   const [searchParams] = useSearchParams();
   const headingId = useId();
+  const appSheetReplacement = (cutoverProfile ?? context.authority.cutoverProfile) === "appsheet-replacement";
+  const captureStability = recordValue(capture?.stability);
+  const gateMatchesSelectedCapture = (gate: GateRecord | null) => {
+    if (!appSheetReplacement) return true;
+    const captureId = textValue(capture?.captureId);
+    const evidence = recordValue(gate?.evidence);
+    const binding = recordValue(evidence?.appSheetReplacement);
+    return Boolean(captureId && gate?.captureManifestId === captureId && binding?.captureId === captureId
+      && binding.manifestHash === capture?.manifestHash && binding.dataHash === capture?.dataHash
+      && binding.captureDefinitionHash === capture?.definitionHash);
+  };
 
   // The authority endpoint is owner/cutover-capability scoped; do not leak its rows into other profiles.
   if (!hasCapability(context, "cutover.approve")) return null;
@@ -187,6 +201,12 @@ export function ReplacementReadiness({ context, gates, stale = false }: {
       </header>
 
       <div className="rr-observations" aria-label="Estado observado del circuito">
+        {appSheetReplacement && (
+          <p className="rr-authority"><strong>AppSheet permanece intacto</strong><span>Bombo es la autoridad elegida; los cambios posteriores del legado quedan separados para revisión. No se afirma que AppSheet haya dejado de escribir.</span></p>
+        )}
+        {appSheetReplacement && capture && (
+          <p className="rr-authority"><strong>Captura seleccionada</strong><span>{textValue(capture.captureId) ?? "ID no disponible"} · {captureStability?.stable === true ? "la captura declara estabilidad" : "la captura no declara estabilidad completa"}. Esta ficha de inventario no sustituye el cotejo del manifiesto, las proyecciones ni la revisión humana.</span></p>
+        )}
         {context.authority.mode === "active" ? (
           <p className="rr-authority"><strong>Fuente Bombo observada</strong><span>El contexto del circuito informa autoridad activa.</span></p>
         ) : context.authority.mode === "shadow" ? (
@@ -210,8 +230,11 @@ export function ReplacementReadiness({ context, gates, stale = false }: {
           const stepGates = cutoverGateIds
             .filter(id => gateCopy[id].step === stepId)
             .map(id => ({ id, gate: gateMap.get(id) ?? null }));
+          const reviewedGates = appSheetReplacement && stepId === "handoff"
+            ? stepGates.filter(item => item.id !== "legacy-writes-disabled")
+            : stepGates;
           const visibleSections = step.sections.filter(section => canOpenSection(context, section));
-          const summary = stepStatus(stepGates.map(item => item.gate), stale);
+          const summary = stepStatus(reviewedGates.map(item => gateMatchesSelectedCapture(item.gate) ? item.gate : null), stale);
 
           return (
             <section className="rr-step" key={stepId} aria-labelledby={`${headingId}-step-${stepId}`}>
@@ -223,17 +246,20 @@ export function ReplacementReadiness({ context, gates, stale = false }: {
                 </span>
                 <span className="rr-step-meta">
                   <span className="rr-step-status">{summary}</span>
-                  <span className="rr-step-count">{stepGates.length} controles</span>
+                  <span className="rr-step-count">{appSheetReplacement && stepId === "handoff" ? "2 controles · 1 política explícita" : `${stepGates.length} controles`}</span>
                 </span>
               </header>
 
               <ul className="rr-gates">
                 {stepGates.map(({ id, gate }) => {
-                  const status = reviewStatus(gate);
-                  const evidence = evidenceText(gate?.evidence);
-                  const approvedBy = textValue(gate?.approvedBy);
-                  const reviewedBy = textValue(gate?.reviewedBy);
-                  const reviewedAt = formatReviewDate(gate?.approvedAt, context.timeZone);
+                  const quarantinedLegacyWrites = appSheetReplacement && id === "legacy-writes-disabled";
+                  const unboundReview = appSheetReplacement && !quarantinedLegacyWrites && gate !== null && !gateMatchesSelectedCapture(gate);
+                  const status = quarantinedLegacyWrites ? { label: "No se declara", tone: "unknown" }
+                    : unboundReview ? { label: "Sin vínculo a esta captura", tone: "pending" } : reviewStatus(gate);
+                  const evidence = quarantinedLegacyWrites || unboundReview ? null : evidenceText(gate?.evidence);
+                  const approvedBy = quarantinedLegacyWrites || unboundReview ? null : textValue(gate?.approvedBy);
+                  const reviewedBy = quarantinedLegacyWrites || unboundReview ? null : textValue(gate?.reviewedBy);
+                  const reviewedAt = quarantinedLegacyWrites || unboundReview ? null : formatReviewDate(gate?.approvedAt, context.timeZone);
                   return (
                     <li className="rr-gate" key={id}>
                       <details className="rr-gate-disclosure">
@@ -243,7 +269,9 @@ export function ReplacementReadiness({ context, gates, stale = false }: {
                           <span className="rr-gate-chevron" aria-hidden="true">⌄</span>
                         </summary>
                         <div className="rr-gate-details">
-                          {evidence ? <p><span>Evidencia</span><strong>{evidence}</strong></p> : gate ? <p><span>Evidencia</span><strong>No disponible en esta vista</strong></p> : null}
+                          {quarantinedLegacyWrites ? <p><span>Tratamiento</span><strong>AppSheet continúa intacto. Sus cambios posteriores al corte se separan para revisión; esta política no equivale a desactivar escrituras.</strong></p>
+                            : unboundReview ? <p><span>Tratamiento</span><strong>Esta revisión pertenece a otro perfil o captura; no cuenta para la selección vigente.</strong></p>
+                            : evidence ? <p><span>Evidencia</span><strong>{evidence}</strong></p> : gate ? <p><span>Evidencia</span><strong>No disponible en esta vista</strong></p> : null}
                           {(approvedBy || reviewedBy) && (
                             <p><span>Personas</span><strong>{[approvedBy && "Autor registrado", reviewedBy && "Revisor registrado"].filter(Boolean).join(" · ")}</strong></p>
                           )}

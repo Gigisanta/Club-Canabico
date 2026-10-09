@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { registerCommand, OperationError, json, objectId, currency, minor, positiveMinor, decimal, civilDate, evidence, requireDelivery, capabilities, requireAccountScope, requireMemberScope, touchAggregate, type CommandContext, type Tx } from "./core.js";
 import { parseDecimal, roundHalfUp } from "../../shared/operations/exact.js";
 import { isAppSheetInvoiceTotalPending } from "../../shared/operations/appsheet.js";
+import { requireAppSheetOpeningSourceRecord } from "./access.js";
 import "./period-coverage.js";
 const signedMinor=z.string().regex(/^(0|-?[1-9]\d{0,18})$/).refine(v=>BigInt(v)>=-9223372036854775808n&&BigInt(v)<=9223372036854775807n);
 function equivalentMinor(amount:bigint,fromCurrency:string,toCurrency:string,rate?:string){
@@ -48,14 +49,14 @@ async function paymentDate(ctx:CommandContext,accountId:string,date:string,amoun
  return new Date(`${date}T12:00:00-03:00`);
 }
 export async function accountBalance(tx:Tx,accountId:string,asOf?:string){const sum=await tx.ledgerLeg.aggregate({where:{accountId,...(asOf?{event:{occurredAt:{lte:new Date(`${asOf}T23:59:59.999-03:00`)}}}:{})},_sum:{amountMinor:true}});return sum._sum.amountMinor??0n;}
-export async function postLedger(ctx:CommandContext,kind:string,sourceObjectId:string,legs:{accountId:string;currency:string;amountMinor:bigint}[],metadata:Record<string,unknown>={},description=kind,occurredAt=new Date(ctx.envelope.occurredAt)){
+export async function postLedger(ctx:CommandContext,kind:string,sourceObjectId:string,legs:{accountId:string;currency:string;amountMinor:bigint}[],metadata:Record<string,unknown>={},description=kind,occurredAt=new Date(ctx.envelope.occurredAt),sourceRecordId?:string){
  await requireAccountScope(ctx.tx,ctx.actor,legs.map(l=>l.accountId));
  if(!legs.length)throw new OperationError(422,"LEDGER_LEGS_REQUIRED","El movimiento requiere cuentas");
  for(const leg of legs){const a=await ctx.tx.operationAccount.findUnique({where:{id:leg.accountId}});if(!a?.active||!a.verified||a.currency!==leg.currency)throw new OperationError(422,"ACCOUNT_NOT_VERIFIED","Cuenta, moneda o correspondencia sin verificar");if(kind!=="opening"&&!a.openingApprovedBy)throw new OperationError(423,"ACCOUNT_OPENING_PENDING","La cuenta requiere apertura aprobada, incluso para un saldo inicial cero");}
  if(["transfer","rendition","fx"].includes(kind)&&legs.length<2)throw new OperationError(422,"PAIRED_LEGS_REQUIRED","Se requieren ambas piernas");
  if(["transfer","rendition"].includes(kind)&&legs.reduce((s,l)=>s+l.amountMinor,0n)!==0n)throw new OperationError(422,"UNBALANCED_TRANSFER","La transferencia debe conservar su importe");
  const id=randomUUID();
- return ctx.tx.ledgerEvent.create({data:{id,requestId:ctx.envelope.requestId,kind,occurredAt,actorId:ctx.actor.id,sourceObjectId,description,metadata:json(metadata),legs:{create:legs.map(l=>({id:randomUUID(),...l}))}},include:{legs:true}});
+ return ctx.tx.ledgerEvent.create({data:{id,requestId:ctx.envelope.requestId,kind,occurredAt,actorId:ctx.actor.id,sourceObjectId,description,metadata:json(metadata),...(sourceRecordId?{sourceRecordId}:{}),legs:{create:legs.map(l=>({id:randomUUID(),...l}))}},include:{legs:true}});
 }
 const accountInput=z.strictObject({name:z.string().min(1).max(150),currency,kind:z.enum(["cash","bank","reserve","custody"]),holder:z.string().min(1).max(150),purpose:z.string().min(1).max(500),custodianId:objectId.optional(),sourceSystem:z.string().max(120).optional(),sourceId:z.string().max(150).optional()});
 registerCommand("AccountCreated",{kind:"account",capability:"accounts.write",create:true,administrative:true,schema:accountInput,execute:async ctx=>({account:await ctx.tx.operationAccount.create({data:{id:ctx.envelope.targetId,...ctx.envelope.data as z.infer<typeof accountInput>}})})});
@@ -68,14 +69,22 @@ registerCommand("AccountsInitialized",{kind:"accountBootstrap",capability:"accou
  return {accounts:items.map(a=>({id:a.id,verified:false}))};
  }});
 registerCommand("AccountVerified",{kind:"account",capability:"openings.approve",administrative:true,schema:z.strictObject({evidence,sourceSystem:z.string().max(120).optional(),sourceId:z.string().max(150).optional()}),execute:async ctx=>({account:await ctx.tx.operationAccount.update({where:{id:ctx.envelope.targetId},data:{verified:true,sourceSystem:ctx.envelope.data.sourceSystem as string|undefined,sourceId:ctx.envelope.data.sourceId as string|undefined,openingEvidence:json(ctx.envelope.data.evidence)}})})});
-registerCommand("AccountOpeningApproved",{kind:"account",capability:"openings.approve",administrative:true,schema:z.strictObject({amountMinor:signedMinor,evidence,preparedBy:objectId}),execute:async ctx=>{
+const accountOpeningSchema=z.strictObject({amountMinor:signedMinor,evidence,preparedBy:objectId,sourceRecordId:objectId.optional()});
+registerCommand("AccountOpeningApproved",{kind:"account",capability:"openings.approve",administrative:true,schema:accountOpeningSchema,
+ authorize:async ctx=>{
+  const account=await ctx.tx.operationAccount.findUnique({where:{id:ctx.envelope.targetId},select:{currency:true}});
+  if(!account)throw new OperationError(404,"ACCOUNT_NOT_FOUND","Cuenta no encontrada");
+  await requireAppSheetOpeningSourceRecord(ctx,ctx.envelope.data.sourceRecordId as string|undefined,{kind:"cash",amountMinor:BigInt(ctx.envelope.data.amountMinor as string),currency:account.currency});
+ },execute:async ctx=>{
  const a=await ctx.tx.operationAccount.findUniqueOrThrow({where:{id:ctx.envelope.targetId}});
+ const sourceRecordId=ctx.envelope.data.sourceRecordId as string|undefined;
+ await requireAppSheetOpeningSourceRecord(ctx,sourceRecordId,{kind:"cash",amountMinor:BigInt(ctx.envelope.data.amountMinor as string),currency:a.currency});
  if(a.openingApprovedBy||await ctx.tx.ledgerLeg.count({where:{accountId:a.id}}))throw new OperationError(409,"OPENING_ALREADY_POSTED","La apertura debe preceder a los movimientos; corregí hacia adelante");
  if(ctx.envelope.data.preparedBy===ctx.actor.id)throw new OperationError(409,"INDEPENDENT_REVIEW_REQUIRED","La apertura requiere otro revisor");
  if(!await ctx.tx.user.findFirst({where:{id:ctx.envelope.data.preparedBy as string,active:true}}))throw new OperationError(422,"OPENING_AUTHOR_REQUIRED","La apertura requiere un autor activo identificado");
  const amount=BigInt(ctx.envelope.data.amountMinor as string);
  await ctx.tx.operationAccount.update({where:{id:a.id},data:{openingMinor:amount,openingApprovedBy:ctx.actor.id,openingEvidence:json(ctx.envelope.data.evidence)}});
- const event=await postLedger(ctx,"opening",a.id,[{accountId:a.id,currency:a.currency,amountMinor:amount}],{evidence:ctx.envelope.data.evidence,preparedBy:ctx.envelope.data.preparedBy},"Apertura conciliada");
+ const event=await postLedger(ctx,"opening",a.id,[{accountId:a.id,currency:a.currency,amountMinor:amount}],{evidence:ctx.envelope.data.evidence,preparedBy:ctx.envelope.data.preparedBy},"Apertura conciliada",new Date(ctx.envelope.occurredAt),sourceRecordId);
  return {event,balanceMinor:amount};
 }});
 registerCommand("AccountTransferred",{kind:"account",capability:"accounts.write",schema:z.strictObject({toAccountId:objectId,amountMinor:positiveMinor,reason:z.string().min(1).max(1000)}),execute:async ctx=>{

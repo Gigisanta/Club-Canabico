@@ -1,7 +1,8 @@
-/** The two staged AppSheet source identities are evidence/reconciliation only. */
+/** AppSheet evidence requires its dedicated, reviewed projection workflow. */
 export const technicalLegacySourceSystems = [
   "appsheet-business-archive",
   "appsheet-finance-observations",
+  "appsheet-live-verified",
 ] as const;
 
 export function isTechnicalLegacySource(sourceSystem: string): boolean {

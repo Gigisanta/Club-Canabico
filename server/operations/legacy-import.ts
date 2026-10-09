@@ -10,7 +10,7 @@ import { commercialAddress, commercialPreferences } from "./member-fields.js";
 import { sourceRecordSchema } from "./legacy-source-contract.js";
 import { legacyBatchRoutes } from "./legacy-batches.js";
 import { legacyHistoryRoutes } from "./legacy-history.js";
-import { assertLegacyHistorySourceAllowed } from "./legacy-source-policy.js";
+import { assertLegacyHistorySourceAllowed, requireFullLegacySourceScope } from "./legacy-source-policy.js";
 import { legacySourceControlRoutes, redactAuthenticationValues, redactStagedException, redactStagedRecord } from "./legacy-source-control.js";
 
 export { redactAuthenticationValues, redactStagedException, redactStagedRecord };
@@ -499,6 +499,7 @@ legacyImportRoutes.post("/preview", async (req, res) => {
 });
 
 legacyImportRoutes.get("/coverage", async (req, res) => {
+  await requireFullLegacySourceScope(db, req.user);
   await requireCapability(db, req.user, "imports.review");
   const query = z.strictObject({ sourceSystem: z.string().max(120).optional(), limit: z.coerce.number().int().min(1).max(100).default(50) }).parse(req.query);
   const items = await db.legacyImportSnapshot.findMany({
@@ -520,6 +521,7 @@ legacyImportRoutes.get("/coverage", async (req, res) => {
 });
 
 legacyImportRoutes.get("/staged-records", async (req, res) => {
+  await requireFullLegacySourceScope(db, req.user);
   await requireCapability(db, req.user, "imports.review");
   const query = z.strictObject({ snapshotId: z.string().min(1).max(100), cursor: z.string().regex(/^[a-f0-9]{64}$/).optional(), limit: z.coerce.number().int().min(1).max(PAGE_SIZE_MAX).default(100) }).parse(req.query);
   const snapshot = await db.legacyImportSnapshot.findUnique({ where: { id: query.snapshotId }, select: { id: true, status: true, controls: true } });

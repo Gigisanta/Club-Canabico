@@ -27,10 +27,15 @@ export function capabilitiesFromGrant(
   return profileCapabilities[user.role === "owner" ? "owner" : user.role === "cashier" ? "cashier" : user.role === "admin" ? "commercial" : "viewer"];
 }
 
-export function buildOperationAccessSnapshot(user: AccessSubject, grant: OperationAccess | null) {
+export function buildOperationAccessSnapshot(
+  user: AccessSubject,
+  grant: OperationAccess | null,
+  authority?: { cutoverProfile?: unknown } | null,
+) {
   return {
     profile: grant?.profile ?? user.role,
     isOwner: user.role === "owner",
+    cutoverProfile: authority?.cutoverProfile === "appsheet-replacement" ? "appsheet-replacement" as const : "legacy" as const,
     canManageDecisionInputs: canManageDecisionInputAttestations(user, grant),
     capabilities: capabilitiesFromGrant(user, grant),
   };

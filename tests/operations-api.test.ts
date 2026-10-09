@@ -170,6 +170,22 @@ test("canonical financial commands preserve cash custody, debt and global replay
    assert.equal(JSON.stringify(user.original).includes(passwordMarker),false);
    assert.equal(JSON.stringify(user.normalized).includes(passwordMarker),false);
    assert.equal(JSON.stringify(user).includes("Contraseña"),false);
+   const coveragePath="/legacy-imports/coverage?sourceSystem=preview-reference-test";
+   const recordsPath=`/legacy-imports/staged-records?snapshotId=${body.snapshotId}`;
+   assert.equal((await call(coveragePath,"owner")).status,200,"an unscoped owner can inspect import coverage");
+   const ownerRecords=await call(recordsPath,"owner");assert.equal(ownerRecords.status,200);
+   const ownerRecordBody=await ownerRecords.json() as {items?:Array<{sourceTable?:string}>};
+   assert.ok(ownerRecordBody.items?.some(record=>record.sourceTable==="C_Cliente"),"the owner can inspect staged customer rows");
+   const financeGrant=await db.operationAccess.findUniqueOrThrow({where:{userId:"finance"}});
+   try{
+    await db.operationAccess.update({where:{userId:"finance"},data:{scope:{memberIds:["allowed-member"]}}});
+    const scopedCoverage=await call(coveragePath,"finance");assert.equal(scopedCoverage.status,403,"member-scoped finance cannot list whole-source coverage");
+    const scopedRecords=await call(recordsPath,"finance");assert.equal(scopedRecords.status,403,"member-scoped finance is denied before a source-record lookup");
+    assert.doesNotMatch(await scopedRecords.text(),/SYNTHETIC_DOCUMENT_REFERENCE|synthetic-client/);
+   }finally{
+    await db.operationAccess.update({where:{userId:"finance"},data:{scope:financeGrant.scope??{}}});
+   }
+   assert.equal((await call(recordsPath,"finance")).status,200,"the same finance profile remains eligible when unscoped");
   });
   await t.test("sanitized batches exclude recognizable tokens under ordinary headers before DB storage and review",async()=>{
    const token="sk-proj-"+"synthetic".repeat(8),workbook=new ExcelJS.Workbook(),sheet=workbook.addWorksheet("C_Cliente");sheet.addRow(["Id_Cliente","Nombre"]);sheet.addRow(["ordinary-header-fixture",token]);

@@ -58,7 +58,7 @@ export function isCredentialMetadataKey(key: string): boolean {
 }
 const SOURCE_KEY_HEADERS: Record<string, string> = {
   C_Cliente: "Id_Cliente",
-  D_Catalogo_Mercaderia: "Codigo_Detalle",
+  D_Catalogo_Mercaderia: "CatalogoID",
   C_Facturacion: "Id_Factura",
   C_Detalle_Fact: "Id_Detalle",
   C_Moto: "Id_Moto",

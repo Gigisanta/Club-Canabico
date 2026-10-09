@@ -747,6 +747,9 @@ model DecisionInputAttestation {
 model OperationAuthority {
   id String @id @default("operations")
   mode String @default("shadow")
+  cutoverProfile String @default("legacy")
+  captureManifestId String?
+  captureManifest AppSheetCaptureManifest? @relation("ActiveAuthorityCapture", fields: [captureManifestId], references: [captureId], onDelete: Restrict)
   epoch Int @default(1)
   firstRealWriteAt DateTime?
   approvedBy String?
@@ -1098,8 +1101,11 @@ model StockFact {
   reason String
   actorId String
   occurredAt DateTime
+  sourceRecordId String?
+  sourceRecord LegacySourceRecord? @relation("LegacyStockOpeningSource", fields: [sourceRecordId], references: [id], onDelete: Restrict)
   @@index([lotId, occurredAt])
   @@index([orderId])
+  @@index([sourceRecordId])
 }
 model OperationalStockCount {
   id String @id
@@ -1145,6 +1151,7 @@ model OperationOrder {
   sourceSystem String?
   sourceId String?
   lines OperationOrderLine[]
+  invoiceNumberReservation AppSheetInvoiceNumberReservation?
   @@unique([sourceSystem, sourceId])
   @@index([commercialState, createdAt])
   @@index([commercialState, confirmedAt])
@@ -1298,9 +1305,12 @@ model LedgerEvent {
   sourceObjectId String
   description String
   metadata Json
+  sourceRecordId String?
+  sourceRecord LegacySourceRecord? @relation("LegacyCashOpeningSource", fields: [sourceRecordId], references: [id], onDelete: Restrict)
   legs LedgerLeg[]
   @@index([kind, occurredAt])
   @@index([sourceObjectId])
+  @@index([sourceRecordId])
 }
 model LedgerLeg {
   id String @id
@@ -1366,9 +1376,98 @@ model LegacyImportSnapshot {
   reviewedAt DateTime?
   controls Json
   coverage Json
+  captureManifestId String?
+  captureManifest AppSheetCaptureManifest? @relation(fields: [captureManifestId], references: [captureId], onDelete: Restrict)
+  sourceRecords LegacySourceRecord[]
+  invoiceSequences AppSheetInvoiceSequence[]
   createdAt DateTime @default(now())
   upload LegacyImportUpload?
   @@unique([sourceSystem, fileHash, importerVersion])
+  @@index([captureManifestId])
+}
+model AppSheetCaptureManifest {
+  captureId String @id
+  sourceSystem String
+  sourceId String
+  spreadsheetId String
+  metadataHash String
+  headersHash String
+  manifestHash String
+  dataHash String
+  definitionHash String?
+  stability Json
+  firstReadAt DateTime
+  verificationStartedAt DateTime
+  verificationCompletedAt DateTime
+  cutoffAt DateTime
+  dataCoverage Json
+  pageManifest Json
+  definitionCoverage Json?
+  dataSheetCount Int
+  dataPageCount Int
+  dataRecordCount Int
+  dataFormulaCount Int
+  dataUnresolvedFormulaCount Int
+  definitionTableCount Int?
+  definitionColumnCount Int?
+  definitionSliceCount Int?
+  definitionViewCount Int?
+  definitionActionCount Int?
+  definitionBotCount Int?
+  definitionWorkflowRuleCount Int?
+  definitionFormatRuleCount Int?
+  createdAt DateTime @default(now())
+  snapshots LegacyImportSnapshot[]
+  authorityRows OperationAuthority[] @relation("ActiveAuthorityCapture")
+  reviewedGates CutoverGate[] @relation("CutoverGateCapture")
+  invoiceSequences AppSheetInvoiceSequence[]
+  @@unique([sourceSystem, sourceId, manifestHash])
+  @@index([sourceSystem, sourceId, cutoffAt])
+}
+model AppSheetInvoiceSequence {
+  namespace String @id
+  captureId String @unique
+  manifestHash String
+  dataHash String
+  snapshotId String
+  mappingId String
+  publicationFingerprint String
+  sourceBindingHash String
+  lastValue BigInt
+  seededValue BigInt
+  invoiceRecordCount Int
+  numberedInvoiceCount Int
+  unnumberedInvoiceCount Int
+  duplicateInvoiceNumberCount Int
+  duplicateHiddenIdCount Int
+  seedEvidence Json
+  seededBy String
+  seededAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  captureManifest AppSheetCaptureManifest @relation(fields: [captureId], references: [captureId], onDelete: Restrict)
+  historySnapshot LegacyImportSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Restrict)
+  reservations AppSheetInvoiceNumberReservation[]
+  @@unique([namespace, captureId, manifestHash])
+  @@index([captureId, manifestHash])
+}
+model AppSheetInvoiceNumberReservation {
+  id String @id
+  namespace String
+  captureId String
+  manifestHash String
+  invoiceNumber String @unique
+  origin String
+  orderId String? @unique
+  sourceReferenceCount Int @default(0)
+  sourceReferences Json
+  generatedId BigInt?
+  generatedYear Int?
+  createdBy String?
+  createdAt DateTime @default(now())
+  sequence AppSheetInvoiceSequence @relation(fields: [namespace, captureId, manifestHash], references: [namespace, captureId, manifestHash], onDelete: Restrict)
+  order OperationOrder? @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  @@index([captureId, origin])
 }
 model LegacyImportUpload {
   snapshotId String @id
@@ -1398,6 +1497,7 @@ model LegacyImportChunk {
 model LegacySourceRecord {
   id String @id
   snapshotId String
+  snapshot LegacyImportSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Restrict)
   sourceTable String
   sourceKey String
   sourceRow Int
@@ -1408,6 +1508,8 @@ model LegacySourceRecord {
   normalized Json
   treatment String
   resolution Json?
+  cashOpeningEvents LedgerEvent[] @relation("LegacyCashOpeningSource")
+  stockOpeningFacts StockFact[] @relation("LegacyStockOpeningSource")
   @@unique([snapshotId, sourceTable, sourceRow])
   @@index([sourceTable, sourceKey])
   @@index([snapshotId, sourceTable, sourceKey])
@@ -1477,6 +1579,8 @@ model CutoverGate {
   id String @id
   status String @default("pending")
   evidence Json?
+  captureManifestId String?
+  captureManifest AppSheetCaptureManifest? @relation("CutoverGateCapture", fields: [captureManifestId], references: [captureId], onDelete: Restrict)
   approvedBy String?
   reviewedBy String?
   approvedAt DateTime?

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { apiGet, isUncertainCommandOutcome } from "./api";
 import { amountFormToMinor, formatMinor } from "./money";
+import { calculateAppSheetInvoiceFinancials } from "../../shared/operations/appsheet-invoice-rules";
 import { RemoteSelect } from "./RemoteSelect";
 import type { OperationsContext, RunCommand } from "./types";
 import "./appsheet-invoice-form.css";
@@ -92,7 +93,7 @@ function fromSnapshot(order: Row | undefined, fallbackDate: string): InvoiceDraf
   const addressObject = objectValue(input.address);
   return {
     memberId: stringValue(input.memberId, stringValue(order?.memberId)),
-    invoiceNumber: stringValue(input.invoiceNumber), invoiceDate: stringValue(input.invoiceDate, fallbackDate), currency: input.currency === "USD" ? "USD" : "ARS",
+    invoiceNumber: stringValue(input.invoiceNumber) || stringValue(quote.invoiceNumber), invoiceDate: stringValue(input.invoiceDate, fallbackDate), currency: input.currency === "USD" ? "USD" : "ARS",
     address: formatAddress(addressObject), addressObject, note: stringValue(input.note),
     productPaymentMethod: payment(input.productPaymentMethod), lines,
     moto: Object.keys(motoValue).length ? {
@@ -133,6 +134,7 @@ const observedServiceTypes = ["CABA", "Zona Norte 1", "Zona Norte 2", "CABA - EN
 
 export function AppSheetInvoiceForm(props: Props) {
   const { open, mode, order, expectedVersion, memberName, context, catalog, catalogLoading, catalogError, retryCatalog, loadMoreCatalog, hasMoreCatalog, runCommand, onClose, onSaved } = props;
+  const replacementProfile = context.authority.cutoverProfile === "appsheet-replacement";
   const dialog = useRef<HTMLDialogElement>(null);
   const productDialog = useRef<HTMLDialogElement>(null);
   const motoDialog = useRef<HTMLDialogElement>(null);
@@ -296,7 +298,7 @@ export function AppSheetInvoiceForm(props: Props) {
       clientTariffMinor: amountFormToMinor(draft.moto.clientTariff), adminTariffMinor: amountFormToMinor(draft.moto.adminTariff), totalTariffMinor: amountFormToMinor(draft.moto.totalTariff), notes: draft.moto.notes,
     } : undefined;
     return {
-      memberId: draft.memberId, ...(draft.invoiceNumber.trim() ? { invoiceNumber: draft.invoiceNumber.trim() } : {}), invoiceDate: draft.invoiceDate,
+      memberId: draft.memberId, ...((!replacementProfile || mode === "edit-preorder") && draft.invoiceNumber.trim() ? { invoiceNumber: draft.invoiceNumber.trim() } : {}), invoiceDate: draft.invoiceDate,
       currency: draft.currency, address, note: draft.note, productPaymentMethod: draft.productPaymentMethod,
       lines, ...(moto ? { moto } : {}), preorder,
     };
@@ -365,6 +367,12 @@ export function AppSheetInvoiceForm(props: Props) {
   }, 0n);
   const clientTariffMinor = (() => { try { return draft.moto ? BigInt(amountFormToMinor(draft.moto.clientTariff)) : 0n; } catch { return 0n; } })();
   const capturedBaseMinor = productSubtotalMinor + clientTariffMinor;
+  const formulaPreview = replacementProfile ? calculateAppSheetInvoiceFinancials({
+    subtotalMinor: productSubtotalMinor,
+    clientTariffMinor,
+    paymentMethod: draft.productPaymentMethod,
+    currency: draft.currency,
+  }) : null;
   const quote = objectValue(confirmation?.quote);
   const savedLines = Array.isArray(quote.lines) ? quote.lines.filter((item): item is Row => Boolean(item) && typeof item === "object") : [];
   const blankPreorder = confirming && savedLines.length === 0;
@@ -385,7 +393,7 @@ export function AppSheetInvoiceForm(props: Props) {
           <div><span>Fecha</span><strong>{stringValue(quote.invoiceDate, stringValue(confirmation.createdAt, "—").slice(0, 10))}</strong></div>
           <div><span>Cliente</span><strong>{stringValue(confirmation.memberName, `Ref. ${stringValue(confirmation.memberId)}`)}</strong></div>
           <div><span>Productos</span><strong>{savedLines.length}</strong></div>
-          <div><span>Total facturado</span><strong>Pendiente de definición</strong></div>
+          <div><span>Total facturado</span><strong>{quote.totalCalculationState === "defined" ? formatMinor(quote.totalMinor, quote.currency) : "Pendiente de definición"}</strong></div>
           <div><span>Importe capturado</span><strong>{formatMinor(quote.capturedBaseMinor, stringValue(quote.currency, "ARS"))}</strong></div>
           {quote.currency === "USD" && <div><span>Moneda</span><strong>USD</strong></div>}
           {savedLines.map((line, index) => <p key={stringValue(line.id, String(index))}>{stringValue(line.date)} · {stringValue(line.scale, "Escala sin dato")} · {stringValue(line.quantity, stringValue(line.requested))} g · {formatMinor(line.explicitTotalMinor, quote.currency)}</p>)}
@@ -397,11 +405,16 @@ export function AppSheetInvoiceForm(props: Props) {
       </form> : <form className="appsheet-invoice-body" onSubmit={event => void saveInvoice(event)} aria-busy={busy}>
         {creatingShell ? <div className="appsheet-shell-grid">
           <label className="ops-field appsheet-field"><span>Fecha</span><input name="invoiceDate" data-testid="invoiceDate" aria-label="Fecha" type="date" value={draft.invoiceDate} disabled /></label>
+          {replacementProfile && <label className="ops-field appsheet-field"><span>Nro Factura</span><input name="invoiceNumber" data-testid="invoiceNumber" aria-label="Nro Factura" value="Se asigna al guardar" readOnly /></label>}
           <div className="ops-field appsheet-field"><span>Nombre del asociado</span><fieldset className="appsheet-lookup-fieldset" disabled={busy || uncertain}><RemoteSelect field={{ name: "memberId", label: "Nombre del asociado", type: "select", required: true, lookupPath: "/api/operations/members" }} value={draft.memberId} onChange={selectedMember} /></fieldset></div>
         </div> : <>
           {draft.currency === "USD" && <p className="appsheet-currency-label">Moneda de la preventa original: <strong>USD</strong>. Se conserva sin conversión.</p>}
           <div className="appsheet-invoice-fields">
-            <label className="ops-field appsheet-field"><span>Nro Factura</span><input name="invoiceNumber" data-testid="invoiceNumber" aria-label="Nro Factura" value={draft.invoiceNumber} onChange={event => updateDraft("invoiceNumber", event.target.value)} maxLength={120} disabled={busy || uncertain} /></label>
+            {replacementProfile
+              ? <label className="ops-field appsheet-field"><span>Nro Factura</span><input name="invoiceNumber" data-testid="invoiceNumber" aria-label="Nro Factura" value={draft.invoiceNumber || (mode === "edit-preorder" ? "No disponible" : "Se asigna al guardar")} readOnly /></label>
+              : <label className="ops-field appsheet-field"><span>Nro Factura</span><input name="invoiceNumber" data-testid="invoiceNumber" aria-label="Nro Factura" value={draft.invoiceNumber} onChange={event => updateDraft("invoiceNumber", event.target.value)} maxLength={120} disabled={busy || uncertain} />
+              </label>
+            }
             <label className="ops-field appsheet-field"><span>Fecha</span><input name="invoiceDate" data-testid="invoiceDate" aria-label="Fecha" type="date" value={draft.invoiceDate} onChange={event => updateDraft("invoiceDate", event.target.value)} required disabled={busy || uncertain} /></label>
             <div className="ops-field appsheet-field"><span>Cliente</span>{mode === "edit-preorder" ? <input aria-label="Cliente" value={memberName || `Socio #${draft.memberId.slice(0, 8)}`} readOnly /> : <fieldset className="appsheet-lookup-fieldset" disabled={busy || uncertain}><RemoteSelect field={{ name: "memberId", label: "Cliente", type: "select", required: true, lookupPath: "/api/operations/members" }} value={draft.memberId} onChange={selectedMember} /></fieldset>}{mode === "edit-preorder" && <small>El socio se conserva desde la preventa original.</small>}</div>
             <label className="ops-field appsheet-field appsheet-address-field"><span>Domicilio</span><textarea name="address" data-testid="address" aria-label="Domicilio" value={draft.address} onChange={event => editAddress(event.target.value)} rows={2} maxLength={500} disabled={busy || uncertain} />{memberLoading && <small role="status">Completando desde el socio…</small>}{memberError && <small className="appsheet-subtle-error">{memberError} · podés cargar el domicilio manualmente.</small>}</label>
@@ -436,18 +449,20 @@ export function AppSheetInvoiceForm(props: Props) {
 
           <section className="appsheet-section appsheet-payment-section">
             <label className="ops-field appsheet-field"><span>Forma de pago</span><select name="productPaymentMethod" data-testid="productPaymentMethod" aria-label="Forma de pago" value={draft.productPaymentMethod} onChange={event => updateDraft("productPaymentMethod", event.target.value as Payment)} disabled={busy || uncertain}>{paymentOptions(draft.productPaymentMethod === "card").map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-            {draft.productPaymentMethod === "transfer" && <label className="ops-field appsheet-field"><span>Transferencia</span><input name="productTransfer" data-testid="productTransfer" aria-label="Transferencia" value="Pendiente de definición" readOnly /><small>El campo observado está deshabilitado; el importe derivado y su fórmula siguen pendientes de cotejo.</small></label>}
+            {replacementProfile && draft.productPaymentMethod !== "cash" && draft.productPaymentMethod !== "card"
+              ? <label className="ops-field appsheet-field"><span>Transferencia</span><input name="productTransfer" data-testid="productTransfer" aria-label="Transferencia" value={formatMinor(formulaPreview!.transferMinor.toString(), draft.currency)} readOnly /><small>5% del subtotal de productos según la regla capturada; el importe se redondea al centavo con mitad hacia arriba.</small></label>
+              : !replacementProfile && draft.productPaymentMethod === "transfer" && <label className="ops-field appsheet-field"><span>Transferencia</span><input name="productTransfer" data-testid="productTransfer" aria-label="Transferencia" value="Pendiente de definición" readOnly /><small>El campo observado está deshabilitado; el importe derivado y su fórmula siguen pendientes de cotejo.</small></label>}
           </section>
 
           <section className="appsheet-totals" aria-label="Resumen de factura" aria-live="polite">
             <div><span>Gramos</span><strong>{scaledGrams(draft.lines)} g</strong></div>
-            <div><span>Monto parcial</span><strong>Pendiente de definición</strong></div>
+            <div><span>Monto parcial</span><strong>{formulaPreview ? formatMinor(formulaPreview.subtotalMinor.toString(), draft.currency) : "Pendiente de definición"}</strong></div>
             <div><span>Suma explícita de líneas</span><strong>{formatMinor(productSubtotalMinor.toString(), draft.currency)}</strong></div>
-            <div><span>Transferencia</span><strong>{draft.productPaymentMethod === "transfer" ? "Pendiente de definición" : "—"}</strong></div>
+            <div><span>Transferencia</span><strong>{formulaPreview ? formatMinor(formulaPreview.transferMinor.toString(), draft.currency) : draft.productPaymentMethod === "transfer" ? "Pendiente de definición" : "—"}</strong></div>
             <div><span>Importe capturado</span><strong>{formatMinor(capturedBaseMinor.toString(), draft.currency)}</strong></div>
-            <div className="appsheet-total"><span>Total facturado</span><strong>Pendiente de definición</strong></div>
+            <div className="appsheet-total"><span>Total facturado</span><strong>{formulaPreview ? formatMinor(formulaPreview.totalMinor.toString(), draft.currency) : "Pendiente de definición"}</strong></div>
           </section>
-          <p className="appsheet-footnote">El importe capturado reúne productos y Tarifa Cliente como referencia. El total facturado todavía está pendiente de definición.</p>
+          <p className="appsheet-footnote">{formulaPreview ? "El total aplica la fórmula registrada al subtotal de productos, suma la Tarifa Cliente de la moto y conserva el recargo calculado al guardar." : "El importe capturado reúne productos y Tarifa Cliente como referencia. El total facturado todavía está pendiente de definición."}</p>
           <label className="ops-field appsheet-field"><span>Aclaración</span><textarea name="note" data-testid="note" aria-label="Aclaración" value={draft.note} onChange={event => updateDraft("note", event.target.value)} rows={2} maxLength={2000} disabled={busy || uncertain} /></label>
           {mode === "edit-preorder" && <p className="appsheet-footnote">Guardar completa y confirma la preventa; reserva stock y crea el envío cuando hay moto. El cobro queda pendiente.</p>}
           {mode === "invoice" && <p className="appsheet-footnote">Guardar confirma la factura y su envío cuando hay moto. El cobro queda pendiente y no afecta cajas.</p>}

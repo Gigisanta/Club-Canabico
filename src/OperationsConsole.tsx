@@ -7,6 +7,7 @@ import { CommandDialog } from "./operations-ui/CommandDialog";
 import { apiGet, CommandRunner, hasCapability, onOperationsSessionExpired, OperationsApiError } from "./operations-ui/api";
 import { ErrorState, LoadingState, StatusTag } from "./operations-ui/Primitives";
 import { OperationalWorkspace } from "./operations-ui/OperationalWorkspace";
+import { AppSheetMigrationWorkspace } from "./operations-ui/AppSheetMigrationWorkspace";
 import type { CommandAction, OperationsContext } from "./operations-ui/types";
 
 export interface OperationsConsoleProps {
@@ -40,6 +41,7 @@ const groups: NavGroup[] = [
     { id: "reports", label: "Informes", icon: ChartBar, capability: "reports.read" },
   ] },
   { label: "Gestión", items: [
+    { id: "appsheet", label: "Migración AppSheet", icon: ClipboardText, capability: "imports.review" },
     { id: "sources", label: "Datos cargados", icon: ClipboardText, capability: "imports.review" },
     { id: "commercial", label: "Políticas y promociones", icon: Tag, capability: "prices.propose" },
     { id: "configuration", label: "Configuración", icon: Gear, capability: "prices.propose" },
@@ -245,7 +247,7 @@ export default function OperationsConsole({ onExit, exitLabel = "Volver al panel
           : context.authority.mode !== "active" && <div className="ops-shadow-strip"><span aria-hidden="true">●</span> Las ventas y los movimientos operativos requieren habilitación. Podés gestionar los datos y controles disponibles para tu perfil.</div>}
         <main className="ops-content" id="operations-main" tabIndex={-1}>
           {error && <ErrorState message={`No pudimos actualizar el acceso. ${error}`} retry={() => void reloadContext()} />}
-          {page && <OperationalWorkspace key={page.id} pageId={page.id} context={context} refreshKey={refreshKey} runCommand={runCommand} openAction={openAction} onNotice={showNotice} onRefresh={() => {
+          {page?.id === "appsheet" ? <AppSheetMigrationWorkspace refreshKey={refreshKey} /> : page && <OperationalWorkspace key={page.id} pageId={page.id} context={context} refreshKey={refreshKey} runCommand={runCommand} openAction={openAction} onNotice={showNotice} onRefresh={() => {
             setRefreshKey(key => key + 1);
             if (page.id === "gates") void reloadContext();
           }} />}

@@ -40,3 +40,5 @@ export const profileCapabilities: Record<string, Capability[]> = {
 export interface MoneyValue { currency: Currency; minor: string }
 export interface MetricValue { value: string | null; currency?: Currency; unit?: string; coverage: { known: number; total: number; reason?: string } }
 export const cutoverGateIds = ["legacy-writers-inventoried","legacy-queues-drained","final-export-consistent","final-delta-reconciled","open-objects-approved","physical-opening-approved","cash-opening-approved","legacy-writes-disabled","android-accepted","restore-accepted","shadow-seven-days","analytics-approved","professional-permissions-approved","handoff-approved"] as const;
+export const cutoverProfiles = ["legacy", "appsheet-replacement"] as const;
+export type CutoverProfile = (typeof cutoverProfiles)[number];

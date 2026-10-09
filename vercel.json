@@ -1,5 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "name": "bombo",
+  "version": 2,
   "framework": "vite",
   "installCommand": "npm ci --include=dev && npm run db:generate",
   "buildCommand": "npm run build",

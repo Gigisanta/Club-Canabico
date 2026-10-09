@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import bcrypt from "bcryptjs";
 import { splitSqlStatements } from "./migration-sql.js";
 import type { CommandEnvelope } from "../shared/operations/contracts.js";
+import { formatAppSheetInvoiceNumberForYear } from "../shared/operations/appsheet-invoice-rules.js";
 
 test("AppSheet invoices preserve exact line values and independent moto metadata while confirming atomically", {
   skip: !process.env.TEST_DATABASE_URL,
@@ -709,6 +710,173 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
         assert.equal(await db.operationObject.findUnique({ where: { id: targetId } }), null);
         assert.equal(await db.commandReceipt.count({ where: { requestId: rejected.request.requestId } }), 0);
       }
+    });
+
+    await t.test("replacement invoices fail closed without a seed, then reserve numbers atomically and preserve them on edit", async () => {
+      const manifestHash = createHash("sha256").update(`synthetic-invoice-capture-${randomUUID()}`).digest("hex");
+      const dataHash = createHash("sha256").update(`synthetic-invoice-data-${randomUUID()}`).digest("hex");
+      const captureId = `appsreal-${manifestHash.slice(0, 16)}`;
+      const captureNow = new Date();
+      await db.appSheetCaptureManifest.create({ data: {
+        captureId, sourceSystem: "appsheet-live-verified", sourceId: "synthetic-invoice-spreadsheet", spreadsheetId: "synthetic-invoice-spreadsheet",
+        metadataHash: "a".repeat(64), headersHash: "b".repeat(64), manifestHash, dataHash, definitionHash: null,
+        stability: { stable: true }, firstReadAt: captureNow, verificationStartedAt: captureNow, verificationCompletedAt: captureNow, cutoffAt: captureNow,
+        dataCoverage: {}, pageManifest: [], dataSheetCount: 0, dataPageCount: 0, dataRecordCount: 0,
+        dataFormulaCount: 0, dataUnresolvedFormulaCount: 0,
+      } });
+      const snapshotId = `synthetic-invoice-history-${randomUUID()}`;
+      await db.legacyImportSnapshot.create({ data: {
+        id: snapshotId, sourceSystem: "appsheet-live-verified", filename: "appsheet-live-capture", fileHash: manifestHash,
+        importerVersion: "synthetic-invoice-sequence-test", status: "reviewed", createdBy: ownerId, reviewedBy: deniedId,
+        captureManifestId: captureId, coverage: {}, controls: {},
+      } });
+      await db.operationAuthority.upsert({
+        where: { id: "operations" },
+        create: { id: "operations", mode: "active", cutoverProfile: "appsheet-replacement", captureManifestId: captureId },
+        update: { mode: "active", cutoverProfile: "appsheet-replacement", captureManifestId: captureId },
+      });
+
+      const seedRequest = envelope(captureId, "AppSheetInvoiceSequenceSeeded", {
+        captureId, snapshotId, previewDigest: "0".repeat(64), evidence: { note: "Synthetic request must remain blocked until the capture and history reconcile." },
+      });
+      const seedRejected = await send(seedRequest);
+      assert.equal(seedRejected.response.status, 423, JSON.stringify(seedRejected.body));
+      assert.equal(seedRejected.body.code, "APP_SHEET_HISTORY_BINDING_INVALID");
+      assert.equal(await db.appSheetInvoiceSequence.count(), 0);
+      assert.equal(await db.appSheetInvoiceNumberReservation.count(), 0);
+      assert.equal(await db.operationObject.findUnique({ where: { id: captureId } }), null);
+      assert.equal(await db.commandReceipt.count({ where: { requestId: seedRequest.requestId } }), 0);
+      assert.equal(await db.operationAudit.count({ where: { requestId: seedRequest.requestId } }), 0);
+      assert.equal(await db.operationOutbox.count({ where: { requestId: seedRequest.requestId } }), 0);
+
+      const manualTarget = `appsheet-replacement-manual-${randomUUID()}`;
+      const manualRequest = envelope(manualTarget, "InvoiceSaved", invoiceData({ preorder: true }));
+      const manualRejected = await send(manualRequest);
+      assert.equal(manualRejected.response.status, 422, JSON.stringify(manualRejected.body));
+      assert.equal(manualRejected.body.code, "APP_SHEET_MANUAL_INVOICE_NUMBER_REJECTED");
+      assert.equal(await db.operationOrder.findUnique({ where: { id: manualTarget } }), null);
+      assert.equal(await db.operationObject.findUnique({ where: { id: manualTarget } }), null);
+      assert.equal(await db.commandReceipt.count({ where: { requestId: manualRequest.requestId } }), 0);
+
+      const unseededTarget = `appsheet-replacement-unseeded-${randomUUID()}`;
+      const unseededData = { ...invoiceData({ preorder: true }), invoiceNumber: undefined };
+      delete (unseededData as Record<string, unknown>).invoiceNumber;
+      const unseededRequest = envelope(unseededTarget, "InvoiceSaved", unseededData);
+      const unseededRejected = await send(unseededRequest);
+      assert.equal(unseededRejected.response.status, 423, JSON.stringify(unseededRejected.body));
+      assert.equal(unseededRejected.body.code, "APP_SHEET_INVOICE_SEQUENCE_UNSEEDED");
+      assert.equal(await db.operationOrder.findUnique({ where: { id: unseededTarget } }), null, "the provisional order write rolls back");
+      assert.equal(await db.operationObject.findUnique({ where: { id: unseededTarget } }), null, "the provisional aggregate write rolls back");
+      assert.equal(await db.operationOrderLine.count({ where: { orderId: unseededTarget } }), 0);
+      assert.equal(await db.appSheetInvoiceSequence.count(), 0);
+      assert.equal(await db.appSheetInvoiceNumberReservation.count(), 0);
+      assert.equal(await db.commandReceipt.count({ where: { requestId: unseededRequest.requestId } }), 0);
+      assert.equal(await db.operationAudit.count({ where: { requestId: unseededRequest.requestId } }), 0);
+      assert.equal(await db.operationOutbox.count({ where: { requestId: unseededRequest.requestId } }), 0);
+
+      await db.appSheetInvoiceSequence.create({ data: {
+        namespace: captureId, captureId, manifestHash, dataHash, snapshotId, mappingId: "synthetic-reviewed-mapping",
+        publicationFingerprint: "c".repeat(64), sourceBindingHash: "d".repeat(64), lastValue: 40n, seededValue: 40n,
+        invoiceRecordCount: 1, numberedInvoiceCount: 1, unnumberedInvoiceCount: 0, duplicateInvoiceNumberCount: 0, duplicateHiddenIdCount: 0,
+        seedEvidence: { fixture: "synthetic allocator test, not source certification" }, seededBy: ownerId, seededAt: captureNow,
+      } });
+      const invoiceYear = Number(new Intl.DateTimeFormat("en", { timeZone: "America/Argentina/Buenos_Aires", year: "numeric" }).format(new Date()));
+      const historicalCollision = formatAppSheetInvoiceNumberForYear(invoiceYear, 41n);
+      await db.appSheetInvoiceNumberReservation.create({ data: {
+        id: `synthetic-historical-reservation-${randomUUID()}`, namespace: captureId, captureId, manifestHash,
+        invoiceNumber: historicalCollision, origin: "historical", orderId: null, sourceReferenceCount: 1,
+        sourceReferences: [{ sourceRecordId: "synthetic-history-row", sourceRow: 2, sourceHash: "e".repeat(64), sourceKeyHash: "f".repeat(64), hiddenId: "41" }],
+        generatedId: null, generatedYear: null, createdBy: null,
+      } });
+
+      const transferData = (preorder: boolean) => {
+        const data = invoiceData({ preorder, lineTotal: "110", quantity: "1", withMoto: true }) as Record<string, unknown>;
+        delete data.invoiceNumber;
+        data.productPaymentMethod = "transfer";
+        return data;
+      };
+      const targets = [`appsheet-replacement-race-a-${randomUUID()}`, `appsheet-replacement-race-b-${randomUUID()}`];
+      const requests = targets.map(target => envelope(target, "InvoiceSaved", transferData(true)));
+      const ledgerCountsBeforeConcurrent = [await db.ledgerEvent.count(), await db.ledgerLeg.count(), await db.collectionReport.count(), await db.cashEntry.count()];
+      const outcomes = await Promise.all(requests.map(request => send(request)));
+      for (const outcome of outcomes) assert.equal(outcome.response.status, 200, JSON.stringify(outcome.body));
+      const assignedNumbers = outcomes.map(outcome => outcome.body.result.invoiceNumber as string).sort();
+      assert.deepEqual(assignedNumbers, [
+        formatAppSheetInvoiceNumberForYear(invoiceYear, 42n),
+        formatAppSheetInvoiceNumberForYear(invoiceYear, 43n),
+      ].sort(), "the existing source number collision is skipped and concurrent creates remain unique");
+      const sequence = await db.appSheetInvoiceSequence.findUniqueOrThrow({ where: { namespace: captureId } });
+      assert.equal(sequence.lastValue, 43n);
+      const reservations = await db.appSheetInvoiceNumberReservation.findMany({ where: { orderId: { in: targets } } });
+      assert.equal(reservations.length, 2);
+      assert.equal(new Set(reservations.map(item => item.invoiceNumber)).size, 2);
+      assert.equal(new Set(reservations.map(item => item.orderId)).size, 2);
+      assert.equal(await db.commandReceipt.count({ where: { targetId: { in: targets }, command: "InvoiceSaved" } }), 2);
+      assert.equal(await db.operationOutbox.count({ where: { requestId: { in: requests.map(request => request.requestId) } } }), 2);
+      assert.equal(await db.operationAudit.count({ where: { requestId: { in: requests.map(request => request.requestId) } } }), 2);
+      assert.deepEqual([await db.ledgerEvent.count(), await db.ledgerLeg.count(), await db.collectionReport.count(), await db.cashEntry.count()], ledgerCountsBeforeConcurrent);
+
+      for (const target of targets) {
+        const order = await db.operationOrder.findUniqueOrThrow({ where: { id: target } });
+        const quote = order.quote as Record<string, any>;
+        assert.equal(order.commercialState, "preorder");
+        assert.equal(order.totalMinor, 816n);
+        assert.equal(order.subtotalMinor, 110n);
+        assert.equal(order.surchargeMinor, 6n);
+        assert.equal(quote.subtotalCalculationState, "defined");
+        assert.equal(quote.totalCalculationState, "defined");
+        assert.equal(quote.totalCalculationSource, "appsheet_recalculation_action");
+        assert.equal(quote.appSheetFormula.results.Subtotal_Venta, "110");
+        assert.equal(quote.appSheetFormula.results.Transferencia, "6");
+        assert.equal(quote.appSheetFormula.results.Total_Facturado, "816");
+        assert.equal(quote.appSheetFormula.transfer.subcentRemainderNumerator, "10");
+        assert.equal(quote.appSheetFormula.numbering.captureId, captureId);
+        assert.equal(await db.stockReservation.count({ where: { orderId: target } }), 0);
+      }
+      const retry = await send(requests[0]!);
+      assert.equal(retry.response.status, 200, JSON.stringify(retry.body));
+      assert.equal(retry.body.replay, true);
+      assert.equal((await db.appSheetInvoiceSequence.findUniqueOrThrow({ where: { namespace: captureId } })).lastValue, 43n);
+      assert.deepEqual([await db.ledgerEvent.count(), await db.ledgerLeg.count(), await db.collectionReport.count(), await db.cashEntry.count()], ledgerCountsBeforeConcurrent);
+
+      const editedTarget = targets[0]!;
+      const beforeEdit = await db.operationOrder.findUniqueOrThrow({ where: { id: editedTarget } });
+      const originalQuote = beforeEdit.quote as Record<string, any>;
+      const linesBeforeRejectedEdit = await db.operationOrderLine.findMany({ where: { orderId: editedTarget }, orderBy: { id: "asc" } });
+      const changedNumberData = { ...transferData(true), invoiceNumber: "MANUAL-CHANGE" };
+      const changedNumberRequest = envelope(editedTarget, "InvoiceUpdated", changedNumberData, 1);
+      const changedNumberRejected = await send(changedNumberRequest);
+      assert.equal(changedNumberRejected.response.status, 409, JSON.stringify(changedNumberRejected.body));
+      assert.equal(changedNumberRejected.body.code, "INVOICE_NUMBER_IMMUTABLE");
+      assert.equal((await db.operationOrder.findUniqueOrThrow({ where: { id: editedTarget } })).quoteVersion, beforeEdit.quoteVersion);
+      assert.deepEqual(await db.operationOrderLine.findMany({ where: { orderId: editedTarget }, orderBy: { id: "asc" } }), linesBeforeRejectedEdit);
+      assert.equal((await db.appSheetInvoiceNumberReservation.findUniqueOrThrow({ where: { orderId: editedTarget } })).invoiceNumber, originalQuote.invoiceNumber);
+      assert.equal(await db.commandReceipt.count({ where: { requestId: changedNumberRequest.requestId } }), 0);
+
+      const validEditData = { ...transferData(true), invoiceNumber: originalQuote.invoiceNumber, lines: [{
+        ...(transferData(true).lines as Array<Record<string, unknown>>)[0], totalMinor: "120",
+      }] };
+      const validEdit = await command(envelope(editedTarget, "InvoiceUpdated", validEditData, 1));
+      assert.equal(validEdit.body.result.invoiceNumber, originalQuote.invoiceNumber);
+      const editedOrder = await db.operationOrder.findUniqueOrThrow({ where: { id: editedTarget } });
+      const editedQuote = editedOrder.quote as Record<string, any>;
+      assert.equal(editedOrder.totalMinor, 826n);
+      assert.equal(editedQuote.totalCalculationState, "defined");
+      assert.equal(editedQuote.appSheetFormula.results.Transferencia, "6");
+      assert.equal(editedQuote.appSheetFormula.numbering.sequenceId, originalQuote.appSheetFormula.numbering.sequenceId);
+      assert.equal((await db.appSheetInvoiceNumberReservation.findUniqueOrThrow({ where: { orderId: editedTarget } })).invoiceNumber, originalQuote.invoiceNumber);
+      assert.equal((await db.appSheetInvoiceSequence.findUniqueOrThrow({ where: { namespace: captureId } })).lastValue, 43n);
+
+      const confirmed = await command(envelope(editedTarget, "InvoiceConfirmed", { acceptance: { reference: "synthetic-replacement-preorder-acceptance" } }, 2));
+      assert.equal(confirmed.body.result.commercialState, "confirmed");
+      const totalsAttempt = envelope(editedTarget, "InvoiceTotalsConfirmed", {
+        currency: "ARS", productsTotalMinor: "120", motoClientTotalMinor: "700", evidence: { note: "Must not replace the captured formula result." },
+      }, 3);
+      const totalsRejected = await send(totalsAttempt);
+      assert.equal(totalsRejected.response.status, 409, JSON.stringify(totalsRejected.body));
+      assert.equal(totalsRejected.body.code, "INVOICE_TOTAL_ALREADY_RESOLVED");
+      assert.equal(await db.commandReceipt.count({ where: { requestId: totalsAttempt.requestId } }), 0);
+      assert.deepEqual([await db.ledgerEvent.count(), await db.ledgerLeg.count(), await db.collectionReport.count(), await db.cashEntry.count()], ledgerCountsBeforeConcurrent);
     });
   } finally {
     if (server) await new Promise<void>(resolve => server!.close(() => resolve()));

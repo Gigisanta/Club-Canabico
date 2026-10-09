@@ -127,7 +127,9 @@ export async function executeCommand(actor: User, input: unknown, authorization?
         return response;
       },{isolationLevel:"Serializable",timeout:spec.transactionTimeoutMs??20000});
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && ["P2034","P2002"].includes(error.code) && attempt < 4) { await new Promise(resolve=>setTimeout(resolve,20*2**attempt+Math.floor(Math.random()*20))); continue; }
+      const retryableConflict = error instanceof Prisma.PrismaClientKnownRequestError &&
+        (["P2034", "P2002"].includes(error.code) || (error.code === "P2010" && error.meta?.code === "40001"));
+      if (retryableConflict && attempt < 4) { await new Promise(resolve=>setTimeout(resolve,20*2**attempt+Math.floor(Math.random()*20))); continue; }
       throw error;
     }
   }

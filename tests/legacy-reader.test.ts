@@ -43,6 +43,17 @@ async function workbookBuffer(): Promise<Buffer> {
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
+test("catalogue source identities use CatalogoID when the commercial code repeats", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const catalogue = workbook.addWorksheet("D_Catalogo_Mercaderia");
+  catalogue.addRow(["CatalogoID", "Codigo_Detalle", "Variedad_Cann"]);
+  catalogue.addRow(["catalogue-a", "commercial-shared", "Variedad A"]);
+  catalogue.addRow(["catalogue-b", "commercial-shared", "Variedad B"]);
+  const snapshot = await readLegacyWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()));
+  assert.deepEqual(snapshot.records.map(record => record.sourceKey), ["catalogue-a", "catalogue-b"]);
+  assert.equal(snapshot.records.some(record => record.exceptions.some(exception => exception.kind === "duplicate_source_key")), false);
+});
+
 test("legacy XLSX snapshot excludes credential headers and values before serializing T_Usuarios", async () => {
   const bytes = await workbookBuffer();
   const snapshot = await readLegacyWorkbook(bytes);

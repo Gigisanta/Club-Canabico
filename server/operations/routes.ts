@@ -23,8 +23,8 @@ operationsRoutes.get("/context",async(req,res)=>{
   db.operationAccess.findUnique({where:{userId:req.user.id}}),
   db.operationAuthority.findUnique({where:{id:"operations"}}),
  ]);
- const snapshot=buildOperationAccessSnapshot(req.user,grant),caps=snapshot.capabilities;
- res.json({userId:req.user.id,profile:snapshot.profile,isOwner:snapshot.isOwner,canManageDecisionInputs:snapshot.canManageDecisionInputs,operationalApprovalConfigured:process.env.CLUB_OPERATIONS_APPROVED==="true",capabilities:caps,rehearsal:process.env.DEMO_MODE==="true"||process.env.NODE_ENV==="test"||process.env.OPERATIONAL_REHEARSAL==="true",authority:{mode:authority?.mode??"shadow",epoch:authority?.epoch??1,firstRealWriteAt:authority?.firstRealWriteAt??null},timeZone:"America/Argentina/Buenos_Aires",commands:[...commandSpecs].filter(([,s])=>!s.internal&&caps.includes(s.capability)).map(([command,s])=>({command,kind:s.kind,create:Boolean(s.create)}))});
+ const snapshot=buildOperationAccessSnapshot(req.user,grant,authority),caps=snapshot.capabilities;
+ res.json({userId:req.user.id,profile:snapshot.profile,isOwner:snapshot.isOwner,canManageDecisionInputs:snapshot.canManageDecisionInputs,operationalApprovalConfigured:process.env.CLUB_OPERATIONS_APPROVED==="true",capabilities:caps,rehearsal:process.env.DEMO_MODE==="true"||process.env.NODE_ENV==="test"||process.env.OPERATIONAL_REHEARSAL==="true",authority:{mode:authority?.mode??"shadow",cutoverProfile:snapshot.cutoverProfile,epoch:authority?.epoch??1,firstRealWriteAt:authority?.firstRealWriteAt??null},timeZone:"America/Argentina/Buenos_Aires",commands:[...commandSpecs].filter(([,s])=>!s.internal&&caps.includes(s.capability)).map(([command,s])=>({command,kind:s.kind,create:Boolean(s.create)}))});
 });
 operationsRoutes.post("/commands",async(req,res)=>{
  const envelope=envelopeSchema.parse(req.body);
@@ -219,5 +219,21 @@ operationsRoutes.get("/routes",async(req,res)=>{
  res.json(wire({items,deliveries,unassignedDeliveries:unassignedDeliveries.slice(0,limit),unassignedHasMore:unassignedDeliveries.length>limit,unassignedNextCursor:unassignedDeliveries.length>limit?unassignedDeliveries[limit-1]!.id:null,versions:await versions([...items,...deliveries,...unassignedDeliveries.slice(0,limit)].map(r=>r.id))}));
 });
 operationsRoutes.get("/access",async(req,res)=>{await requireCapability(db,req.user,"access.manage");res.json({users:await db.user.findMany({select:{id:true,name:true,role:true,active:true,authorizationEpoch:true}}),grants:await db.operationAccess.findMany(),devices:await db.operationDevice.findMany(),profiles:Object.keys((await import("../../shared/operations/contracts.js")).profileCapabilities)});});
-operationsRoutes.get("/authority",async(req,res)=>{await requireCapability(db,req.user,"cutover.approve");res.json({authority:await db.operationAuthority.findUnique({where:{id:"operations"}}),gates:await db.cutoverGate.findMany()});});
+operationsRoutes.get("/authority",async(req,res)=>{
+ await requireCapability(db,req.user,"cutover.approve");
+ const [authority,gates,captures]=await Promise.all([
+  db.operationAuthority.findUnique({where:{id:"operations"}}),
+  db.cutoverGate.findMany({orderBy:{id:"asc"}}),
+  db.appSheetCaptureManifest.findMany({orderBy:{cutoffAt:"desc"},take:20,select:{
+   captureId:true,sourceSystem:true,manifestHash:true,dataHash:true,definitionHash:true,stability:true,cutoffAt:true,
+   dataSheetCount:true,dataPageCount:true,dataRecordCount:true,dataFormulaCount:true,dataUnresolvedFormulaCount:true,
+   definitionTableCount:true,definitionColumnCount:true,definitionSliceCount:true,definitionViewCount:true,
+   definitionActionCount:true,definitionBotCount:true,definitionWorkflowRuleCount:true,definitionFormatRuleCount:true,
+  }}),
+ ]);
+ const gateVersions=await versions([...gates.map(gate=>gate.id),"operations"]);
+ for(const gate of gates)gateVersions[gate.id]??=0;
+ gateVersions.operations??=0;
+ res.json(wire({authority,gates,captures,versions:gateVersions}));
+});
 operationsRoutes.get("/audit",async(req,res)=>{await requireCapability(db,req.user,"access.manage");res.json({items:await db.operationAudit.findMany({orderBy:{createdAt:"desc"},take:200})});});
