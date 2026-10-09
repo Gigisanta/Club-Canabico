@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -220,7 +221,11 @@ test("financial source staging is scoped, digest checked, atomic, and idempotent
   const originalBackupEncryptionKey = process.env.BACKUP_ENCRYPTION_KEY;
   assertSeparateDatabaseTargets(testDatabase, originalDatabaseUrl);
   assert.equal(originalBackupEncryptionKey === undefined, true, "the test runner must not inherit a backup key");
-  assert.equal(process.env.OPERATIONS_BACKUP_RESTORE_E2E === undefined, true, "restore rehearsals are outside this test");
+  assert.equal(
+    testProcessEnvironment({}).OPERATIONS_BACKUP_RESTORE_E2E,
+    undefined,
+    "the backup CLI helper must not inherit the restore rehearsal opt-in",
+  );
   const sameTargetWithDifferentCredentialsAndSchema = new URL(testDatabase);
   sameTargetWithDifferentCredentialsAndSchema.hostname = "localhost";
   sameTargetWithDifferentCredentialsAndSchema.username = "synthetic-app-user";
@@ -231,7 +236,7 @@ test("financial source staging is scoped, digest checked, atomic, and idempotent
     "different credentials, schema, or loopback aliases must not disguise the same database target",
   );
   const schema = `financial_stage_${randomUUID().replaceAll("-", "")}`;
-  const temporaryRoot = await mkdtemp(join(repositoryRoot, ".local/finance-qa/financial-source-stage-"));
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "bombo-financial-source-stage-"));
   const backupDirectory = join(temporaryRoot, "verified-backup");
   const privateObjectRoot = join(temporaryRoot, "private-objects");
   let schemaCreated = false;
