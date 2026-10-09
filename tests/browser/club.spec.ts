@@ -366,7 +366,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await expect(page.getByRole("navigation", { name: "Áreas para preparar decisiones" }).getByRole("button", { name: "Caja" })).toHaveAttribute("aria-current", "page");
   await page.goto("/app/finanzas");
   await page.getByRole("button", { name: "Planificación", exact: true }).click();
-  await page.getByRole("button", { name: "Agregar proyección" }).click();
+  await page.getByRole("button", { name: "Agregar partida local", exact: true }).click();
   dialog = page.getByRole("dialog");
   await dialog.getByLabel("Fecha").fill("2027-01-10");
   await expect(dialog.getByLabel("Tipo de partida")).toHaveValue("outflow");
