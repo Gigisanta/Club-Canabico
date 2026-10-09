@@ -5,8 +5,8 @@ import { readFile, readdir } from "node:fs/promises";
 import bcrypt from "bcryptjs";
 import { Prisma } from "@prisma/client";
 import { splitSqlStatements } from "./migration-sql.js";
-import type { CommandEnvelope } from "../shared/operations/contracts.js";
-import { APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../shared/operations/appsheet-canonical.js";
+import { cutoverGateIds, type CommandEnvelope } from "../shared/operations/contracts.js";
+import { APPSHEET_CANONICAL_IMPORTER_VERSION, APPSHEET_CANONICAL_MAPPING_ID, APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../shared/operations/appsheet-canonical.js";
 import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
 import { canonicalJson } from "../shared/operations/exact.js";
 import { formatAppSheetInvoiceNumberForYear } from "../shared/operations/appsheet-invoice-rules.js";
@@ -161,6 +161,379 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
         },
       } : {}),
       preorder: options.preorder ?? false,
+    });
+    let preCaptureLegacyInvoice: CommandEnvelope | undefined;
+
+    await t.test("legacy invoices and gates remain available before a canonical AppSheet capture", async () => {
+      assert.equal(await db.appSheetCaptureManifest.count({ where: { sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM } }), 0);
+      const invoiceNumber = `APP-2026-${randomUUID().slice(0, 8).toUpperCase()}`;
+      preCaptureLegacyInvoice = envelope(`legacy-before-appsheet-${randomUUID()}`, "InvoiceSaved", { ...invoiceData({ preorder: true }), invoiceNumber });
+      const savedInvoice = await send(preCaptureLegacyInvoice);
+      assert.equal(savedInvoice.response.status, 200, JSON.stringify(savedInvoice.body));
+      assert.equal(await db.commandReceipt.findUnique({ where: { requestId: preCaptureLegacyInvoice.requestId } }) !== null, true);
+
+      const gateId = cutoverGateIds[0]!;
+      const legacyGate = await send(envelope(gateId, "CutoverGateReviewed", {
+        gateId, cutoverProfile: "legacy", authorId: deniedId, evidence: { note: "Synthetic legacy gate before AppSheet capture" },
+      }));
+      assert.equal(legacyGate.response.status, 200, JSON.stringify(legacyGate.body));
+      assert.equal(legacyGate.body.result.cutoverProfile, "legacy");
+      assert.equal(legacyGate.body.result.captureId, null);
+    });
+
+    await t.test("a preliminary canonical snapshot blocks legacy operations without a capture manifest", async () => {
+      assert.ok(preCaptureLegacyInvoice, "the positive legacy command must exist before any AppSheet source is staged");
+      const snapshotWhere = { sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM, importerVersion: APPSHEET_CANONICAL_IMPORTER_VERSION };
+      assert.equal(await db.legacyImportSnapshot.count({ where: snapshotWhere }), 0);
+      assert.equal(await db.appSheetCaptureManifest.count({ where: { sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM } }), 0);
+      const originalAuthority = await db.operationAuthority.findUnique({ where: { id: "operations" } });
+      const originalGates = await db.cutoverGate.findMany();
+      const originalGateObjects = await db.operationObject.findMany({ where: { id: { in: [...cutoverGateIds, "operations"] } } });
+
+      const digest = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+      const fileHash = digest(`synthetic-appsheet-preliminary-${randomUUID()}`);
+      const dataHash = digest(`synthetic-appsheet-preliminary-data-${randomUUID()}`);
+      const captureId = `appsreal-${fileHash.slice(0, 16)}`;
+      const snapshotId = `appsheet-preliminary-${randomUUID()}`;
+      const snapshotIds = [snapshotId];
+      const accountId = `appsheet-preliminary-cash-${randomUUID()}`;
+      const stockLotId = `appsheet-preliminary-stock-${randomUUID()}`;
+      const attemptedRequests: CommandEnvelope[] = [];
+      const approvalFlagBefore = process.env.CLUB_OPERATIONS_APPROVED;
+      process.env.CLUB_OPERATIONS_APPROVED = "true";
+      try {
+      await db.legacyImportSnapshot.create({ data: {
+        id: snapshotId,
+        sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM,
+        filename: "appsheet-live-capture",
+        fileHash,
+        importerVersion: APPSHEET_CANONICAL_IMPORTER_VERSION,
+        status: "staged",
+        createdBy: ownerId,
+        reviewedBy: null,
+        reviewedAt: null,
+        captureManifestId: null,
+        controls: { appSheetCanonical: {
+          schemaVersion: 1,
+          projectionKind: "masters",
+          mappingId: APPSHEET_CANONICAL_MAPPING_ID,
+          importerVersion: APPSHEET_CANONICAL_IMPORTER_VERSION,
+          captureId,
+          manifestHash: fileHash,
+          dataHash,
+          stabilityMode: "staged-delta",
+          globalDelta: { globallyStable: false, unresolvedChangedPageCount: 1 },
+        } },
+        coverage: { schemaVersion: 1, appSheetCanonical: {
+          captureId,
+          sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM,
+          manifestHash: fileHash,
+          dataHash,
+          stabilityMode: "staged-delta",
+          delta: { globallyStable: false, unresolvedChangedPageCount: 1, changedPages: [{ sheetId: 1, pageIndex: 0 }] },
+        } },
+      } });
+      assert.equal(await db.appSheetCaptureManifest.count({ where: { sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM } }), 0,
+        "the real preliminary producer stores the source snapshot without an AppSheetCaptureManifest row");
+      await db.operationAuthority.upsert({
+        where: { id: "operations" },
+        create: { id: "operations", mode: "shadow", cutoverProfile: "legacy", captureManifestId: null },
+        update: { mode: "shadow", cutoverProfile: "legacy", captureManifestId: null },
+      });
+      await db.operationAccount.create({ data: {
+        id: accountId, name: "Synthetic preliminary cash", currency: "ARS", kind: "cash", holder: "Fixture",
+        purpose: "Preliminary snapshot guard", verified: true,
+      } });
+      await db.operationObject.create({ data: { id: accountId, kind: "account", version: 2, createdBy: ownerId } });
+
+      const effects = async () => ({
+        receipts: await db.commandReceipt.count(),
+        audits: await db.operationAudit.count(),
+        outbox: await db.operationOutbox.count(),
+      });
+      const assertRejectedWithoutEffects = async (request: CommandEnvelope, expectedCode: string) => {
+        attemptedRequests.push(request);
+        const before = await effects();
+        const rejected = await send(request);
+        assert.equal(rejected.response.status, 423, JSON.stringify(rejected.body));
+        assert.equal(rejected.body.code, expectedCode);
+        assert.deepEqual(await effects(), before);
+        if (request.requestId !== preCaptureLegacyInvoice!.requestId)
+          assert.equal(await db.commandReceipt.findUnique({ where: { requestId: request.requestId } }), null);
+        return rejected;
+      };
+
+      const accountBefore = await db.operationAccount.findUniqueOrThrow({ where: { id: accountId } });
+      const cashEffectsBefore = { events: await db.ledgerEvent.count(), legs: await db.ledgerLeg.count(), entries: await db.cashEntry.count() };
+      const cashRequest = envelope(accountId, "AccountOpeningApproved", {
+        amountMinor: "1200", preparedBy: deniedId, evidence: { note: "Source-less cash opening with a preliminary AppSheet snapshot" },
+      }, 2);
+      const cashRejected = await assertRejectedWithoutEffects(cashRequest, "APPSHEET_REPLACEMENT_NOT_READY");
+      assert.deepEqual(cashRejected.body.details?.blockers, ["opening_source_record_required"]);
+      assert.equal(cashRejected.body.details?.captureId, captureId);
+      assert.equal(cashRejected.body.details?.snapshotId, snapshotId);
+      const accountAfter = await db.operationAccount.findUniqueOrThrow({ where: { id: accountId } });
+      assert.equal(accountAfter.openingMinor, accountBefore.openingMinor);
+      assert.equal(accountAfter.openingApprovedBy, accountBefore.openingApprovedBy);
+      assert.deepEqual({ events: await db.ledgerEvent.count(), legs: await db.ledgerLeg.count(), entries: await db.cashEntry.count() }, cashEffectsBefore);
+
+      const stockEffectsBefore = { lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count() };
+      const stockRequest = envelope(stockLotId, "StockOpeningRecorded", {
+        skuId,
+        label: "Synthetic source-less stock opening",
+        quantity: "5",
+        unitCost: "10",
+        costCurrency: "ARS",
+        receivedDate: today,
+        locationId,
+        preparedBy: deniedId,
+        evidence: { note: "Source-less stock opening with a preliminary AppSheet snapshot" },
+      });
+      await assertRejectedWithoutEffects(stockRequest, "APPSHEET_REPLACEMENT_NOT_READY");
+      assert.deepEqual({ lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count() }, stockEffectsBefore);
+      assert.equal(await db.inventoryLot.findUnique({ where: { id: stockLotId } }), null);
+      assert.equal(await db.operationObject.findUnique({ where: { id: stockLotId } }), null);
+
+      for (const gateId of cutoverGateIds) await db.cutoverGate.upsert({
+        where: { id: gateId },
+        create: { id: gateId, status: "approved", evidence: { note: "Synthetic generic legacy approval" }, approvedBy: deniedId,
+          reviewedBy: ownerId, approvedAt: new Date() },
+        update: { status: "approved", evidence: { note: "Synthetic generic legacy approval" }, approvedBy: deniedId,
+          reviewedBy: ownerId, approvedAt: new Date(), captureManifestId: null },
+      });
+      const legacyGateId = cutoverGateIds[0]!;
+      const legacyGateBefore = await db.cutoverGate.findUniqueOrThrow({ where: { id: legacyGateId } });
+      const legacyGateObjectBefore = await db.operationObject.findUniqueOrThrow({ where: { id: legacyGateId } });
+      const legacyGateRequest = envelope(legacyGateId, "CutoverGateReviewed", {
+        gateId: legacyGateId, cutoverProfile: "legacy", authorId: deniedId, evidence: { note: "Legacy gate after preliminary capture" },
+      }, legacyGateObjectBefore.version);
+        await assertRejectedWithoutEffects(legacyGateRequest, "APPSHEET_REPLACEMENT_REQUIRED");
+        assert.deepEqual(await db.cutoverGate.findUniqueOrThrow({ where: { id: legacyGateId } }), legacyGateBefore);
+        assert.deepEqual(await db.operationObject.findUniqueOrThrow({ where: { id: legacyGateId } }), legacyGateObjectBefore);
+
+        const activationRequest = envelope("operations", "AuthorityActivated", {
+          cutoverProfile: "legacy", evidence: { note: "Legacy activation after preliminary capture" },
+        });
+        await assertRejectedWithoutEffects(activationRequest, "APPSHEET_REPLACEMENT_REQUIRED");
+        const authorityAfterActivation = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+        assert.equal(authorityAfterActivation.mode, "shadow");
+        assert.equal(authorityAfterActivation.cutoverProfile, "legacy");
+
+        assert.equal((await db.operationAuthority.deleteMany({ where: { id: "operations" } })).count, 1);
+        await db.operationAuthority.create({ data: { id: "operations", mode: "active", cutoverProfile: "legacy", captureManifestId: null } });
+        const authorityBeforeReplay = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+        const replayOrderBefore = await db.operationOrder.findUniqueOrThrow({ where: { id: preCaptureLegacyInvoice!.targetId } });
+        const replayObjectBefore = await db.operationObject.findUniqueOrThrow({ where: { id: preCaptureLegacyInvoice!.targetId } });
+        const replayedInvoice = await assertRejectedWithoutEffects(preCaptureLegacyInvoice!, "APPSHEET_REPLACEMENT_REQUIRED");
+        assert.notEqual(replayedInvoice.body.replay, true);
+        assert.ok(await db.commandReceipt.findUnique({ where: { requestId: preCaptureLegacyInvoice!.requestId } }));
+        assert.deepEqual(await db.operationOrder.findUniqueOrThrow({ where: { id: preCaptureLegacyInvoice!.targetId } }), replayOrderBefore);
+        assert.deepEqual(await db.operationObject.findUniqueOrThrow({ where: { id: preCaptureLegacyInvoice!.targetId } }), replayObjectBefore);
+        assert.equal((await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } })).epoch, authorityBeforeReplay.epoch);
+
+        const newInvoiceRequest = envelope(`appsheet-legacy-after-preliminary-${randomUUID()}`, "InvoiceSaved", {
+          ...invoiceData({ preorder: true }), invoiceNumber: `APP-2026-${randomUUID().slice(0, 8).toUpperCase()}`,
+        });
+        await assertRejectedWithoutEffects(newInvoiceRequest, "APPSHEET_REPLACEMENT_REQUIRED");
+        assert.equal(await db.operationOrder.findUnique({ where: { id: newInvoiceRequest.targetId } }), null);
+        assert.equal(await db.operationObject.findUnique({ where: { id: newInvoiceRequest.targetId } }), null);
+
+        await db.legacyImportSnapshot.delete({ where: { id: snapshotId } });
+        const metadataFreeSnapshotId = `appsheet-preliminary-metadata-free-${randomUUID()}`;
+        snapshotIds.push(metadataFreeSnapshotId);
+        await db.legacyImportSnapshot.create({ data: {
+          id: metadataFreeSnapshotId,
+          sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM,
+          filename: "appsheet-live-capture",
+          fileHash: digest(`synthetic-appsheet-preliminary-metadata-free-${randomUUID()}`),
+          importerVersion: APPSHEET_CANONICAL_IMPORTER_VERSION,
+          status: "staged",
+          createdBy: ownerId,
+          captureManifestId: null,
+          controls: {},
+          coverage: {},
+        } });
+        assert.equal((await db.operationAuthority.deleteMany({ where: { id: "operations" } })).count, 1);
+        await db.operationAuthority.create({ data: { id: "operations", mode: "shadow", cutoverProfile: "legacy", captureManifestId: null } });
+        const metadataFreeCashRequest = envelope(accountId, "AccountOpeningApproved", {
+          amountMinor: "1200", preparedBy: deniedId, evidence: { note: "Source-less opening with canonical source metadata omitted" },
+        }, 2);
+        const metadataFreeCashRejected = await assertRejectedWithoutEffects(metadataFreeCashRequest, "APPSHEET_REPLACEMENT_NOT_READY");
+        assert.deepEqual(metadataFreeCashRejected.body.details?.blockers, ["opening_source_record_required"]);
+        assert.equal(metadataFreeCashRejected.body.details?.captureId, undefined);
+        assert.equal(metadataFreeCashRejected.body.details?.snapshotId, metadataFreeSnapshotId);
+
+        await db.legacyImportSnapshot.delete({ where: { id: metadataFreeSnapshotId } });
+        const supportedHistoryImporters = [APPSHEET_HISTORY_IMPORTER_VERSION, "bombo-appsheet-history/1.0.0"] as const;
+        for (const importerVersion of supportedHistoryImporters) {
+          const historyFileHash = digest(`synthetic-history-preliminary-${importerVersion}-${randomUUID()}`);
+          const historyDataHash = digest(`synthetic-history-data-${randomUUID()}`);
+          const historyCaptureId = `appsreal-${historyFileHash.slice(0, 16)}`;
+          const historySnapshotId = `appsheet-history-preliminary-${randomUUID()}`;
+          snapshotIds.push(historySnapshotId);
+          const historyMappingId = importerVersion === APPSHEET_HISTORY_IMPORTER_VERSION
+            ? APPSHEET_HISTORY_MAPPING_ID
+            : "appsheet-live-history-v1";
+          await db.legacyImportSnapshot.create({ data: {
+            id: historySnapshotId,
+            sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
+            filename: "appsheet-live-capture",
+            fileHash: historyFileHash,
+            importerVersion,
+            status: "staged",
+            createdBy: ownerId,
+            captureManifestId: null,
+            controls: { appSheetHistoryStage: {
+              schemaVersion: "appsheet-history-stage/v1",
+              projectionKind: "history",
+              sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
+              mappingId: historyMappingId,
+              importerVersion,
+              captureId: historyCaptureId,
+              manifestHash: historyFileHash,
+              dataHash: historyDataHash,
+              captureDefinitionHash: null,
+              mode: "preliminary-delta",
+              status: "staged",
+            } },
+            coverage: {
+              schemaVersion: "appsheet-history-coverage/v1",
+              projectionKind: "history",
+              sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
+              captureId: historyCaptureId,
+              manifestHash: historyFileHash,
+              dataHash: historyDataHash,
+              captureDefinitionHash: null,
+              appliedDefinitionHash: digest("synthetic-history-definition"),
+              mode: "preliminary-delta",
+              stability: { stable: false, cutoverEligible: false },
+              pages: [],
+              deltaEvidence: [],
+            },
+          } });
+          assert.equal(await db.appSheetCaptureManifest.count({ where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM } }), 0,
+            "history-only preliminary snapshots do not have capture manifests");
+
+          const historyCashRequest = envelope(accountId, "AccountOpeningApproved", {
+            amountMinor: "1200", preparedBy: deniedId, evidence: { note: `Source-less opening with history importer ${importerVersion}` },
+          }, 2);
+          const historyCashRejected = await assertRejectedWithoutEffects(historyCashRequest, "APPSHEET_REPLACEMENT_NOT_READY");
+          assert.deepEqual(historyCashRejected.body.details?.blockers, ["opening_source_record_required"]);
+          assert.equal(historyCashRejected.body.details?.captureId, historyCaptureId);
+          assert.equal(historyCashRejected.body.details?.snapshotId, historySnapshotId);
+
+          const historyStockLotId = `appsheet-history-stock-${randomUUID()}`;
+          const historyStockRequest = envelope(historyStockLotId, "StockOpeningRecorded", {
+            skuId, label: "Synthetic history-only source-less stock opening", quantity: "5", unitCost: "10", costCurrency: "ARS",
+            receivedDate: today, locationId, preparedBy: deniedId,
+            evidence: { note: `Source-less stock opening with history importer ${importerVersion}` },
+          });
+          const stockEffectsBefore = { lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count() };
+          const historyStockRejected = await assertRejectedWithoutEffects(historyStockRequest, "APPSHEET_REPLACEMENT_NOT_READY");
+          assert.equal(historyStockRejected.body.details?.captureId, historyCaptureId);
+          assert.equal(historyStockRejected.body.details?.snapshotId, historySnapshotId);
+          assert.deepEqual({ lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count() }, stockEffectsBefore);
+          assert.equal(await db.inventoryLot.findUnique({ where: { id: historyStockLotId } }), null);
+          assert.equal(await db.operationObject.findUnique({ where: { id: historyStockLotId } }), null);
+
+          const historyGateBefore = await db.cutoverGate.findUniqueOrThrow({ where: { id: legacyGateId } });
+          const historyGateObjectBefore = await db.operationObject.findUniqueOrThrow({ where: { id: legacyGateId } });
+          const historyGateRequest = envelope(legacyGateId, "CutoverGateReviewed", {
+            gateId: legacyGateId, cutoverProfile: "legacy", authorId: deniedId,
+            evidence: { note: `Legacy gate after history importer ${importerVersion}` },
+          }, historyGateObjectBefore.version);
+          const historyGateRejected = await assertRejectedWithoutEffects(historyGateRequest, "APPSHEET_REPLACEMENT_REQUIRED");
+          assert.equal(historyGateRejected.body.details?.captureId, historyCaptureId);
+          assert.equal(historyGateRejected.body.details?.snapshotId, historySnapshotId);
+          assert.deepEqual(await db.cutoverGate.findUniqueOrThrow({ where: { id: legacyGateId } }), historyGateBefore);
+          assert.deepEqual(await db.operationObject.findUniqueOrThrow({ where: { id: legacyGateId } }), historyGateObjectBefore);
+
+          const historyActivationRequest = envelope("operations", "AuthorityActivated", {
+            cutoverProfile: "legacy", evidence: { note: `Legacy activation after history importer ${importerVersion}` },
+          });
+          const historyActivationRejected = await assertRejectedWithoutEffects(historyActivationRequest, "APPSHEET_REPLACEMENT_REQUIRED");
+          assert.equal(historyActivationRejected.body.details?.captureId, historyCaptureId);
+          assert.equal(historyActivationRejected.body.details?.snapshotId, historySnapshotId);
+          assert.equal((await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } })).mode, "shadow");
+
+          await db.operationAuthority.delete({ where: { id: "operations" } });
+          await db.operationAuthority.create({ data: { id: "operations", mode: "active", cutoverProfile: "legacy", captureManifestId: null } });
+          const activeLegacyAuthority = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+          const historyReplay = await assertRejectedWithoutEffects(preCaptureLegacyInvoice!, "APPSHEET_REPLACEMENT_REQUIRED");
+          assert.equal(historyReplay.body.details?.captureId, historyCaptureId);
+          assert.equal(historyReplay.body.details?.snapshotId, historySnapshotId);
+          assert.notEqual(historyReplay.body.replay, true);
+          assert.equal((await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } })).epoch, activeLegacyAuthority.epoch);
+          await db.operationAuthority.delete({ where: { id: "operations" } });
+          await db.operationAuthority.create({ data: { id: "operations", mode: "shadow", cutoverProfile: "legacy", captureManifestId: null } });
+          await db.legacyImportSnapshot.delete({ where: { id: historySnapshotId } });
+        }
+
+        for (const variant of [
+          { label: "missing", controls: {} },
+          { label: "invalid", controls: { appSheetHistoryStage: {
+            schemaVersion: "appsheet-history-stage/v1", projectionKind: "history", sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
+            importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION, captureId: `appsreal-${"0".repeat(16)}`,
+            manifestHash: "f".repeat(64), mode: "preliminary-delta", status: "staged",
+          } } },
+        ]) {
+          const metadataFileHash = digest(`synthetic-history-${variant.label}-metadata-${randomUUID()}`);
+          const metadataSnapshotId = `appsheet-history-${variant.label}-metadata-${randomUUID()}`;
+          snapshotIds.push(metadataSnapshotId);
+          await db.legacyImportSnapshot.create({ data: {
+            id: metadataSnapshotId, sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, filename: "appsheet-live-capture",
+            fileHash: metadataFileHash, importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION, status: "staged", createdBy: ownerId,
+            captureManifestId: null, controls: variant.controls, coverage: {},
+          } });
+          const historyMetadataFreeCashRequest = envelope(accountId, "AccountOpeningApproved", {
+            amountMinor: "1200", preparedBy: deniedId, evidence: { note: `History source with ${variant.label} metadata` },
+          }, 2);
+          const historyMetadataFreeRejected = await assertRejectedWithoutEffects(historyMetadataFreeCashRequest, "APPSHEET_REPLACEMENT_NOT_READY");
+          assert.deepEqual(historyMetadataFreeRejected.body.details?.blockers, ["opening_source_record_required"]);
+          assert.equal(historyMetadataFreeRejected.body.details?.captureId, undefined);
+          assert.equal(historyMetadataFreeRejected.body.details?.snapshotId, metadataSnapshotId);
+          await db.legacyImportSnapshot.delete({ where: { id: metadataSnapshotId } });
+        }
+      } finally {
+        if (approvalFlagBefore === undefined) delete process.env.CLUB_OPERATIONS_APPROVED;
+        else process.env.CLUB_OPERATIONS_APPROVED = approvalFlagBefore;
+        const requestIds = attemptedRequests.map(request => request.requestId).filter(requestId => requestId !== preCaptureLegacyInvoice?.requestId);
+        await db.ledgerLeg.deleteMany({ where: { accountId } });
+        await db.ledgerEvent.deleteMany({ where: { requestId: { in: requestIds } } });
+        await db.stockFact.deleteMany({ where: { requestId: { in: requestIds } } });
+        await db.stockBalance.deleteMany({ where: { lotId: stockLotId } });
+        await db.inventoryLot.deleteMany({ where: { id: stockLotId } });
+        await db.operationOutbox.deleteMany({ where: { requestId: { in: requestIds } } });
+        await db.operationAudit.deleteMany({ where: { requestId: { in: requestIds } } });
+        await db.commandReceipt.deleteMany({ where: { requestId: { in: requestIds } } });
+        await db.operationObject.deleteMany({ where: { id: { in: [...cutoverGateIds, "operations", accountId, stockLotId] } } });
+        for (const object of originalGateObjects) await db.operationObject.create({ data: {
+          id: object.id, kind: object.kind, version: object.version, createdBy: object.createdBy,
+        } });
+        await db.operationAccount.deleteMany({ where: { id: accountId } });
+        await db.operationAuthority.deleteMany({ where: { id: "operations" } });
+        if (originalAuthority) await db.operationAuthority.create({ data: {
+          id: originalAuthority.id,
+          mode: originalAuthority.mode,
+          cutoverProfile: originalAuthority.cutoverProfile,
+          captureManifestId: originalAuthority.captureManifestId,
+          epoch: originalAuthority.epoch,
+          firstRealWriteAt: originalAuthority.firstRealWriteAt,
+          approvedBy: originalAuthority.approvedBy,
+          evidence: originalAuthority.evidence === null ? Prisma.DbNull : originalAuthority.evidence as Prisma.InputJsonValue,
+        } });
+        await db.cutoverGate.deleteMany();
+        for (const gate of originalGates) await db.cutoverGate.create({ data: {
+          id: gate.id,
+          status: gate.status,
+          evidence: gate.evidence === null ? Prisma.DbNull : gate.evidence as Prisma.InputJsonValue,
+          captureManifestId: gate.captureManifestId,
+          approvedBy: gate.approvedBy,
+          reviewedBy: gate.reviewedBy,
+          approvedAt: gate.approvedAt,
+        } });
+        await db.legacyImportSnapshot.deleteMany({ where: { id: { in: snapshotIds } } });
+      }
     });
 
     await t.test("capability and member scope reject before creating any invoice rows", async () => {
@@ -716,7 +1089,7 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       }
     });
 
-    await t.test("replacement invoices fail closed without a seed, then reserve numbers atomically and preserve them on edit", async () => {
+    await t.test("replacement invoices fail closed without a seed, then reserve numbers atomically and preserve them on edit", async (replacementTest) => {
       const digest = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
       const manifestHash = digest(`synthetic-invoice-capture-${randomUUID()}`);
       const captureId = `appsreal-${manifestHash.slice(0, 16)}`;
@@ -747,14 +1120,15 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
             bodyRead: false, bodyExcluded: true, bodyExclusionReason: "authentication-table-body-redacted" },
         ],
       };
+      const captureStability = { stable: true, cutoverEligible: true, metadataStable: true, headersStable: true, pageHashesStable: true, scanComplete: true,
+        firstPassPages: 3, verifiedPages: 3, matchedPages: 3, changedPages: 0, failedPages: 0, missingPages: 0,
+        unresolvedFormulaCount: 0, sourceWriteDetected: false, bodyExcludedSheets: ["T_Usuarios"] };
       await db.appSheetCaptureManifest.create({ data: {
         captureId, sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM, sourceId: "synthetic-invoice-spreadsheet", spreadsheetId: "synthetic-invoice-spreadsheet",
         metadataHash: "a".repeat(64), headersHash: "b".repeat(64), manifestHash, dataHash, definitionHash: null,
-        stability: { stable: true, cutoverEligible: true, metadataStable: true, headersStable: true, pageHashesStable: true, scanComplete: true,
-          firstPassPages: 3, verifiedPages: 3, matchedPages: 3, changedPages: 0, failedPages: 0, missingPages: 0,
-          unresolvedFormulaCount: 0, sourceWriteDetected: false, bodyExcludedSheets: ["T_Usuarios"] },
+        stability: captureStability,
         firstReadAt, verificationStartedAt, verificationCompletedAt, cutoffAt: captureNow,
-        dataCoverage, pageManifest, dataSheetCount: 3, dataPageCount: 3, dataRecordCount: 3,
+        dataCoverage, pageManifest, dataSheetCount: 2, dataPageCount: 3, dataRecordCount: 3,
         dataFormulaCount: 0, dataUnresolvedFormulaCount: 0, definitionTableCount: null, definitionColumnCount: null,
         definitionSliceCount: null, definitionViewCount: null, definitionActionCount: null, definitionBotCount: null,
         definitionWorkflowRuleCount: null, definitionFormatRuleCount: null,
@@ -773,17 +1147,30 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       const stockContentHash = digest("synthetic-stock-content");
       const stockMovementContentHash = digest("synthetic-stock-movement-content");
       const publicationFingerprint = digest("synthetic-history-publication");
+      const appliedDefinitionHash = digest("synthetic-history-applied-definition");
       const snapshotCoverage = {
-        appSheetCanonical: { captureId, manifestHash, dataHash, sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, stabilityMode: "stable",
-          delta: { globallyStable: true, unresolvedChangedPageCount: 0 } },
+        schemaVersion: "appsheet-history-coverage/v1",
+        projectionKind: "history",
+        sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
+        captureId,
+        manifestHash,
+        dataHash,
+        captureDefinitionHash: null,
+        appliedDefinitionHash,
+        mode: "stable",
+        stability: captureStability,
+        pages: pageManifest.map(({ sheetId, title, pageIndex, startRow, endRow, pageHash, verifiedPageHash, stable }) =>
+          ({ sheetId, title, pageIndex, startRow, endRow, pageHash, verifiedPageHash, stable })),
+        deltaEvidence: [],
         sheets: [{ sourceTable: "C_Facturacion", sourceRecordCount: 1, factCount: 1, definitionTableMatch: "unique", changedPageIndexes: [] }],
       };
       await db.legacyImportSnapshot.create({ data: {
         id: snapshotId, sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, filename: "appsheet-live-capture", fileHash: manifestHash,
         importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION, status: "reviewed", createdBy: ownerId, reviewedBy: deniedId, reviewedAt: captureNow,
         captureManifestId: captureId, coverage: snapshotCoverage,
-        controls: { appSheetHistoryStage: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, captureId, manifestHash, dataHash,
-          mappingId: APPSHEET_HISTORY_MAPPING_ID, status: "staged" } },
+        controls: { appSheetHistoryStage: { schemaVersion: "appsheet-history-stage/v1", projectionKind: "history",
+          sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, captureId, manifestHash, dataHash, captureDefinitionHash: null,
+          mode: "stable", definitionHash: appliedDefinitionHash, mappingId: APPSHEET_HISTORY_MAPPING_ID, status: "staged" } },
       } });
       const createSourceRecord = (id: string, sourceTable: string, sourceKey: string, sourceRow: number, contentHash: string, normalized: Prisma.InputJsonValue) =>
         db.legacySourceRecord.create({ data: { id, snapshotId, sourceTable, sourceKey, sourceRow, fileHash: manifestHash, contentHash,
@@ -1092,6 +1479,128 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       assert.equal(totalsRejected.body.code, "INVOICE_TOTAL_ALREADY_RESOLVED");
       assert.equal(await db.commandReceipt.count({ where: { requestId: totalsAttempt.requestId } }), 0);
       assert.deepEqual([await db.ledgerEvent.count(), await db.ledgerLeg.count(), await db.collectionReport.count(), await db.cashEntry.count()], ledgerCountsBeforeConcurrent);
+
+      await replacementTest.test("a canonical capture blocks legacy gates, activation, source-less openings, and legacy command replay", async () => {
+        assert.ok(preCaptureLegacyInvoice, "the positive legacy command case must have created a receipt before the capture");
+        const currentCapture = await db.appSheetCaptureManifest.findUniqueOrThrow({ where: { captureId } });
+        const capturedStability = currentCapture.stability as Record<string, unknown>;
+        const unstableManifestHash = digest(`synthetic-invoice-unstable-capture-${randomUUID()}`);
+        const unstableCaptureId = `appsreal-${unstableManifestHash.slice(0, 16)}`;
+        const unstableSpreadsheetId = `synthetic-invoice-spreadsheet-${unstableCaptureId}`;
+        await db.appSheetCaptureManifest.create({ data: {
+          ...currentCapture,
+          captureId: unstableCaptureId,
+          sourceId: unstableSpreadsheetId,
+          spreadsheetId: unstableSpreadsheetId,
+          manifestHash: unstableManifestHash,
+          definitionCoverage: currentCapture.definitionCoverage ?? Prisma.DbNull,
+          // Keep the manifest structurally valid; the authorization guard must
+          // reject its explicit cutover ineligibility after parsing succeeds.
+          stability: { ...capturedStability, stable: true, cutoverEligible: false, sourceWriteDetected: false },
+        } });
+
+        assert.equal((await db.operationAuthority.deleteMany({ where: { id: "operations" } })).count, 1);
+        await db.operationAuthority.create({ data: { id: "operations", mode: "shadow", cutoverProfile: "legacy", captureManifestId: null } });
+
+        const effectCounts = async () => ({
+          receipts: await db.commandReceipt.count(),
+          audits: await db.operationAudit.count(),
+          outbox: await db.operationOutbox.count(),
+        });
+        const assertRejectedWithoutCommandEffects = async (request: CommandEnvelope, expectedCode: string, expectedBlocker?: string) => {
+          const before = await effectCounts();
+          const rejected = await send(request);
+          assert.equal(rejected.response.status, 423, JSON.stringify(rejected.body));
+          assert.equal(rejected.body.code, expectedCode);
+          if (expectedBlocker) assert.deepEqual(rejected.body.details?.blockers, [expectedBlocker]);
+          assert.deepEqual(await effectCounts(), before);
+          if (request.requestId !== preCaptureLegacyInvoice!.requestId)
+            assert.equal(await db.commandReceipt.findUnique({ where: { requestId: request.requestId } }), null);
+          return rejected;
+        };
+
+        const approvalFlagBefore = process.env.CLUB_OPERATIONS_APPROVED;
+        process.env.CLUB_OPERATIONS_APPROVED = "true";
+        try {
+        await db.cutoverGate.deleteMany();
+        const cashOpeningRequest = envelope(accountId, "AccountOpeningApproved", {
+          amountMinor: "1200", preparedBy: deniedId, evidence: { note: "Source-less synthetic cash opening with a staged capture" },
+        }, 2);
+        const accountBeforeOpening = await db.operationAccount.findUniqueOrThrow({ where: { id: accountId } });
+        const cashEffectsBefore = { events: await db.ledgerEvent.count(), legs: await db.ledgerLeg.count(), entries: await db.cashEntry.count() };
+        await assertRejectedWithoutCommandEffects(cashOpeningRequest, "APPSHEET_REPLACEMENT_NOT_READY", "opening_source_record_required");
+        const cashAfter = await db.operationAccount.findUniqueOrThrow({ where: { id: accountId } });
+        assert.equal(cashAfter.openingMinor, accountBeforeOpening.openingMinor);
+        assert.equal(cashAfter.openingApprovedBy, accountBeforeOpening.openingApprovedBy);
+        assert.deepEqual({ events: await db.ledgerEvent.count(), legs: await db.ledgerLeg.count(), entries: await db.cashEntry.count() }, cashEffectsBefore);
+
+        const sourceLessStockLotId = `appsheet-source-less-opening-lot-${randomUUID()}`;
+        const sourceLessStockRequest = envelope(sourceLessStockLotId, "StockOpeningRecorded", {
+          skuId, label: "Synthetic source-less stock opening", quantity: "5", unitCost: "10", costCurrency: "ARS",
+          receivedDate: today, locationId, preparedBy: deniedId, evidence: { note: "Source-less synthetic stock opening with a staged capture" },
+        });
+        const stockBefore = { lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count() };
+        await assertRejectedWithoutCommandEffects(sourceLessStockRequest, "APPSHEET_REPLACEMENT_NOT_READY", "opening_source_record_required");
+        assert.deepEqual({ lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count() }, stockBefore);
+        assert.equal(await db.inventoryLot.findUnique({ where: { id: sourceLessStockLotId } }), null);
+        assert.equal(await db.operationObject.findUnique({ where: { id: sourceLessStockLotId } }), null, "the provisional aggregate rolls back");
+
+        for (const gateId of cutoverGateIds) await db.cutoverGate.upsert({
+          where: { id: gateId },
+          create: { id: gateId, status: "approved", evidence: { note: "Synthetic generic legacy approval" }, approvedBy: deniedId, reviewedBy: ownerId, approvedAt: captureNow },
+          update: { status: "approved", evidence: { note: "Synthetic generic legacy approval" }, approvedBy: deniedId, reviewedBy: ownerId, approvedAt: captureNow, captureManifestId: null },
+        });
+
+        const legacyGateId = cutoverGateIds[0]!;
+        const legacyGateBefore = await db.cutoverGate.findUniqueOrThrow({ where: { id: legacyGateId } });
+        const legacyGateObjectBefore = await db.operationObject.findUniqueOrThrow({ where: { id: legacyGateId } });
+        const legacyGateRequest = envelope(legacyGateId, "CutoverGateReviewed", {
+          gateId: legacyGateId, cutoverProfile: "legacy", authorId: deniedId, evidence: { note: "Attempt legacy profile after canonical capture" },
+        }, legacyGateObjectBefore.version);
+        await assertRejectedWithoutCommandEffects(legacyGateRequest, "APPSHEET_REPLACEMENT_REQUIRED");
+        assert.deepEqual(await db.cutoverGate.findUniqueOrThrow({ where: { id: legacyGateId } }), legacyGateBefore);
+        assert.deepEqual(await db.operationObject.findUniqueOrThrow({ where: { id: legacyGateId } }), legacyGateObjectBefore);
+
+          const activationRequest = envelope("operations", "AuthorityActivated", {
+            cutoverProfile: "legacy", evidence: { note: "Synthetic legacy activation after canonical capture" },
+          });
+          await assertRejectedWithoutCommandEffects(activationRequest, "APPSHEET_REPLACEMENT_REQUIRED");
+          const authorityAfterActivation = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+          assert.equal(authorityAfterActivation.mode, "shadow", "the rejected API activation leaves authority unchanged");
+          assert.equal(authorityAfterActivation.cutoverProfile, "legacy");
+
+          assert.equal((await db.operationAuthority.deleteMany({ where: { id: "operations" } })).count, 1);
+          await db.operationAuthority.create({ data: { id: "operations", mode: "active", cutoverProfile: "legacy", captureManifestId: null } });
+          const activeLegacyAuthority = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+          const transitionRequest = envelope("operations", "AuthorityActivated", {
+            cutoverProfile: "appsheet-replacement", captureId: unstableCaptureId, evidence: { note: "Attempt replacement transition from active legacy authority" },
+          });
+          await assertRejectedWithoutCommandEffects(transitionRequest, "APPSHEET_REPLACEMENT_NOT_READY", "capture_not_stable_or_complete");
+          const authorityAfterTransition = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+          assert.equal(authorityAfterTransition.mode, activeLegacyAuthority.mode);
+          assert.equal(authorityAfterTransition.cutoverProfile, activeLegacyAuthority.cutoverProfile);
+          assert.equal(authorityAfterTransition.epoch, activeLegacyAuthority.epoch);
+          assert.equal(authorityAfterTransition.captureManifestId, activeLegacyAuthority.captureManifestId);
+          const replayOrderBefore = await db.operationOrder.findUniqueOrThrow({ where: { id: preCaptureLegacyInvoice!.targetId } });
+          const replayObjectBefore = await db.operationObject.findUniqueOrThrow({ where: { id: preCaptureLegacyInvoice!.targetId } });
+          const replayedLegacyInvoice = await assertRejectedWithoutCommandEffects(preCaptureLegacyInvoice!, "APPSHEET_REPLACEMENT_REQUIRED");
+          assert.notEqual(replayedLegacyInvoice.body.replay, true, "the capture guard runs before returning a stored receipt");
+          assert.ok(await db.commandReceipt.findUnique({ where: { requestId: preCaptureLegacyInvoice!.requestId } }), "the prior receipt is preserved");
+          assert.deepEqual(await db.operationOrder.findUniqueOrThrow({ where: { id: preCaptureLegacyInvoice!.targetId } }), replayOrderBefore);
+          assert.deepEqual(await db.operationObject.findUniqueOrThrow({ where: { id: preCaptureLegacyInvoice!.targetId } }), replayObjectBefore);
+          assert.equal((await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } })).epoch, activeLegacyAuthority.epoch);
+
+          const newLegacyInvoiceRequest = envelope(`appsheet-legacy-after-capture-${randomUUID()}`, "InvoiceSaved", {
+            ...invoiceData({ preorder: true }), invoiceNumber: `APP-2026-${randomUUID().slice(0, 8).toUpperCase()}`,
+          });
+          await assertRejectedWithoutCommandEffects(newLegacyInvoiceRequest, "APPSHEET_REPLACEMENT_REQUIRED");
+          assert.equal(await db.operationOrder.findUnique({ where: { id: newLegacyInvoiceRequest.targetId } }), null);
+          assert.equal(await db.operationObject.findUnique({ where: { id: newLegacyInvoiceRequest.targetId } }), null);
+        } finally {
+          if (approvalFlagBefore === undefined) delete process.env.CLUB_OPERATIONS_APPROVED;
+          else process.env.CLUB_OPERATIONS_APPROVED = approvalFlagBefore;
+        }
+      });
     });
   } finally {
     if (server) await new Promise<void>(resolve => server!.close(() => resolve()));

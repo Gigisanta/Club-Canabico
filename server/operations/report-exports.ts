@@ -3,7 +3,7 @@ import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { db } from "../db.js";
-import { OperationError, objectScope, requireCapability, type Tx } from "./core.js";
+import { OperationError, objectScope, requireCapability, requireFullLegacySourceScope, type Tx } from "./core.js";
 import { reportPeriodDateBounds } from "./report-queries.js";
 import { signCursor, verifyCursor } from "./signed-cursor.js";
 import { stockFactScopeWhere } from "./stock-scope.js";
@@ -126,7 +126,10 @@ operationsExports.get("/:feed", async (req, res) => {
     await requireCapability(tx, req.user, "reports.read");
     await requireCapability(tx, req.user, "finance.read");
     if (feed === "stock") await requireCapability(tx, req.user, "stock.read");
-    if (feed === "history") await requireCapability(tx, req.user, "imports.review");
+    if (feed === "history") {
+      await requireCapability(tx, req.user, "imports.review");
+      await requireFullLegacySourceScope(tx, req.user);
+    }
     const scope = await objectScope(tx, req.user); authorizeScope(feed, scope);
     const identity = digest({ actor: req.user.id, feed, from: params.from, to: params.to, scope, queryVersion: "canonical-csv-v3" });
     let current: { id: string; fingerprint: string; identity: string } | undefined;

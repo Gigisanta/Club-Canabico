@@ -65,6 +65,25 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+function sameStableHistoryPages(coveragePages: unknown, capturePageManifest: Prisma.JsonValue): boolean {
+  if (!Array.isArray(coveragePages) || !Array.isArray(capturePageManifest) || coveragePages.length !== capturePageManifest.length) return false;
+  const fields = ["sheetId", "title", "pageIndex", "startRow", "endRow", "pageHash", "verifiedPageHash", "stable"] as const;
+  return coveragePages.every((value, index) => {
+    const page = record(value);
+    const source = record(capturePageManifest[index]);
+    return Boolean(page && source && page.stable === true && page.pageHash === page.verifiedPageHash &&
+      fields.every((field) => page[field] === source[field]));
+  });
+}
+
+function sameCanonicalJson(left: unknown, right: unknown): boolean {
+  try {
+    return canonicalJson(left) === canonicalJson(right);
+  } catch {
+    return false;
+  }
+}
+
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
@@ -160,16 +179,20 @@ async function prepareSeed(tx: Tx, captureId: string, snapshotId: string): Promi
       snapshot.status !== "reviewed" || !snapshot.reviewedBy || snapshot.reviewedBy === snapshot.createdBy)
     fail("APP_SHEET_HISTORY_NOT_PUBLISHED", "La historia debe estar revisada de forma independiente y vinculada a la captura estable.");
   const coverage = record(snapshot.coverage);
-  const captureEvidence = record(coverage?.appSheetCanonical);
-  const captureDelta = record(captureEvidence?.delta);
+  const coverageStability = record(coverage?.stability);
+  const deltaEvidence = coverage?.deltaEvidence;
   const stage = record(record(snapshot.controls)?.appSheetHistoryStage);
-  if (!coverage || !captureEvidence || !stage || captureEvidence.captureId !== preparedCapture.captureId ||
-      captureEvidence.manifestHash !== preparedCapture.manifestHash || captureEvidence.dataHash !== preparedCapture.dataHash ||
-      captureEvidence.sourceSystem !== APPSHEET_HISTORY_SOURCE_SYSTEM || captureEvidence.stabilityMode !== "stable" ||
-      captureDelta?.globallyStable !== true || captureDelta.unresolvedChangedPageCount !== 0 ||
+  if (!coverage || coverage.schemaVersion !== "appsheet-history-coverage/v1" || coverage.projectionKind !== "history" ||
+      coverage.sourceSystem !== APPSHEET_HISTORY_SOURCE_SYSTEM || coverage.captureId !== preparedCapture.captureId ||
+      coverage.manifestHash !== preparedCapture.manifestHash || coverage.dataHash !== preparedCapture.dataHash ||
+      coverage.captureDefinitionHash !== preparedCapture.definitionHash || coverage.mode !== "stable" ||
+      !coverageStability || !sameCanonicalJson(coverageStability, preparedCapture.stability) ||
+      !sameStableHistoryPages(coverage.pages, preparedCapture.pageManifest) || !Array.isArray(deltaEvidence) || deltaEvidence.length !== 0 ||
+      !stage || stage.schemaVersion !== "appsheet-history-stage/v1" || stage.projectionKind !== "history" ||
       stage.sourceSystem !== APPSHEET_HISTORY_SOURCE_SYSTEM || stage.captureId !== preparedCapture.captureId ||
       stage.manifestHash !== preparedCapture.manifestHash || stage.dataHash !== preparedCapture.dataHash ||
-      stage.mappingId !== APPSHEET_HISTORY_MAPPING_ID || stage.status !== "staged")
+      stage.captureDefinitionHash !== preparedCapture.definitionHash || stage.mode !== "stable" ||
+      stage.definitionHash !== coverage.appliedDefinitionHash || stage.mappingId !== APPSHEET_HISTORY_MAPPING_ID || stage.status !== "staged")
     fail("APP_SHEET_HISTORY_BINDING_INVALID", "La cobertura y los controles publicados no corresponden a la captura estable.");
   if (snapshot.upload && !snapshot.upload.completedAt) fail("APP_SHEET_HISTORY_INCOMPLETE");
 

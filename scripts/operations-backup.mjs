@@ -22,6 +22,8 @@ if(keyText&&!/^[a-f0-9]{64}$/i.test(keyText))throw new Error("La clave de respal
 const key=keyText?Buffer.from(keyText,"hex"):null;
 if(mode==="backup"&&process.env.NODE_ENV==="production"&&!key)throw new Error("El respaldo de producción requiere cifrado");
 process.umask(0o077);
+const restoreTarget=mode==="restore"?authorizeRestoreDestination(raw,process.env):null;
+if(url&&restoreTarget)url.pathname=`/${restoreTarget.database}`;
 const db=url?new PrismaClient({datasources:{db:{url:url.toString()}}}):null;
 const hash=bytes=>createHash("sha256").update(bytes).digest("hex");
 function databaseTarget(url){
@@ -341,7 +343,9 @@ try{
    console.log(JSON.stringify({mode:"verify",files:manifest.files.length,integrity:true,migrationsValid:true,scope:manifest.scope,...(url?{targetVerified,...(targetVerified?{targetFingerprint:manifest.targetFingerprint}:{})}:{})}));
   }
   else{
-   const restoreTarget=authorizeRestoreDestination(raw,process.env);
+   if(!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(manifest.schema))throw new Error("Esquema del paquete inválido");
+   const destinationSchema=databaseTarget(url).schema;
+   if(destinationSchema!==manifest.schema)throw new Error("El esquema del destino de restauración no coincide con el del manifiesto");
    const validationBaseUrl=restoreTarget.kind==="allowlisted-remote"
     ?requireLocalValidationConnection(process.env.RESTORE_VALIDATION_DATABASE_URL)
     :new URL(url);
@@ -367,7 +371,6 @@ try{
    await requireEmptyRestoreDatabase(db);
    await requirePostgresServerMajor18(db);
    await requirePostgresMajor18("pg_restore");
-   if(!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(manifest.schema))throw new Error("Esquema del paquete inválido");
    const started=Date.now(),temporary=join(directory,`restore-${randomBytes(8).toString("hex")}.tmp`);let objectStore;
    try{
     await verifyDumpStream(join(directory,"database.dump"),manifest.files.find(f=>f.name==="database.dump"),key,temporary);
@@ -377,7 +380,7 @@ try{
     objectStore=await import("../dist-server/server/operations/object-store.js");
     // PostgreSQL schema changes are atomic in pg_restore; private object writes have a separate lifecycle.
     await requireEmptyRestoreDatabase(db);
-    await pg("pg_restore",["--clean","--if-exists","--single-transaction","--exit-on-error","--no-owner","--no-privileges","--dbname",url.pathname.slice(1),temporary]);
+    await pg("pg_restore",["--clean","--if-exists","--single-transaction","--exit-on-error","--no-owner","--no-privileges","--dbname",restoreTarget.database,temporary]);
    }finally{await rm(temporary,{force:true});}
    const {getPrivateObject,putPrivateObject}=objectStore;
    const originalDocuments=await db.operationDocument.findMany({where:{state:"available"},select:{id:true,objectKey:true,objectVersion:true,checksum:true,bytes:true,mediaType:true}});

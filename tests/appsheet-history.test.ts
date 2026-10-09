@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import type { PrismaClient } from "@prisma/client";
 import {
@@ -16,7 +20,7 @@ import {
   type PreparedAppSheetHistoryProjection,
 } from "../server/operations/appsheet-history.js";
 import { APPSHEET_EXPECTED_LIVE_APP_ID } from "../server/operations/appsheet-canonical.js";
-import { APPSHEET_HISTORY_MOVEMENT_OVERLAP_FIELDS, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
+import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MOVEMENT_OVERLAP_FIELDS, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
 import { canonicalJson } from "../shared/operations/exact.js";
 import { pendingMappingFingerprintPayload, reconcileAppSheetPendingRows } from "../shared/operations/appsheet-pending.js";
 import { parseAppSheetHistoryCliArgs, privateAppSheetChildPath, runAppSheetHistoryCli } from "../scripts/appsheet-history.js";
@@ -329,7 +333,7 @@ function stageReview() {
     projectionKind: "history" as const,
     projectionHash: "d".repeat(64),
     commitSha: "e".repeat(40),
-    importer: "bombo-appsheet-history/1.0.0",
+    importer: APPSHEET_HISTORY_IMPORTER_VERSION,
     reviewer: "independent-reviewer",
     approved: true as const,
     reviewedAt: "2026-10-09T12:00:00.000Z",
@@ -441,10 +445,26 @@ test("replaying a staged history snapshot compares boolean and count metadata wi
 });
 
 test("CLI apply refuses a dirty checkout before reading the source or opening a database", async () => {
-  const result = await runAppSheetHistoryCli([
+  const directory = await mkdtemp(join(tmpdir(), "bombo-history-cli-"));
+  const gitEnvironment = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: directory, env: gitEnvironment, stdio: "ignore" });
+  const args = [
     "--apply", "--allow-staged-delta", "--actor-id", "authorized-user",
     "--review", "review.json", "--backup-reference", "/unused/backup",
-  ], process.cwd());
-  assert.equal(result.code, 1);
-  assert.deepEqual(JSON.parse(result.output), { status: "error", code: "apply_requires_clean_committed_worktree" });
+  ];
+  try {
+    git("init", "--quiet");
+    await writeFile(join(directory, "fixture.txt"), "committed fixture\n");
+    git("add", "fixture.txt");
+    git("-c", "user.name=Migration test", "-c", "user.email=migration-test@example.invalid", "commit", "--quiet", "-m", "fixture");
+    const clean = await runAppSheetHistoryCli(args, directory);
+    assert.equal(clean.code, 1);
+    assert.deepEqual(JSON.parse(clean.output), { status: "error", code: "private_directory_permissions_invalid" });
+    await writeFile(join(directory, "fixture.txt"), "uncommitted fixture\n");
+    const dirty = await runAppSheetHistoryCli(args, directory);
+    assert.equal(dirty.code, 1);
+    assert.deepEqual(JSON.parse(dirty.output), { status: "error", code: "apply_requires_clean_committed_worktree" });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

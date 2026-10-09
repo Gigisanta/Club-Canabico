@@ -9,7 +9,7 @@ import { APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM, APPSHEET_H
 import { appSheetDefinitionInventorySchema } from "../../shared/operations/appsheet-definition.js";
 import { APPSHEET_EXPECTED_LIVE_APP_ID, appSheetAppliedDefinitionHash } from "./appsheet-canonical.js";
 import { legacyPayloadHash } from "./legacy-upload-contract.js";
-import { registerCommand, OperationError, json, audit, capabilities, requireCapability, objectId, evidence, civilDate, requireMemberScope, requireDocumentScope, objectScope, type CommandContext, type Tx } from "./core.js";
+import { registerCommand, OperationError, json, audit, capabilities, requireCapability, requireCanonicalAppSheetReplacementProfile, objectId, evidence, civilDate, requireMemberScope, requireDocumentScope, objectScope, type CommandContext, type Tx } from "./core.js";
 import { commercialAddress, commercialPreferences } from "./member-fields.js";
 import { canManageDecisionInputAttestations } from "./access-snapshot.js";
 const profile = z.enum(["owner","finance","commercial","stock","logistics","driver","cashier","clinical","viewer"]);
@@ -45,11 +45,12 @@ async function requireStableAppSheetCapture(tx:Tx,captureId:string){
  const pages=Array.isArray(prepared.pageManifest)?prepared.pageManifest.map(asJsonObject):null;
  if(!stability||!coverage||!sheets||!pages||sheets.some(sheet=>!sheet)||pages.some(page=>!page))
   throw appSheetReadinessError("capture_manifest_shape_invalid");
+ const bodySheetCount=sheets.filter(sheet=>sheet!.bodyExcluded!==true).length;
  const stableCounts=["firstPassPages","verifiedPages","matchedPages"] as const;
  if(stability.stable!==true||stability.cutoverEligible!==true||stability.metadataStable!==true||stability.headersStable!==true||stability.pageHashesStable!==true||stability.scanComplete!==true||
     stability.changedPages!==0||stability.failedPages!==0||stability.missingPages!==0||stability.unresolvedFormulaCount!==0||stability.sourceWriteDetected!==false||
     stableCounts.some(key=>typeof stability[key]!=="number"||stability[key]!==capture.dataPageCount)||
-    capture.dataSheetCount!==sheets.length||capture.dataPageCount!==pages.length||capture.dataPageCount===0||capture.dataUnresolvedFormulaCount!==0||
+    capture.dataSheetCount!==bodySheetCount||capture.dataPageCount!==pages.length||capture.dataPageCount===0||capture.dataUnresolvedFormulaCount!==0||
     coverage.metadataStable!==true||coverage.headersStableAll!==true||coverage.failedPages!==0||coverage.changedPages!==0||coverage.unresolvedFormulaCount!==0)
   throw appSheetReadinessError("capture_not_stable_or_complete");
 
@@ -82,7 +83,7 @@ async function requireStableAppSheetCapture(tx:Tx,captureId:string){
    throw appSheetReadinessError("capture_page_identity_invalid");
   expectedPageKeys.add(key);pageCounts.set(page!.sheetId,(pageCounts.get(page!.sheetId)??0)+1);
  }
- if(sheets.some(sheet=>pageCounts.get(sheet!.sheetId as number)!==sheet!.pageCount))throw appSheetReadinessError("capture_page_coverage_mismatch");
+ if(sheets.some(sheet=>(pageCounts.get(sheet!.sheetId as number)??0)!==sheet!.pageCount))throw appSheetReadinessError("capture_page_coverage_mismatch");
  const pageRefs=pages.map(page=>({path:page!.path,sheetId:page!.sheetId,pageIndex:page!.pageIndex,startRow:page!.startRow,endRow:page!.endRow,pageHash:page!.pageHash,counts:page!.counts}));
  if(hashJson(pageRefs)!==capture.dataHash)throw appSheetReadinessError("capture_data_hash_mismatch");
  return capture;
@@ -397,13 +398,20 @@ type OpeningSourceKind="cash"|"stock";
 type OpeningSourceExpectation={kind:OpeningSourceKind;amountMinor?:bigint;currency?:string;quantity?:string;unit?:string;skuSourceId?:string;allowAlreadyLinked?:boolean};
 /** Bind opening effects to a reviewed fact under the exact AppSheet capture; a caller-supplied ID alone proves nothing. */
 export async function requireAppSheetOpeningSourceRecord(ctx:CommandContext,sourceRecordId:string|undefined,expected:OpeningSourceExpectation){
+ const canonicalCapture=await requireCanonicalAppSheetReplacementProfile(ctx.tx);
  const authority=await ctx.tx.operationAuthority.findUnique({where:{id:"operations"},select:{mode:true,cutoverProfile:true,captureManifestId:true}});
  const boundGates=await ctx.tx.cutoverGate.findMany({where:{captureManifestId:{not:null}},select:{captureManifestId:true}});
  const boundCaptureIds=[...new Set(boundGates.flatMap(row=>row.captureManifestId?[row.captureManifestId]:[]))];
  let captureId=authority?.mode==="active"&&authority.cutoverProfile==="appsheet-replacement"?authority.captureManifestId:null;
  if(boundCaptureIds.length>1)throw appSheetReadinessError("opening_cutover_capture_ambiguous");
  if(boundCaptureIds.length===1){if(captureId&&captureId!==boundCaptureIds[0])throw appSheetReadinessError("opening_cutover_capture_mismatch");captureId??=boundCaptureIds[0]!;}
- if(!sourceRecordId){if(captureId)throw appSheetReadinessError("opening_source_record_required");return null;}
+ if(!sourceRecordId){
+  if(captureId||canonicalCapture)throw appSheetReadinessError("opening_source_record_required",{
+   ...((captureId??canonicalCapture?.captureId)?{captureId:captureId??canonicalCapture?.captureId}:{}),
+   ...(canonicalCapture?.snapshotId?{snapshotId:canonicalCapture.snapshotId}:{}),
+  });
+  return null;
+ }
  const source=await ctx.tx.legacySourceRecord.findUnique({where:{id:sourceRecordId},select:{id:true,sourceTable:true,sourceKey:true,contentHash:true,fileHash:true,snapshotId:true,treatment:true,
   snapshot:{select:{sourceSystem:true,fileHash:true,captureManifestId:true,importerVersion:true,status:true,createdBy:true,reviewedBy:true}}}});
  if(!source||source.treatment!=="fact_candidate"||source.snapshot.sourceSystem!==APPSHEET_HISTORY_SOURCE_SYSTEM||!source.snapshot.captureManifestId||source.snapshot.fileHash!==source.fileHash)
@@ -562,6 +570,7 @@ const cutoverGateReviewSchema=z.strictObject({gateId:z.enum(cutoverGateIds),cuto
 });
 type CutoverGateReview=z.infer<typeof cutoverGateReviewSchema>;
 async function requireGateHumanReview(ctx:CommandContext,v:CutoverGateReview){
+ await requireCanonicalAppSheetReplacementProfile(ctx.tx,v.cutoverProfile);
  if(v.authorId===ctx.actor.id)throw new OperationError(409,"INDEPENDENT_REVIEW_REQUIRED","Autor y revisor deben ser personas distintas");
  const [author,reviewer]=await Promise.all([
   ctx.tx.user.findUnique({where:{id:v.authorId},select:{id:true,active:true}}),
@@ -686,6 +695,7 @@ registerCommand("AuthorityActivated",{kind:"authority",capability:"cutover.appro
  authorize:async ctx=>{
   if(ctx.envelope.targetId!=="operations")throw new OperationError(400,"AUTHORITY_ID","Circuito inválido");
   const input=authorityActivationSchema.parse(ctx.envelope.data);
+  await requireCanonicalAppSheetReplacementProfile(ctx.tx,input.cutoverProfile);
   if(input.cutoverProfile==="appsheet-replacement"){
    const proof=await requireVerifiedAppSheetReplacement(ctx,input.captureId!);
    await requireApprovedCutoverGates(ctx,input.cutoverProfile,input.captureId,proof);
@@ -696,6 +706,7 @@ registerCommand("AuthorityActivated",{kind:"authority",capability:"cutover.appro
  execute:async ctx=>{
   if(ctx.envelope.targetId!=="operations")throw new OperationError(400,"AUTHORITY_ID","Circuito inválido");
   const input=authorityActivationSchema.parse(ctx.envelope.data);
+  await requireCanonicalAppSheetReplacementProfile(ctx.tx,input.cutoverProfile);
   if(input.cutoverProfile==="appsheet-replacement"){
    const proof=await requireVerifiedAppSheetReplacement(ctx,input.captureId!);
    await requireApprovedCutoverGates(ctx,input.cutoverProfile,input.captureId,proof);

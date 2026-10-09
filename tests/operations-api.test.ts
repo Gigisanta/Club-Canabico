@@ -218,6 +218,14 @@ test("canonical financial commands preserve cash custody, debt and global replay
    const importerGrant=await db.operationAccess.findUniqueOrThrow({where:{userId:"importer"}});
    const review=e(snapshot.id,"LegacySnapshotReviewed",{fileHash:snapshot.fileHash,changedContentReviewed:false,evidence:{reference:"scope-guard-review"}},staged.version);
    try{
+    const fullReviewerBatch=await call(`/legacy-imports/batches/${snapshot.id}`,"finance");assert.equal(fullReviewerBatch.status,200,"a full-scope reviewer can inspect another user's batch");
+    await db.user.create({data:{id:"writer-only",name:"Write-only importer",email:"writer-only@test.local",password:pass,role:"admin"}});
+    await db.operationAccess.create({data:{userId:"writer-only",profile:"finance",capabilities:["imports.write"],scope:{}}});
+    await login("writer-only");
+    const writerBatch=await stageWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()),`scope-writer-only-${randomUUID()}`,"writer-only");
+    const writerOwnBatch=await call(`/legacy-imports/batches/${writerBatch.snapshotId}`,"writer-only");assert.equal(writerOwnBatch.status,200,"a writer can still inspect their own batch");
+    const writerForeignBatch=await call(`/legacy-imports/batches/${snapshot.id}`,"writer-only");assert.equal(writerForeignBatch.status,403,"imports.write alone does not grant read access to a foreign batch");assert.equal((await writerForeignBatch.json()).code,"CAPABILITY_REQUIRED");
+
     await db.operationAccess.update({where:{userId:"finance"},data:{scope:{memberIds:["outside-source"]}}});
     const denied=await call("/operations/commands","finance",review);assert.equal(denied.status,403);assert.equal((await denied.json()).code,"LEGACY_SOURCE_FULL_SCOPE_REQUIRED");
     assert.equal(await db.commandReceipt.findUnique({where:{requestId:review.requestId}}),null);
@@ -547,14 +555,20 @@ test("canonical financial commands preserve cash custody, debt and global replay
    do{const response=await call(`/reports/operations/exports/history?limit=2${cursor?`&cursor=${encodeURIComponent(cursor)}`:""}`);assert.equal(response.status,200,await response.clone().text());assert.match(response.headers.get("cache-control")!,/no-store/);const block=await response.json();assert.ok(block.rows<=2);assert.equal(block.coverage.money,"exact-minor-unit-strings");csv+=block.csv;cursor=block.nextCursor;pages++;assert.ok(pages<20);}while(cursor);
    assert.ok(csv.includes('"9007199254740993"'));assert.ok(csv.includes('"USD","known"'));assert.ok(csv.includes('"absent"'));assert.ok(csv.includes("\"'=UNTRUSTED()\""));assert.ok(csv.includes(sourceSystem));assert.equal(csv.split(`export-fact-export-record-${snapshotId}-`).length-1,3);
    const first=await(await call("/reports/operations/exports/history?limit=1")).json();assert.ok(first.nextCursor);
+   const fullReviewerExport=await call("/reports/operations/exports/history?limit=1","finance");assert.equal(fullReviewerExport.status,200,"a full-scope finance reviewer can export approved history");
    const tampered=JSON.parse(Buffer.from(first.nextCursor,"base64url").toString());if(typeof tampered.payload==="string")tampered.payload=JSON.stringify({...JSON.parse(tampered.payload),id:"zzzzzzzz"});else tampered.id="zzzzzzzz";
    const altered=await call(`/reports/operations/exports/history?limit=1&cursor=${encodeURIComponent(Buffer.from(JSON.stringify(tampered)).toString("base64url"))}`);assert.equal(altered.status,400);assert.equal((await altered.json()).code,"EXPORT_CURSOR");
    await db.legacyHistoryPublication.update({where:{sourceSystem},data:{fingerprint:"7".repeat(64)}});
    const changed=await call(`/reports/operations/exports/history?limit=1&cursor=${encodeURIComponent(first.nextCursor)}`);assert.equal(changed.status,409);assert.equal((await changed.json()).code,"EXPORT_POPULATION_CHANGED");
    assert.equal((await call("/reports/operations/exports/ledger","driver")).status,403);
+   const driverGrant=await db.operationAccess.findUniqueOrThrow({where:{userId:"driver"}});
+   try{
+    await db.operationAccess.update({where:{userId:"driver"},data:{capabilities:["reports.read","finance.read","imports.review"],scope:{}}});
+    const restrictedProfileExport=await call("/reports/operations/exports/history","driver");assert.equal(restrictedProfileExport.status,403,"a restricted driver profile cannot export the global historical population even when capabilities are granted");assert.equal((await restrictedProfileExport.json()).code,"LEGACY_SOURCE_FULL_SCOPE_REQUIRED");
+   }finally{await db.operationAccess.update({where:{userId:"driver"},data:{capabilities:driverGrant.capabilities,scope:driverGrant.scope}});}
    const financeGrant=await db.operationAccess.findUniqueOrThrow({where:{userId:"finance"}});
    await db.operationAccess.update({where:{userId:"finance"},data:{scope:{accountIds:["bank"]}}});
-   try{assert.equal((await call("/reports/operations/exports/history","finance")).status,403);const ledger=await call("/reports/operations/exports/ledger","finance");assert.equal(ledger.status,200);const block=await ledger.json();const rows=parseCsv(block.csv,{bom:true,columns:true,skip_empty_lines:true}) as Array<{accountId:string}>;assert.ok(rows.length>0);assert.ok(rows.every(row=>row.accountId==="bank"));}finally{await db.operationAccess.update({where:{userId:"finance"},data:{scope:financeGrant.scope??{}}});}
+   try{const scopedHistory=await call("/reports/operations/exports/history","finance");assert.equal(scopedHistory.status,403);assert.equal((await scopedHistory.json()).code,"LEGACY_SOURCE_FULL_SCOPE_REQUIRED");const ledger=await call("/reports/operations/exports/ledger","finance");assert.equal(ledger.status,200);const block=await ledger.json();const rows=parseCsv(block.csv,{bom:true,columns:true,skip_empty_lines:true}) as Array<{accountId:string}>;assert.ok(rows.length>0);assert.ok(rows.every(row=>row.accountId==="bank"));}finally{await db.operationAccess.update({where:{userId:"finance"},data:{scope:financeGrant.scope??{}}});}
   });
   await t.test("stock histories and exports reject crossed endpoints and preserve signed quantities",async()=>{
    const skuId=`scoped-stock-${randomUUID()}`,lotId=`lot-${randomUUID()}`;

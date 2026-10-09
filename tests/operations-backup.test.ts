@@ -109,6 +109,17 @@ async function seedMigrationHistory(db: PrismaClient, schema: string) {
   return applied;
 }
 
+async function applyMigrations(db: PrismaClient) {
+  const migrationsRoot = new URL("../prisma/migrations/", import.meta.url);
+  const migrations = (await readdir(migrationsRoot, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory())
+    .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+  for (const migration of migrations) {
+    const source = await readFile(new URL(`${migration.name}/migration.sql`, migrationsRoot), "utf8");
+    for (const statement of splitSqlStatements(source)) await db.$executeRawUnsafe(statement);
+  }
+}
+
 async function seedSnapshotFacts(db: PrismaClient) {
   const accountId = `backup-account-${randomUUID()}`;
   const ledgerEventId = `backup-ledger-${randomUUID()}`;
@@ -219,6 +230,12 @@ async function restoreValidationDatabaseNames(database: PrismaClient) {
   return rows.map(row => row.name);
 }
 
+async function resetPublicSchema(database: PrismaClient) {
+  await database.$executeRawUnsafe('DROP SCHEMA IF EXISTS "public" CASCADE');
+  await database.$executeRawUnsafe('CREATE SCHEMA "public" AUTHORIZATION pg_database_owner');
+  await database.$executeRawUnsafe('GRANT USAGE ON SCHEMA "public" TO PUBLIC');
+}
+
 async function writeDumpStub(directory: string, exitCode: number) {
   await mkdir(directory, { recursive: true });
   const executable = join(directory, "pg_dump");
@@ -316,20 +333,110 @@ test("restore CLI rejects unsafe roots before database changes and stores object
   const objectKey = `documents/${documentId}/${randomUUID()}`;
   let s3Server: ReturnType<typeof createServer> | undefined;
   const s3Requests: string[] = [];
+  let sourcePublicSchemaTouched = false;
+  let restorePublicSchemaTouched = false;
 
   try {
     const preexistingCatalogObjects = await restoreCatalogObjectCount(restoreBaseDb);
     const validationDatabaseNamesBefore = await restoreValidationDatabaseNames(restoreBaseDb);
 
-    await sourceBaseDb.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
-    const migrationsRoot = new URL("../prisma/migrations/", import.meta.url);
-    const migrations = (await readdir(migrationsRoot, { withFileTypes: true }))
-      .filter((entry) => entry.isDirectory())
-      .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
-    for (const migration of migrations) {
-      const source = await readFile(new URL(`${migration.name}/migration.sql`, migrationsRoot), "utf8");
-      for (const statement of splitSqlStatements(source)) await sourceDb.$executeRawUnsafe(statement);
+    const preexistingSourceCatalogObjects = await restoreCatalogObjectCount(sourceBaseDb);
+    await t.test("restore accepts an omitted schema and decodes a percent-encoded database path", {
+      skip: preexistingCatalogObjects > 0 || preexistingSourceCatalogObjects > 0
+        ? "the schema-default fixture requires dedicated empty source and restore databases"
+        : false,
+    }, async () => {
+      sourcePublicSchemaTouched = true;
+      restorePublicSchemaTouched = true;
+      await applyMigrations(sourceBaseDb);
+      await seedMigrationHistory(sourceBaseDb, "public");
+
+      process.env.NODE_ENV = "test";
+      process.env.PRIVATE_OBJECT_ROOT = sourceRoot;
+      delete process.env.PRIVATE_S3_BUCKET;
+      const { putPrivateObject } = await import("../server/operations/object-store.js");
+      const publicDocumentId = randomUUID();
+      const publicObjectKey = `documents/${publicDocumentId}/${randomUUID()}`;
+      const publicObjectBytes = Buffer.from("%PDF-1.4\nSynthetic public-schema restore fixture\n%%EOF");
+      const publicObject = await putPrivateObject(publicObjectKey, publicObjectBytes, "application/pdf");
+      await sourceBaseDb.operationDocument.create({
+        data: {
+          id: publicDocumentId,
+          kind: "synthetic-public-schema-restore-test",
+          sensitivity: "commercial",
+          state: "available",
+          objectKey: publicObjectKey,
+          objectVersion: publicObject.version,
+          checksum: publicObject.checksum,
+          bytes: publicObjectBytes.length,
+          mediaType: "application/pdf",
+          metadata: { fixture: "synthetic-public-schema" },
+          createdBy: "restore-boundary-test",
+        },
+      });
+      await seedSnapshotFacts(sourceBaseDb);
+
+      const publicBackupRoot = join(temporaryRoot, "public-schema-backups");
+      const publicBackup = await runBackupWorker({
+        DATABASE_URL: sourceBaseUrl.toString(),
+        BACKUP_ROOT: publicBackupRoot,
+        BACKUP_ENCRYPTION_KEY: backupEncryptionKey,
+        PRIVATE_OBJECT_ROOT: sourceRoot,
+        PRIVATE_OBJECT_PROVIDER: "local",
+        PRIVATE_S3_BUCKET: "",
+      });
+      assert.equal(publicBackup.code, 0, safeOutput(publicBackup));
+      const publicWorkerSummary = JSON.parse(publicBackup.stdout) as { mode: string; ok: boolean; encrypted: boolean; backupId: string };
+      assert.deepEqual({ mode: publicWorkerSummary.mode, ok: publicWorkerSummary.ok, encrypted: publicWorkerSummary.encrypted },
+        { mode: "backup-worker", ok: true, encrypted: true });
+      const publicBackupDirectory = join(publicBackupRoot, publicWorkerSummary.backupId);
+      const publicManifest = JSON.parse(await readFile(join(publicBackupDirectory, "manifest.json"), "utf8")) as {
+        schema: string;
+        counts: Record<string, number>;
+      };
+      assert.equal(publicManifest.schema, "public");
+
+      const omittedSchemaUrl = new URL(baseUrl);
+      omittedSchemaUrl.searchParams.delete("schema");
+      assert.equal(omittedSchemaUrl.searchParams.has("schema"), false);
+      const encodedDatabaseUrl = omittedSchemaUrl.toString().replace(
+        omittedSchemaUrl.pathname,
+        omittedSchemaUrl.pathname.replace("_", "%5F"),
+      );
+      const parsedEncodedDatabaseUrl = new URL(encodedDatabaseUrl);
+      assert.match(parsedEncodedDatabaseUrl.pathname, /%5F/i,
+        "the CLI fixture must retain the encoded database identifier in the URL path");
+      assert.notEqual(parsedEncodedDatabaseUrl.pathname.slice(1), decodeURIComponent(parsedEncodedDatabaseUrl.pathname.slice(1)),
+        "the raw URL path must differ from its decoded database identifier");
+      assert.equal(databaseTargetIdentity(parsedEncodedDatabaseUrl), databaseTargetIdentity(omittedSchemaUrl),
+        "the encoded and ordinary URL paths must identify the same authorized database");
+      const publicRestoreRoot = join(temporaryRoot, "public-default-restore-objects");
+      const publicRestore = await runBackupCli("restore", publicBackupDirectory, {
+        RESTORE_DATABASE_URL: encodedDatabaseUrl,
+        BACKUP_ENCRYPTION_KEY: backupEncryptionKey,
+        RESTORE_PRIVATE_OBJECT_ROOT: publicRestoreRoot,
+        PRIVATE_OBJECT_ROOT: sourceRoot,
+      });
+      assert.equal(publicRestore.code, 0, safeOutput(publicRestore));
+      const publicRestoreReport = JSON.parse(publicRestore.stdout) as { preflightValidated?: boolean; counts?: Record<string, number> };
+      assert.equal(publicRestoreReport.preflightValidated, true);
+      assert.deepEqual(publicRestoreReport.counts, publicManifest.counts);
+      assert.ok(await restoreBaseDb.operationDocument.findUnique({ where: { id: publicDocumentId } }),
+        "an omitted destination schema must restore the public-schema fixture into public");
+      assert.ok((await readdir(publicRestoreRoot, { recursive: true })).length > 0,
+        "the public-schema restore must materialize its verified private object");
+    });
+    if (restorePublicSchemaTouched) {
+      await resetPublicSchema(restoreBaseDb);
+      restorePublicSchemaTouched = false;
     }
+    if (sourcePublicSchemaTouched) {
+      await resetPublicSchema(sourceBaseDb);
+      sourcePublicSchemaTouched = false;
+    }
+
+    await sourceBaseDb.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
+    await applyMigrations(sourceDb);
     const appliedMigrations = await seedMigrationHistory(sourceDb, schema);
 
     process.env.NODE_ENV = "test";
@@ -407,6 +514,30 @@ test("restore CLI rejects unsafe roots before database changes and stores object
     await writeFile(join(backupDirectory, "manifest.json"), manifestBytes);
     await writeFile(join(backupDirectory, "manifest.sha256"), `${originalManifestHash}\n`);
     await writeFile(join(backupDirectory, "manifest.hmac"), manifestHmacBytes);
+
+    const verifiedPackage = await runBackupCli("verify", backupDirectory, { BACKUP_ENCRYPTION_KEY: backupEncryptionKey });
+    assert.equal(verifiedPackage.code, 0, safeOutput(verifiedPackage));
+    assert.equal((JSON.parse(verifiedPackage.stdout) as { integrity?: boolean }).integrity, true);
+
+    const mismatchedSchemaRoot = join(temporaryRoot, "mismatched-schema-objects-must-not-exist");
+    const publicDestinationUrl = new URL(baseUrl);
+    publicDestinationUrl.searchParams.set("schema", "public");
+    const beforeMismatchedSchema = await restoreCatalogObjectCount(restoreBaseDb);
+    const validationNamesBeforeMismatchedSchema = await restoreValidationDatabaseNames(restoreBaseDb);
+    const mismatchedSchemaRestore = await runBackupCli("restore", backupDirectory, {
+      RESTORE_DATABASE_URL: publicDestinationUrl.toString(),
+      BACKUP_ENCRYPTION_KEY: backupEncryptionKey,
+      RESTORE_PRIVATE_OBJECT_ROOT: mismatchedSchemaRoot,
+      PRIVATE_OBJECT_ROOT: sourceRoot,
+    });
+    assert.notEqual(mismatchedSchemaRestore.code, 0, "a valid package must reject a destination bound to another schema");
+    assert.equal(await restoreCatalogObjectCount(restoreBaseDb), beforeMismatchedSchema,
+      "schema mismatch rejection must happen before any destination catalog write");
+    await assert.rejects(lstat(mismatchedSchemaRoot), { code: "ENOENT" },
+      "schema mismatch rejection must happen before creating the destination object root");
+    assert.deepEqual(await restoreValidationDatabaseNames(restoreBaseDb), validationNamesBeforeMismatchedSchema,
+      "schema mismatch rejection must happen before creating a validation database");
+    assert.match(safeOutput(mismatchedSchemaRestore), /esquema del destino de restauración no coincide con el del manifiesto/i);
 
     const beforeWrongKeyRestore = await restoreCatalogObjectCount(restoreBaseDb);
     const sourceDocumentCountBeforeWrongKeyRestore = await sourceDb.operationDocument.count({ where: { id: documentId } });
@@ -644,6 +775,8 @@ test("restore CLI rejects unsafe roots before database changes and stores object
     });
   } finally {
     if (s3Server?.listening) await new Promise<void>((resolveClose, reject) => s3Server!.close((error) => error ? reject(error) : resolveClose()));
+    if (restorePublicSchemaTouched) await resetPublicSchema(restoreBaseDb);
+    if (sourcePublicSchemaTouched) await resetPublicSchema(sourceBaseDb);
     await sourceBaseDb.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await restoreBaseDb.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await Promise.all([db.$disconnect(), sourceDb.$disconnect(), sourceBaseDb.$disconnect(), restoreBaseDb.$disconnect()]);

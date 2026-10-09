@@ -2,6 +2,8 @@ import { Prisma, type User } from "@prisma/client";
 import { z } from "zod";
 import { db } from "../db.js";
 import { type Capability, type CommandEnvelope, type CommandResult } from "../../shared/operations/contracts.js";
+import { APPSHEET_CANONICAL_IMPORTER_VERSION, APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../../shared/operations/appsheet-canonical.js";
+import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../../shared/operations/appsheet-history.js";
 import { canonicalCommandBodyHash } from "./canonical.js";
 import { capabilitiesFromGrant } from "./access-snapshot.js";
 export class OperationError extends Error {
@@ -39,6 +41,7 @@ export const decimal = z.string().regex(/^(0|[1-9]\d{0,25})(\.\d{1,12})?$/);
 export const currency = z.enum(["ARS", "USD"]);
 export const objectId = z.string().min(1).max(100);
 export const evidence = z.record(z.string(), z.unknown()).refine(v => Object.keys(v).length > 0, "Se requiere evidencia");
+const guardedAppSheetHistoryImporterVersions = [APPSHEET_HISTORY_IMPORTER_VERSION, "bombo-appsheet-history/1.0.0"] as const;
 export function json(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value, (_k, v) => typeof v === "bigint" ? v.toString() : v)) as Prisma.InputJsonValue;
 }
@@ -55,6 +58,60 @@ export async function requireCapability(tx: Tx, actor: User, capability: Capabil
     const grant=await tx.operationAccess.findUnique({where:{userId:actor.id}}),scope=grant?.scope as {accountIds?:string[]}|undefined;
     if((grant?.profile??actor.role)==="cashier"&&!scope?.accountIds?.length)throw new OperationError(423,"CASHIER_SCOPE_PENDING","El propietario debe asignar las cuentas de caja autorizadas");
   }
+}
+/** Once a canonical master or supported history AppSheet source exists, legacy authority cannot govern its commands or cutover profile. */
+export async function requireCanonicalAppSheetReplacementProfile(tx: Tx, requestedProfile?: string) {
+  const [capture, preliminarySnapshot] = await Promise.all([
+    tx.appSheetCaptureManifest.findFirst({
+      where: { sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM },
+      select: { captureId: true },
+    }),
+    tx.legacyImportSnapshot.findFirst({
+      where: { OR: [
+        { sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM, importerVersion: APPSHEET_CANONICAL_IMPORTER_VERSION },
+        ...guardedAppSheetHistoryImporterVersions.map(importerVersion => ({ sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, importerVersion })),
+      ] },
+      orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+      select: { id: true, sourceSystem: true, importerVersion: true, fileHash: true, controls: true },
+    }),
+  ]);
+  const controls = preliminarySnapshot?.controls;
+  const historyImporterVersion = preliminarySnapshot?.sourceSystem === APPSHEET_HISTORY_SOURCE_SYSTEM &&
+    guardedAppSheetHistoryImporterVersions.includes(preliminarySnapshot.importerVersion as typeof guardedAppSheetHistoryImporterVersions[number]);
+  const projectionKey = historyImporterVersion ? "appSheetHistoryStage" : "appSheetCanonical";
+  const projection = controls !== null && typeof controls === "object" && !Array.isArray(controls)
+    ? (controls as Record<string, unknown>)[projectionKey]
+    : null;
+  const rawCaptureId = projection !== null && typeof projection === "object" && !Array.isArray(projection)
+    ? (projection as Record<string, unknown>).captureId
+    : null;
+  const historyProjectionValid = !historyImporterVersion || (projection !== null && typeof projection === "object" && !Array.isArray(projection) &&
+    (projection as Record<string, unknown>).schemaVersion === "appsheet-history-stage/v1" &&
+    (projection as Record<string, unknown>).projectionKind === "history" &&
+    (projection as Record<string, unknown>).sourceSystem === APPSHEET_HISTORY_SOURCE_SYSTEM &&
+    (projection as Record<string, unknown>).importerVersion === preliminarySnapshot?.importerVersion &&
+    ["stable", "preliminary-delta"].includes(String((projection as Record<string, unknown>).mode)) &&
+    (projection as Record<string, unknown>).status === "staged");
+  const snapshotCaptureId = preliminarySnapshot && typeof rawCaptureId === "string" && /^appsreal-[a-f0-9]{16}$/.test(rawCaptureId) &&
+    /^[a-f0-9]{64}$/.test(preliminarySnapshot.fileHash) && rawCaptureId === `appsreal-${preliminarySnapshot.fileHash.slice(0, 16)}` &&
+    projection !== null && typeof projection === "object" && !Array.isArray(projection) &&
+    (projection as Record<string, unknown>).manifestHash === preliminarySnapshot.fileHash && historyProjectionValid
+    ? rawCaptureId
+    : undefined;
+  const sourceEvidence: { captureId?: string; snapshotId?: string } | null = capture
+    ? { captureId: capture.captureId }
+    : preliminarySnapshot
+      ? { ...(snapshotCaptureId ? { captureId: snapshotCaptureId } : {}), snapshotId: preliminarySnapshot.id }
+      : null;
+  if (!sourceEvidence) return null;
+  const authority = await tx.operationAuthority.findUnique({ where: { id: "operations" }, select: { mode: true, cutoverProfile: true } });
+  if (requestedProfile === "legacy" || (requestedProfile === undefined && authority?.mode === "active" && authority.cutoverProfile === "legacy")) {
+    throw new OperationError(423, "APPSHEET_REPLACEMENT_REQUIRED", "La fuente real de AppSheet requiere autoridad del perfil de reemplazo", {
+      ...sourceEvidence,
+      blockers: ["canonical_appsheet_capture_requires_replacement_profile"],
+    });
+  }
+  return sourceEvidence;
 }
 export async function audit(ctx: CommandContext, action: string, details: Record<string,unknown> = {}) {
   await ctx.tx.operationAudit.create({data:{actorId:ctx.actor.id,action,objectId:ctx.envelope.targetId,requestId:ctx.envelope.requestId,details:json(details)}});
@@ -197,6 +254,8 @@ export async function requireCustodianScope(tx:Tx,actor:User,custodianIds:string
 /** Shared scope enforcement also runs before replay, so no handler can accidentally omit it. */
 async function requireCommandScope(ctx:CommandContext,kind:string){
  const {tx,actor,envelope:e}=ctx;
+ const spec=commandSpecs.get(e.command);
+ if(spec&&!spec.administrative)await requireCanonicalAppSheetReplacementProfile(tx);
  if(kind==="legacyImport")await requireFullLegacySourceScope(tx,actor);
  const accountIds=["accountId","fromAccountId","toAccountId","commissionAccountId","custodianAccountId"].flatMap(k=>typeof e.data[k]==="string"?[e.data[k] as string]:[]);
  if(kind==="account")accountIds.push(e.targetId);

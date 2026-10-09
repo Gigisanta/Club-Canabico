@@ -151,11 +151,9 @@ for (const [suffix, command] of [["chunks", "LegacyUploadChunkStored"], ["finali
   res.json(await executeCommand(req.user, envelope, async ctx => { ctx.requestBytes = req.rawBodyBytes; }));
 });
 legacyBatchRoutes.get("/:id", async (req, res) => {
-  let canWrite = true;
   try { await requireCapability(db, req.user, "imports.write"); }
   catch (error) {
     if (!(error instanceof OperationError) || error.code !== "CAPABILITY_REQUIRED") throw error;
-    canWrite = false;
     await requireCapability(db, req.user, "imports.review");
     await requireFullLegacySourceScope(db, req.user);
   }
@@ -163,7 +161,7 @@ legacyBatchRoutes.get("/:id", async (req, res) => {
   const identity = await db.legacyImportSnapshot.findUnique({ where: { id: snapshotId }, select: { createdBy: true } });
   if (!identity) throw new OperationError(404, "IMPORT_BATCH_NOT_FOUND", "Lote no encontrado.");
   if (identity.createdBy !== req.user.id) {
-    if (!canWrite) await requireCapability(db, req.user, "imports.review");
+    await requireCapability(db, req.user, "imports.review");
     await requireFullLegacySourceScope(db, req.user);
   }
   const snapshot = await db.legacyImportSnapshot.findUnique({ where: { id: snapshotId }, include: { upload: { include: { chunks: { select: { index: true, contentHash: true, recordCount: true }, orderBy: { index: "asc" } } } } } });
