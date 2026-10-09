@@ -279,12 +279,19 @@ test("sources UI searches archived rows, pages exceptions, and preserves a confl
     const clubAccounts = projection.summary.metrics.clubAccounts;
     expect(clubAccounts).toHaveLength(6);
     const pendingAccounts = clubAccounts.filter(account => !account.verified || !account.openingApproved);
-    expect(pendingAccounts.length).toBeGreaterThan(0);
+    expect(pendingAccounts).toHaveLength(0);
+    expect(clubAccounts.every(account => account.verified && account.openingApproved)).toBe(true);
+    expect(clubAccounts.every(account => account.countedBalanceMinor === null)).toBe(true);
     await expect(page.getByRole("heading", { name: "Resultado del período" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Obligaciones verificadas y pendientes" })).toBeVisible();
     await expect(page.getByText("La respuesta del informe no coincide con el formato esperado.", { exact: true })).toHaveCount(0);
     await expect(page.locator(".finance-projection-account")).toHaveCount(clubAccounts.length);
+    await expect(page.getByText("Verificada y apertura aprobada", { exact: true })).toHaveCount(clubAccounts.length);
     await expect(page.getByText("Verificación o apertura pendiente", { exact: true })).toHaveCount(pendingAccounts.length);
+    const priorBalanceRows = page.locator(".finance-projection-account dl > div").filter({ hasText: "Saldo conciliado previo" });
+    await expect(priorBalanceRows).toHaveCount(clubAccounts.length);
+    await expect(priorBalanceRows.getByText("Pendiente", { exact: true }),
+      "verified/opening-approved accounts still have no reconciled prior balance in the fixture").toHaveCount(6);
     await expect(page.getByRole("table", { name: "Obligaciones semanales por moneda" })).toBeVisible();
     await expect(page.getByRole("columnheader", { name: "ARS abiertas", exact: true })).toBeVisible();
     await expect(page.getByRole("columnheader", { name: "USD abiertas", exact: true })).toBeVisible();
