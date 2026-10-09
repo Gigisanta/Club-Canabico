@@ -348,6 +348,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
     ).toBeVisible();
     if (label === "Gastos") await expect(page.getByRole("heading", { name: "Registro de gastos" })).toBeVisible();
     if (label === "Finanzas") {
+      await page.getByRole("button", { name: "Resumen local", exact: true }).click();
       await expect(page.getByRole("heading", { name: "Resultado local" })).toBeVisible();
       await expect(page.getByRole("heading", { name: "Próximos pasos" })).toBeVisible();
       await expect(page.getByRole("heading", { name: "Capital en inventario" })).toBeHidden();
@@ -396,6 +397,7 @@ test("owner follows the variety alert, reads the break-even and finds each part 
   await page.getByRole("tab", { name: "Vista de tabla" }).click();
   await expect(page.locator(".inventory-table tbody tr")).toHaveCount(2);
   await page.goto("/app/finanzas");
+  await page.getByRole("button", { name: "Resumen local", exact: true }).click();
   const breakEven = page.getByRole("region", { name: /^Gastos fijos de / });
   // The bar's value is the share of the fixed costs on screen that the margin on screen covers.
   const shown = (await breakEven.locator(".breakeven-headline span").textContent()) || "";
