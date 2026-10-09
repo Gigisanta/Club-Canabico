@@ -41,6 +41,7 @@ function safeMessage(payload: unknown, status: number): { message: string; code?
     IDEMPOTENCY_KEY_REUSED: "El servidor detectó un UUID repetido con otro contenido. Actualizá la vista y volvé a preparar la acción.",
     DOCUMENT_INTEGRITY: "El archivo no coincide con su checksum o tipo declarado.",
     IMPORT_RECORD_LIMIT: "El archivo supera el máximo de registros admitido para esta vista previa.",
+    LEGACY_TECHNICAL_SOURCE_BLOCKED: "Esta fuente se consulta en Datos cargados y conciliación. Su archivo original no se aprueba ni se publica como operación.",
   };
   if (code && known[code]) return { message: known[code], code };
   if (raw && raw.length <= 240 && !raw.startsWith("{")) return { message: raw, code };

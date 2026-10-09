@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { apiGet, hasCapability, OperationsApiError } from "./api";
 import { formatMinor } from "./money";
 import type {
@@ -274,6 +275,11 @@ function SnapshotCard({ snapshot, index, report }: {
   index: number;
   report: FinancialSourceReconciliationReport;
 }) {
+  const [searchParams] = useSearchParams();
+  const sourceQuery = new URLSearchParams(searchParams);
+  sourceQuery.set("section", "sources");
+  sourceQuery.set("sourceId", snapshot.snapshotId);
+  for (const key of ["sourceTable", "recordQ", "recordCursor", "recordId", "exceptionsOnly"]) sourceQuery.delete(key);
   const rows = periodRows(snapshot, report, report.sources.length);
   const exclusions = exclusionRows(snapshot);
   const reconciled = snapshot.technicalReconciliation === "reconciled" && snapshot.controlComparison.exact;
@@ -285,6 +291,7 @@ function SnapshotCard({ snapshot, index, report }: {
       <span className="financial-source-status">STAGED · sin aprobación humana</span>
     </div>
     <p className="financial-source-review-note">Fuente en revisión. Estos movimientos no confirman saldos ni un resultado cerrado.</p>
+    <Link className="ops-button ops-button-quiet" to={`/app/operations?${sourceQuery.toString()}`}>Ver filas, excepciones y seguimiento</Link>
     {snapshot.latestObservedDate && <p className="financial-source-last-date">Última fecha observada en esta carga: {dateLabel(snapshot.latestObservedDate)}.</p>}
     <dl className="financial-source-counts">
       <div><dt>Filas cargadas</dt><dd>{snapshot.loadedCount.toLocaleString("es-AR")}</dd></div>

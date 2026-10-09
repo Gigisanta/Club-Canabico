@@ -190,6 +190,8 @@ export function HomeWorkspace({ context, refreshKey, onRefresh }: WorkspaceProps
   const canReadContribution = canFinance && hasCapability(context, "reports.read");
   const hasOverviewAccess = canFinance || canStock;
   const taskShortcuts = [
+    ...(hasCapability(context, "imports.review") ? [{ section: "sources", title: "Datos cargados", detail: "Recorrer fuentes, tablas, filas y excepciones; registrar su seguimiento." }] : []),
+    ...(hasCapability(context, "reports.read") && hasCapability(context, "finance.read") ? [{ section: "finance", title: "Finanzas", detail: "Resultado, flujo de efectivo, vencimientos y conciliación de las fuentes." }] : []),
     ...(hasCapability(context, "members.read") ? [{ section: "members", title: "Socios", detail: "Consultar socios dentro del alcance del perfil." }] : []),
     ...(["documents.read", "documents.write", "permissions.verify"].some(capability => hasCapability(context, capability))
       ? [{ section: "permissions", title: "Permisos y documentos", detail: "Revisar la documentación y los permisos disponibles." }]

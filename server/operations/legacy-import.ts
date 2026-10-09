@@ -4,13 +4,16 @@ import { Router } from "express";
 import { z } from "zod";
 import { db } from "../db.js";
 import { capabilities, executeCommand, json, OperationError, registerCommand, requireCapability, wire } from "./core.js";
-import { containsRecognizableCredential, isCompositeLegacyKeyHeader, isCredentialBearingHeader, isCredentialMetadataKey, isRestrictedLegacyReferenceHeader, LegacyWorkbookReadError, readLegacyWorkbook } from "./legacy-reader.js";
+import { containsRecognizableCredential, LegacyWorkbookReadError, readLegacyWorkbook } from "./legacy-reader.js";
 import { commercialAddress, commercialPreferences } from "./member-fields.js";
 
 import { sourceRecordSchema } from "./legacy-source-contract.js";
 import { legacyBatchRoutes } from "./legacy-batches.js";
 import { legacyHistoryRoutes } from "./legacy-history.js";
 import { assertLegacyHistorySourceAllowed } from "./legacy-source-policy.js";
+import { legacySourceControlRoutes, redactAuthenticationValues, redactStagedException, redactStagedRecord } from "./legacy-source-control.js";
+
+export { redactAuthenticationValues, redactStagedException, redactStagedRecord };
 
 const MAX_BASE64_BYTES = 8 * 1024 * 1024 - 1024;
 const MAX_STAGED_RECORDS = 100_000;
@@ -446,75 +449,6 @@ function toEnvelope(actorId: string, targetId: string, expectedVersion: number, 
   return { schemaVersion: 1, requestId, targetId, expectedVersion, occurredAt: new Date().toISOString(), command, data };
 }
 
-function normalizeFieldName(name: string): string {
-  return name.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-}
-
-function credentialField(name: string): boolean {
-  return isCredentialBearingHeader(name);
-}
-
-function clinicalField(name: string): boolean {
-  return /(clinical|salud|medic|diagnos|tratamiento|consumo|sustanc|droga|alerg|patolog|enfermedad|sintom|antecedente|dosis|terapeut|psiquiatr|adiccion|psicolog|farmac|terapia|paciente|internacion|hospital|clinica|consulta|historia|evolucion|embaraz|discapacidad|presion arterial|glucem|estado emocional|suicid|lesion|rehabilitacion|reprocam|vigenci|caduc|vencim|validity|valid from|valid until|valid through|expiry|expiration|document.{0,32}(clinical|medic|salud)|(?:clinical|medic|salud).{0,32}document|observacion|comentario|nota|descripcion|detalle)/i.test(normalizeFieldName(name));
-}
-
-function hasRestrictedClinicalColumn(columns: Array<Record<string, unknown>> | undefined, sourceTable?: string): boolean {
-  return Boolean(columns?.some((column) => typeof column.header === "string"
-    && (clinicalField(column.header) || isRestrictedLegacyReferenceHeader(column.header, sourceTable))));
-}
-
-function redactAuthenticationValues(value: unknown): unknown {
-  if(typeof value==="string")return containsRecognizableCredential(value)?"[excluded authentication material]":value;
-  if(Array.isArray(value))return value.map(redactAuthenticationValues);
-  if(value&&typeof value==="object"&&!(value instanceof Date))return Object.fromEntries(Object.entries(value).filter(([key])=>!isCredentialMetadataKey(key)&&!containsRecognizableCredential(key)).map(([key,item])=>[key,redactAuthenticationValues(item)]));
-  return value;
-}
-
-export function redactStagedRecord(value: unknown, options: { includeClinical?: boolean } = {}): unknown {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
-  const record = value as Record<string, unknown>;
-  const original = record.original as { columns?: Array<Record<string, unknown>> } | undefined;
-  const normalized = record.normalized as { columns?: Array<Record<string, unknown>>; overlapEvidence?: unknown } | undefined;
-  const resolution = record.resolution as Record<string, unknown> | null | undefined;
-  const sourceTable = typeof record.sourceTable === "string" ? record.sourceTable : undefined;
-  const restrictedClinical = hasRestrictedClinicalColumn(original?.columns, sourceTable) || hasRestrictedClinicalColumn(normalized?.columns, sourceTable)
-    || (typeof record.sourceTable === "string" && clinicalField(record.sourceTable));
-  const projectColumns = (columns: Array<Record<string, unknown>> | undefined) => columns?.flatMap((column) => {
-    const header = typeof column.header === "string" ? column.header.trim() : "";
-    if (!header || isCredentialBearingHeader(header, sourceTable) || containsRecognizableCredential(column)) return [];
-    if (!options.includeClinical && (clinicalField(header)
-      || isRestrictedLegacyReferenceHeader(header, sourceTable)
-      || (restrictedClinical && isCompositeLegacyKeyHeader(header)))) return [];
-    return [column];
-  });
-  const projected: Record<string, unknown> = {
-    ...record,
-    original: original ? { ...original, columns: projectColumns(original.columns) } : original,
-    normalized: normalized ? { ...normalized, columns: projectColumns(normalized.columns) } : normalized,
-    resolution: resolution ? {
-      ...resolution,
-      ...(resolution.evidence === undefined ? {} : { evidence: "[review evidence stored privately]" }),
-    } : resolution,
-  };
-  if (restrictedClinical && !options.includeClinical) {
-    delete projected.sourceKey;
-    delete projected.contentHash;
-    if (typeof projected.sourceTable === "string" && clinicalField(projected.sourceTable))
-      projected.sourceTable = "[restricted source table]";
-  }
-  if(containsRecognizableCredential(projected.sourceKey))delete projected.sourceKey;
-  return redactAuthenticationValues(projected);
-}
-
-export function redactStagedException(value: unknown): unknown {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
-  const exception = value as Record<string, unknown>;
-  const projected={...exception};
-  if(containsRecognizableCredential(projected.sourceKey))delete projected.sourceKey;
-  if (exception.resolution !== null && exception.resolution !== undefined) projected.resolution="[private exception evidence stored privately]";
-  return redactAuthenticationValues(projected);
-}
-
 legacyImportRoutes.post("/preview", async (req, res) => {
   await requireCapability(db, req.user, "imports.write");
   if (process.env.NODE_ENV === "production")
@@ -669,3 +603,5 @@ legacyImportRoutes.post("/:snapshotId/activate-master", async (req, res) => {
   const result = await executeCommand(req.user, toEnvelope(req.user.id, params.snapshotId, version?.version ?? 0, requestId, "LegacyMasterActivated", data));
   res.status(201).json(redactAuthenticationValues(wire({ ...result.result, version: result.version, replay: Boolean(result.replay) })));
 });
+
+legacyImportRoutes.use("/source-control", legacySourceControlRoutes);

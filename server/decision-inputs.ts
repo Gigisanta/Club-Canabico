@@ -4,6 +4,7 @@ import { z } from "zod";
 import { atomic, db, getSettings } from "./db.js";
 import { businessDate } from "../shared/domain.js";
 import { HttpError } from "./validation.js";
+import { hasSensitiveFinancialReference, safeFinancialReference } from "./operations/financial-reference.js";
 
 export const decisionInputs = Router();
 const int64Min = -(2n ** 63n);
@@ -14,7 +15,7 @@ const cents = z.string().regex(/^-?(?:0|[1-9]\d*)$/).refine((value) => {
   catch { return false; }
 }, "Importe fuera del rango de 64 bits");
 const nonnegativeCents = cents.refine((value) => BigInt(value) >= 0n);
-const sourceReference = z.string().trim().min(3).max(240);
+const sourceReference = z.string().trim().min(3).max(240).refine(value => !hasSensitiveFinancialReference(value), "La referencia no puede contener credenciales ni tokens");
 const id = z.string().min(1).max(120);
 const locationIds = z.array(id).max(200).refine((values) => new Set(values).size === values.length, "Ubicaciones repetidas");
 const scenario = z.enum(["low", "base", "high"]);
@@ -22,8 +23,9 @@ const cashCategory = z.enum(["sale", "operating_expense", "stock_purchase", "loc
   "owner_draw", "delivery_receipt", "other_income", "other_outflow", "adjustment"]);
 const iso = (value: Date) => value.toISOString().slice(0, 10);
 const dbDate = (value: string) => new Date(`${value}T00:00:00.000Z`);
-const safe = (value: unknown) => JSON.parse(JSON.stringify(value, (_key, item) =>
-  typeof item === "bigint" ? item.toString() : item));
+const safe = (value: unknown) => JSON.parse(JSON.stringify(value, (key, item) =>
+  (key === "sourceReference" || key === "reference") && typeof item === "string" ? safeFinancialReference(item)
+    : typeof item === "bigint" ? item.toString() : item));
 
 function manager(role: string) {
   if (role !== "owner" && role !== "admin") throw new HttpError(403, "No tenés acceso a insumos financieros");

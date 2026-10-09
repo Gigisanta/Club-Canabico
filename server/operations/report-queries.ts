@@ -32,6 +32,7 @@ import { OperationError } from "./core.js";
 import type { ReportAreaId } from "./report-definitions.js";
 import { getManagementPeriodCoverageStatus } from "./period-coverage.js";
 import { stockFactScopeWhere } from "./stock-scope.js";
+import { safeFinancialReference } from "./financial-reference.js";
 
 export interface ReportDateRange {
   from?: string;
@@ -2867,7 +2868,7 @@ async function obligationsThirteenWeeks(range: ReportDateRange) {
   return queryEnvelope("obligations-13-weeks", range, {
     horizon: { from: firstWeekStart, through: lastWeekEnd, weeks: 13 },
     sourceCoverage: aggregate.sourceCoverage,
-    attestation: attestation ? { present: true, sourceReference: attestation.sourceReference, fromDate: civilDateAt(attestation.fromDate), throughDate: civilDateAt(attestation.throughDate), confirmedAt: attestation.confirmedAt.toISOString() } : { present: false },
+    attestation: attestation ? { present: true, sourceReference: safeFinancialReference(attestation.sourceReference), fromDate: civilDateAt(attestation.fromDate), throughDate: civilDateAt(attestation.throughDate), confirmedAt: attestation.confirmedAt.toISOString() } : { present: false },
     weekly: payableSummaryComplete ? weeklySummary : null,
     payableSummaryComplete,
     invalidPayableDateCount: payableInvalidDateCount,

@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
+import { isTechnicalLegacySource } from "../../shared/operations/source-control";
+import { SourcesWorkspace } from "./SourcesWorkspace";
+import { FinanceWorkspace } from "./FinanceWorkspace";
 import { apiGet, apiPost, hasCapability, hasCommand, OperationsApiError, recordValue, responseItems, responseVersion, textValue } from "./api";
 import { amountFormToMinor, formatMinor } from "./money";
 import { ActionButton, DataTable, EmptyState, ErrorState, InfoBand, LoadingState, SectionHeading, StatusTag } from "./Primitives";
@@ -584,6 +587,14 @@ function PeriodCoveragePanel({ context, runCommand, onRefresh, onNotice }: { con
 }
 
 function DocImportPanels({ pageId, context, refreshKey, runCommand, onRefresh, onNotice }: { pageId: "permissions" | "imports"; context: OperationsContext; refreshKey: number; runCommand: RunCommand; onRefresh: () => void; onNotice: (message: string) => void }) {
+  const [searchParams] = useSearchParams();
+  const sourceTarget = (snapshotId: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("section", "sources");
+    next.set("sourceId", snapshotId);
+    for (const key of ["sourceTable", "recordQ", "recordCursor", "recordId", "exceptionsOnly"]) next.delete(key);
+    return { search: `?${next.toString()}` };
+  };
   const canReadDocs = hasCapability(context, "documents.read");
   const canReadMembers = hasCapability(context, "members.read");
   const docs = useRemote<Record<string, unknown>>(canReadDocs ? "/api/operations/documents" : null, refreshKey);
@@ -705,7 +716,9 @@ function DocImportPanels({ pageId, context, refreshKey, runCommand, onRefresh, o
     {imports.loading && <LoadingState label="Leyendo lotes y revisiones…" />}{imports.error && <ErrorState message={imports.error} retry={imports.retry} />}
     {canReviewImports && <ListTable title="Lotes y revisiones recientes" rows={rowsOf(imports.data)} columns={[["filename", "Libro"], ["sourceSystem", "Origen"], ["status", "Estado"], ["createdAt", "Creado"]]} renderActions={row => <>
       {row.status === "uploading" && <ActionButton quiet onClick={() => { const id = idOf(row); setBatchIdInput(id); setProgressBatchId(id); setProgressRefreshKey(value => value + 1); }}>Seguir carga</ActionButton>}
-      {hasCommand(context, "LegacySnapshotReviewed") && row.status === "staged" && <ActionButton quiet onClick={() => void reviewSnapshot(row)} disabled={busy}>Revisar independientemente</ActionButton>}
+      <Link className="ops-button ops-button-quiet ops-button-small" to={sourceTarget(idOf(row))}>Ver tablas y filas</Link>
+      {isTechnicalLegacySource(textValue(row.sourceSystem, "")) && <StatusTag tone="neutral">Fuente de consulta</StatusTag>}
+      {hasCommand(context, "LegacySnapshotReviewed") && row.status === "staged" && !isTechnicalLegacySource(textValue(row.sourceSystem, "")) && <ActionButton quiet onClick={() => void reviewSnapshot(row)} disabled={busy}>Revisar independientemente</ActionButton>}
     </>} />
     }
     {pageId === "imports" && <LegacyHistoryWorkflow context={context} refreshKey={refreshKey} runCommand={runCommand} onRefresh={onRefresh} onNotice={onNotice} />}
@@ -841,6 +854,8 @@ export function OperationalWorkspace(props: Props) {
   }, [pageId, query.data, gates.data, payablePurchases.data, stockReference.data]);
 
   if (pageId === "home") return <HomeWorkspace context={context} refreshKey={refreshKey} runCommand={runCommand} openAction={openAction} onNotice={onNotice} onRefresh={onRefresh} />;
+  if (pageId === "sources") return <SourcesWorkspace context={context} refreshKey={refreshKey} runCommand={runCommand} openAction={openAction} onNotice={onNotice} onRefresh={onRefresh} />;
+  if (pageId === "finance") return <FinanceWorkspace context={context} refreshKey={refreshKey} runCommand={runCommand} openAction={openAction} onNotice={onNotice} onRefresh={onRefresh} />;
   if (pageId === "imports" || pageId === "permissions") return <DocImportPanels pageId={pageId} context={context} refreshKey={refreshKey} runCommand={runCommand} onRefresh={onRefresh} onNotice={onNotice} />;
   if (pageId === "reports") return <ReportsPanel context={context} refreshKey={refreshKey} />;
 

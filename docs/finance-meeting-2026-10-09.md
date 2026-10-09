@@ -1,48 +1,54 @@
-# Finanzas para la reunión del 9 de octubre
+# Preparación financiera para Tiziano
 
-La entrada es **Finanzas → Reportes** en `/app/finanzas`. El reporte usa las fuentes canónicas de operaciones y conserva las herramientas del local en **Resumen local**, **Caja** y **Planificación**.
+Actualizado el 9 de octubre de 2026 con la consulta de producción de las 13:06:59 UTC y la comprobación de acceso a AppSheet de las 13:19 UTC. Tiziano avisó que quiere conversar sobre estado de resultados, proyecciones tipo cash flow y otros temas financieros. Este documento separa qué se puede mostrar con evidencia, qué está implementado a mano y qué sigue bloqueado por falta de datos o revisión.
 
-La [migración AppSheet y operación manual](appsheet-migration-2026-10-09.md) registra el archivo empresarial, las funciones recuperadas y los requisitos todavía pendientes para activar el local.
+## Qué hay disponible con datos reales
 
-## Recorrido
+La base de producción conserva dos fuentes técnicas independientes:
 
-1. Elegir el período y la moneda; actualizar el reporte.
-2. Revisar **Estado de resultados**: ventas netas, costo histórico de lo vendido, gastos devengados y resultado. Una compra de stock y un pago no son automáticamente un gasto del período.
-3. Revisar **Flujo de efectivo**: dinero que entró y salió, transferencias, financiación y saldos cuando haya apertura y conciliación respaldadas. La caja y el resultado responden preguntas distintas.
-4. Revisar los vencimientos de **13 semanas** y los supuestos del escenario de resultado. Los vencimientos conocidos no representan todas las obligaciones; un escenario no garantiza ventas futuras.
-5. Leer la cobertura y los pendientes antes de usar cualquier cifra para decidir.
+- Excel financiero: 3.693 movimientos observados; 3.629 elegibles y 64 excluidos. Sus 22 controles mensuales por moneda coinciden exactamente con el cálculo independiente. No se mezclan ARS y USD. La última fecha elegible es el 30 de septiembre de 2026; esta fuente no contiene movimientos elegibles del 1 al 8 de octubre.
+- Archivo empresarial AppSheet: 17.695 filas de 32 tablas y 4.395 excepciones. Es un archivo preservado con trazabilidad, no una migración de ventas, catálogo o stock activos. Hay otras seis hojas sólo registradas como cobertura de coordenadas, sin extracción de sus filas.
 
-## Datos observados en producción
+La lectura `READ ONLY` de producción del 9 de octubre a las 13:06:59 UTC encontró cero catálogo, proveedores, ubicaciones, cuentas canónicas, aperturas de saldo, stock, movimientos de libro, hechos históricos, publicaciones históricas y coberturas aprobadas. Esto significa que Bombo aún no tiene evidencia canónica suficiente para declarar utilidad completa, caja disponible, flujo de efectivo completo ni stock histórico activo. No equivale a afirmar que el negocio no tuvo esas operaciones.
 
-**Actualización del 9 de octubre:** se cargó la fuente financiera real del Excel: 3.693 filas conservadas, 3.629 elegibles y 64 excluidas. La carga se repitió sin duplicados y una consulta de producción verificó los 22 controles independientes por mes y moneda. La fuente está en preparación, sin aprobación humana ni publicación de hechos canónicos. Ver [carga, conciliación y evidencia](finance-sources-2026-10-09.md). Los conteos vacíos que siguen describen las observaciones anteriores a esa carga.
+La fuente financiera sí deja consultar lo que contiene el Excel y sus controles. No genera asientos, saldos de apertura, obligaciones, hechos históricos publicados ni una aprobación. Una proyección de trece semanas sólo puede representar obligaciones y supuestos que estén cargados y respaldados; un total vacío no demuestra que no haya pagos futuros.
 
-El 8 de octubre a las 21:59 ART se ejecutó una consulta PostgreSQL en una transacción `READ ONLY`, con la configuración del proyecto Vercel `bombo`. La base canónica devolvió cero pedidos confirmados, cuentas activas, aperturas aprobadas, movimientos de libro, conciliaciones, obligaciones, hechos históricos, publicaciones históricas, lotes de importación y coberturas de período aprobadas. También devolvió cero ventas, gastos, movimientos y planes en las tablas del local.
+## Recorrido preparado en la interfaz
 
-Esto verifica ausencia de registros en esa base al consultar. No demuestra que el negocio no haya vendido ni gastado: sus fuentes externas todavía no están publicadas ahí. No se crearon hechos de negocio para probar las funciones.
+En el código del worktree está preparada esta navegación para hacer visibles las fuentes y finanzas:
 
-La consulta de conteos se repitió en modo `READ ONLY` después del despliegue, a las 22:48 ART, y mantuvo cero registros tanto en las fuentes canónicas como en las tablas financieras del local.
+1. **Datos cargados** (`/app/operations?section=sources`): buscar las dos fuentes técnicas, abrir tablas y filas, filtrar excepciones y registrar un seguimiento auditable por separado.
+2. **Finanzas** (`/app/operations?section=finance`): consultar estado de resultados, flujo, cobertura, vencimientos de trece semanas y supuestos disponibles.
+3. Desde la conciliación, abrir directamente el snapshot en Datos cargados y revisar sus filas/excepciones.
 
-La revisión de los archivos recibidos encontró que las fechas operativas principales del XLSX llegan al 30 de septiembre y los cobros al 29. No se observaron hechos del 1 al 8 de octubre en las hojas operativas examinadas; las filas futuras no acreditan actividad ocurrida. La fecha de actualización del modelo PBIX no pudo verificarse. El lector del XLSX detectó encabezados ambiguos y solapamientos entre hojas que necesitan un mapeo revisado antes de publicar hechos históricos.
+Estos nuevos recorridos todavía están pendientes de QA, publicación y comprobación en producción. El release vivo comprobado sigue siendo `dpl_BY98m5SQNsPRqGvrKFdiDsZ3yKvn` (`cf6124e`); no se debe presentar la nueva navegación como ya disponible en el dominio. El seguimiento de una fuente técnica conserva la evidencia original y no significa aprobarla, resolver sus excepciones, publicar hechos ni activar la contabilidad canónica.
 
-## Qué hace falta para cerrar números
+## Controles manuales ya recuperados
 
-- Ventas del local y delivery hasta una fecha de corte acordada, con descuentos, devoluciones y costos históricos de lo vendido.
-- Gastos devengados y obligaciones con período, moneda y vencimiento; evitar volver a sumar el pago de un gasto ya registrado.
-- Cuentas y saldos iniciales respaldados, movimientos y conciliaciones independientes.
-- Importación y revisión de las fuentes, con cobertura del período. Los archivos históricos por sí solos no prueban el cierre actual.
+La versión desplegada incluye pantallas y comandos para alta/edición de catálogo, proveedores y ubicaciones; preventas y facturas/ventas; recepción y traslado; preparación, entrega y devolución; apertura de stock por lote; compras y obligaciones; gastos, movimientos, rendición y controles de caja. El formulario de apertura de stock exige cantidad, costo y moneda explícitos, ubicación, responsable, evidencia y un preparador activo distinto del aprobador. Los formularios no adivinan costos ni productos.
 
-Si falta cobertura, el reporte conserva los subtotales observados y deja el resultado o saldo completo pendiente. No convierte la ausencia de datos en una ganancia, saldo o pronóstico igual a cero.
+Hay una distinción entre poder ver/preparar los controles y tener autoridad operativa para ejecutar movimientos reales: el contexto de producción observado continúa en `shadow`, con la aprobación operativa desactivada y sin saldo/catálogo canónico. Los comandos que requieren activación se rechazan hasta completar el corte, respaldar aperturas/costos y habilitar la autoridad correspondiente. No se cargaron hechos ficticios para que los paneles muestren actividad.
 
-## Evidencia de entrega
+## Pedidos anteriores que conviene tener a mano
 
-El adaptador se consultó en una transacción de lectura contra la base real: el período del 1 al 8 de octubre conserva importes y saldos nulos, cobertura desconocida y escenario deshabilitado. La fuente financiera del Excel se cargó después y sus 22 controles por mes y moneda coinciden. Esto no completa los datos del período actual ni acredita una sesión HTTP autenticada.
+El recorrido y los pedidos históricos de Tiziano están documentados en [AppSheet: recorrido del 29/09](appsheet-walkthrough-2026-09-29.md), [observación de formularios](appsheet-paridad-observada-2026-10-06.md) e [implementación del flujo](appsheet-implementacion-2026-10-06.md). Entre los temas que pueden reaparecer:
 
-Las pruebas locales del reporte verificaron una base completa sintética y cobertura incompleta, monedas ARS/USD, fechas en `Pacific/Kiritimati`, selección del último mes y anchos reales 1280/390 sin desbordamiento. El navegador usa API real y PostgreSQL descartable; los datos sintéticos permanecen aislados de producción.
+- caja por cuenta y detalle de movimientos para explicar diferencias;
+- pagos próximos y total semanal, gastos mensuales, compras a plazo y obligaciones;
+- barra de equilibrio, gastos fijos, faltante diario, meta de ventas y ritmo del mes;
+- stock mínimo y alertas por categoría, stock disponible para venta y margen por categoría;
+- promociones y packs medidos, además del margen por producto;
+- pagos mixtos, tres cajas ARS, tres USD y operaciones de cambio;
+- separar factura/envío de cobro confirmado, y distinguir compra/recepción de pago.
 
-El CI del commit `9c50ca0a345ae522ba734b352c1ae73e38ad487f` pasó en los runs [push 37878428379](https://github.com/Gigisanta/Club-Canabico/actions/runs/37878428379) y [PR 37878432888](https://github.com/Gigisanta/Club-Canabico/actions/runs/37878432888): 279 pruebas de código, 52 recorridos de navegador y 13 controles sin conexión, sin fallos ni omisiones. También pasaron typecheck, build, restore e imágenes de contingencia y backup. Esa evidencia corresponde al reporte y la fuente financiera; la ampliación manual y empresarial tiene sus controles separados en [Migración AppSheet](appsheet-migration-2026-10-09.md).
+Son necesidades e historial, no evidencia de que todas las reglas estén activas o de que los datos estén conciliados. Stock por categoría y márgenes necesitan catálogo, costos y movimientos respaldados. Cajas y flujo necesitan las cuentas, aperturas, movimientos y conciliación del corte. Packs, tarifas y totales automáticos requieren cotejar las expresiones y automatizaciones actuales de AppSheet.
 
-## Release y límites actuales
+## Acceso a la definición de AppSheet
 
-El release actual está publicado en [bombo.maat.work](https://bombo.maat.work/app/finanzas), en el despliegue `dpl_BY98m5SQNsPRqGvrKFdiDsZ3yKvn`, `READY`, correspondiente al código `cf6124e`. Integra el reporte financiero, la recuperación de operación manual y la corrección de repetición del archivo de origen. La verificación pública de las 06:11 UTC contrastó sus 281 fuentes con el código local: coinciden las 280 fuera de la configuración de Vercel y se verificaron exactamente los dos campos agregados por la CLI. El dominio identifica ese mismo despliegue, usa Node 24 y devuelve `demo: false`; cuatro endpoints privados rechazan una sesión ausente con `401` y `no-store`. Ambos CI completos del código publicado terminaron aprobados. Los runs, hashes y límites están en [Migración AppSheet](appsheet-migration-2026-10-09.md).
+El 9 de octubre a las 13:19 UTC, el editor oficial [`/home/apps`](https://www.appsheet.com/home/apps) mostró **“No apps shared with you”** para la cuenta disponible. La app runtime [`Adm_TB`](https://www.appsheet.com/start/5b49e640-a7c9-40bb-bccf-ddbc9fcc63f0) pidió usuario y contraseña internos. No se ingresaron credenciales ni se hicieron cambios en AppSheet; por eso la definición y sus expresiones, acciones, vistas, bots, permisos y filtros siguen sin estar disponibles en esta sesión. El permiso indicado por AppSheet para verla es [View/copy app](https://support.google.com/appsheet/answer/10104983?hl=en).
 
-Además de la fuente financiera, se cargaron 17.695 filas empresariales de 32 tablas como archivo de origen, con excepciones y trazabilidad. No se suman al conteo financiero: ambos archivos contienen movimientos solapados. El acceso HTTP con una cuenta real sigue pendiente. La base operativa sigue en `shadow`: hacen falta acceso a la definición de AppSheet, mapeo revisado, aperturas y costos respaldados y el corte operativo. No se certifica el cierre financiero ni la migración completa mientras esos requisitos falten.
+## Cómo responder mañana con precisión
+
+Se pueden mostrar los controles del Excel y su cobertura, las pantallas manuales y los bloqueos visibles. Se puede explicar el diseño de estado de resultados y flujo, indicando qué campos dependen de aperturas, costos, obligaciones y movimientos faltantes. No presentar los 3.693 renglones como ventas verificadas ni como asientos, ni sumar el archivo empresarial encima del financiero: hay movimientos solapados. La revisión completa de AppSheet, el corte del negocio y una migración contable completa continúan pendientes.
+
+Para el detalle de origen, exclusiones, snapshots y controles, ver [Carga y conciliación de fuentes](finance-sources-2026-10-09.md).

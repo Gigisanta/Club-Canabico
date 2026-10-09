@@ -1,0 +1,57 @@
+.app-shell .bombo-finance-workspace { min-width: 0; }
+.app-shell .financial-workspace-nav { display: flex; flex-wrap: wrap; gap: 8px; }
+.app-shell .financial-workspace-nav a { display: inline-flex; align-items: center; min-height: 40px; padding: 8px 12px; border: 1px solid var(--bo-rule-strong); border-radius: 9px; background: var(--bo-paper); color: var(--brand-olive); font-size: 13px; font-weight: 700; text-decoration: none; }
+.app-shell .financial-workspace-nav a:hover { background: #f0e9d2; }
+.app-shell .financial-workspace-nav a:focus-visible, .app-shell .finance-projection-source-coverage summary:focus-visible, .app-shell .finance-projection-custody summary:focus-visible { outline: 3px solid var(--brand-orange); outline-offset: 2px; }
+.app-shell .finance-projection-panel { display: grid; gap: 14px; min-width: 0; }
+.app-shell .finance-projection-heading { padding-top: 7px; border-top: 1px solid var(--bo-rule); }
+.app-shell .finance-projection-panel > .ops-info-band { margin: 0; }
+.app-shell .finance-projection-accounts { display: grid; gap: 9px; }
+.app-shell .finance-projection-account { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--bo-rule); border-radius: 9px; background: #fffdf6; }
+.app-shell .finance-projection-account > div:first-child { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 7px; }
+.app-shell .finance-projection-account > div:first-child > strong { color: var(--bo-ink); font-size: 14px; }
+.app-shell .finance-projection-account dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.app-shell .finance-projection-account dl > div { display: grid; gap: 4px; min-width: 0; }
+.app-shell .finance-projection-account dt, .app-shell .finance-projection-balances span { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.app-shell .finance-projection-account dd { margin: 0; color: var(--bo-ink); font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
+.app-shell .finance-projection-custody { padding: 11px 12px; border: 1px solid var(--bo-rule); border-radius: 9px; color: var(--bo-ink-soft); font-size: 13px; }
+.app-shell .finance-projection-custody summary, .app-shell .finance-projection-source-coverage summary { cursor: pointer; font-weight: 700; }
+.app-shell .finance-projection-custody ul { display: grid; gap: 6px; margin: 10px 0 0; padding-left: 20px; }
+.app-shell .finance-projection-coverage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 12px; }
+.app-shell .finance-projection-coverage-grid > div { display: grid; gap: 5px; min-width: 0; padding: 11px 12px; border: 1px solid var(--bo-rule); border-radius: 9px; background: #fffdf6; }
+.app-shell .finance-projection-coverage-grid span, .app-shell .finance-projection-coverage-grid small { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.app-shell .finance-projection-coverage-grid strong { color: var(--bo-ink); font-size: 14px; overflow-wrap: anywhere; }
+.app-shell .finance-projection-source-coverage { margin-top: 12px; padding: 11px 12px; border: 1px solid var(--bo-rule); border-radius: 9px; }
+.app-shell .finance-projection-source-coverage ul { display: grid; gap: 7px; margin: 10px 0 0; padding: 0; list-style: none; }
+.app-shell .finance-projection-source-coverage li { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 9px 10px; border: 1px solid var(--bo-rule); border-radius: 8px; background: #fffdf6; }
+.app-shell .finance-projection-source-coverage li > span { display: grid; gap: 3px; min-width: 0; }
+.app-shell .finance-projection-source-coverage li strong { color: var(--bo-ink); font-size: 12px; text-transform: capitalize; }
+.app-shell .finance-projection-source-coverage li small { color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.app-shell .finance-projection-scenarios { display: grid; gap: 12px; }
+.app-shell .finance-projection-scenario { display: grid; gap: 10px; min-width: 0; padding: clamp(13px, 2vw, 18px); border: 1px solid var(--bo-rule); border-top: 3px solid var(--brand-olive); border-radius: 11px; background: #fffdf6; }
+.app-shell .finance-projection-scenario-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.app-shell .finance-projection-scenario-head h4 { margin: 3px 0 0; color: var(--bo-ink); font-size: 17px; }
+.app-shell .finance-projection-scenario-head p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.app-shell .finance-projection-balances { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--bo-rule); border-radius: 9px; overflow: hidden; }
+.app-shell .finance-projection-balances > div { display: grid; gap: 5px; min-width: 0; padding: 10px 12px; }
+.app-shell .finance-projection-balances > div + div { border-left: 1px solid var(--bo-rule); }
+.app-shell .finance-projection-balances strong { color: var(--bo-ink); font-size: 14px; overflow-wrap: anywhere; }
+.app-shell .finance-projection-scenario-note { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.app-shell .finance-projection-scenario .ops-table th small { display: block; margin-top: 3px; color: var(--muted); font-weight: 400; }
+@media (max-width: 720px) {
+  .app-shell .finance-projection-account dl { grid-template-columns: minmax(0, 1fr); }
+  .app-shell .finance-projection-account dl > div { grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); align-items: baseline; }
+  .app-shell .finance-projection-coverage-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 560px) {
+  .app-shell .financial-workspace-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .app-shell .financial-workspace-nav a { justify-content: center; text-align: center; }
+  .app-shell .finance-projection-scenario-head { flex-direction: column; }
+  .app-shell .finance-projection-balances { grid-template-columns: minmax(0, 1fr); }
+  .app-shell .finance-projection-balances > div + div { border-top: 1px solid var(--bo-rule); border-left: 0; }
+  .app-shell .finance-projection-source-coverage li { flex-direction: column; }
+}
+@media print {
+  .app-shell .financial-workspace-nav { display: none !important; }
+  .app-shell .finance-projection-scenario, .app-shell .finance-projection-panel > .ops-sheet { break-inside: avoid; }
+}

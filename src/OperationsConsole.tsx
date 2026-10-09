@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowSquareOut, ArrowsLeftRight, ChartBar, CheckSquare, ClipboardText, CreditCard, Gear, House, List, MapPin, Package, Receipt, ShieldCheck, ShoppingCart, SignOut, Tag, UploadSimple, UserCircleGear, Users, Wallet, X, type Icon } from "@phosphor-icons/react";
 import { roleLabels, type User } from "./lib";
-import { useNavigationType, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigationType, useSearchParams } from "react-router-dom";
 import "./operations-console.css";
 import { CommandDialog } from "./operations-ui/CommandDialog";
 import { apiGet, CommandRunner, hasCapability, onOperationsSessionExpired, OperationsApiError } from "./operations-ui/api";
@@ -32,6 +32,7 @@ const groups: NavGroup[] = [
     { id: "permissions", label: "Permisos y documentos", icon: ClipboardText, capability: "documents.read" },
   ] },
   { label: "Control", items: [
+    { id: "finance", label: "Finanzas", icon: ChartBar, capability: "reports.read" },
     { id: "collections", label: "Cobros", icon: CreditCard, capability: "finance.read" },
     { id: "accounts", label: "Cuentas y saldos", icon: Wallet, capability: "finance.read" },
     { id: "payables", label: "Obligaciones", icon: Receipt, capability: "finance.read" },
@@ -39,6 +40,7 @@ const groups: NavGroup[] = [
     { id: "reports", label: "Informes", icon: ChartBar, capability: "reports.read" },
   ] },
   { label: "Gestión", items: [
+    { id: "sources", label: "Datos cargados", icon: ClipboardText, capability: "imports.review" },
     { id: "commercial", label: "Políticas y promociones", icon: Tag, capability: "prices.propose" },
     { id: "configuration", label: "Configuración", icon: Gear, capability: "prices.propose" },
     { id: "imports", label: "Importación legado", icon: UploadSimple, capability: "imports.write" },
@@ -53,8 +55,10 @@ export default function OperationsConsole({ onExit, exitLabel = "Volver al panel
   const [loading, setLoading] = useState(!verifiedInitialContext);
   const [error, setError] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
   const navigationType = useNavigationType();
-  const activePage = searchParams.get("section") ?? "home";
+  const financeAlias = location.pathname === "/app/finanzas" && hasCapability(context, "reports.read") && hasCapability(context, "finance.read");
+  const activePage = searchParams.get("section") ?? (financeAlias ? "finance" : "home");
   const [action, setAction] = useState<CommandAction | null>(null);
   const [notice, setNotice] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
@@ -149,6 +153,7 @@ export default function OperationsConsole({ onExit, exitLabel = "Volver al panel
     items: group.items.filter(item => {
       if (item.id === "permissions") return ["documents.read", "documents.write", "permissions.verify"].some(capability => hasCapability(context, capability));
       if (item.id === "imports") return ["imports.write", "imports.review"].some(capability => hasCapability(context, capability));
+      if (item.id === "finance") return hasCapability(context, "reports.read") && hasCapability(context, "finance.read");
       if (item.id === "collections") return hasCapability(context, "finance.read");
       if (item.id === "tasks") return ["operations.read", "tasks.write"].some(capability => hasCapability(context, capability));
       if (item.id === "commercial") return ["prices.propose", "prices.approve"].some(capability => hasCapability(context, capability));
@@ -180,7 +185,7 @@ export default function OperationsConsole({ onExit, exitLabel = "Volver al panel
   const selectPage = (id: string) => {
     if (id !== activePage) setSearchParams(previous => {
       const next = new URLSearchParams(previous);
-      if (id === "home") next.delete("section");
+      if (id === "home" && !financeAlias) next.delete("section");
       else next.set("section", id);
       return next;
     });
@@ -237,7 +242,7 @@ export default function OperationsConsole({ onExit, exitLabel = "Volver al panel
         </header>
         {context.rehearsal
           ? <div className="ops-shadow-strip"><span aria-hidden="true">●</span> Ensayo habilitado · los cambios afectan datos sintéticos</div>
-          : context.authority.mode !== "active" && <div className="ops-shadow-strip"><span aria-hidden="true">●</span> Podés consultar los datos. Los cambios todavía no están habilitados.</div>}
+          : context.authority.mode !== "active" && <div className="ops-shadow-strip"><span aria-hidden="true">●</span> Las ventas y los movimientos operativos requieren habilitación. Podés gestionar los datos y controles disponibles para tu perfil.</div>}
         <main className="ops-content" id="operations-main" tabIndex={-1}>
           {error && <ErrorState message={`No pudimos actualizar el acceso. ${error}`} retry={() => void reloadContext()} />}
           {page && <OperationalWorkspace key={page.id} pageId={page.id} context={context} refreshKey={refreshKey} runCommand={runCommand} openAction={openAction} onNotice={showNotice} onRefresh={() => setRefreshKey(key => key + 1)} />}
