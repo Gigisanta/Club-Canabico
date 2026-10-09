@@ -152,10 +152,12 @@ test("cutover keeps legacy reviews compatible, rejects an unproven AppSheet gate
     const activation = envelope("operations", "AuthorityActivated", { evidence: { reference: "synthetic rollback test" } });
     const rejectedActivation = await call("/operations/commands", "cutover-activator", activation);
     const activationBody = await rejectedActivation.json();
-    assert.equal(rejectedActivation.status, 409);
-    assert.equal(activationBody.code, "AUTHORITY_ALREADY_ACTIVE");
+    assert.equal(rejectedActivation.status, 423);
+    assert.equal(activationBody.code, "APPSHEET_REPLACEMENT_REQUIRED");
+    assert.equal(activationBody.details?.captureId, captureId,
+      "a legacy activation cannot downgrade the existing AppSheet replacement authority");
     assert.equal(await db.operationObject.findUnique({ where: { id: "operations" } }), null,
-      "the command's provisional aggregate insert rolls back when execute rejects");
+      "the rejected legacy activation must not create an authority aggregate");
     assert.equal(await db.commandReceipt.findUnique({ where: { requestId: activation.requestId } }), null);
     assert.equal(await db.operationAudit.count({ where: { requestId: activation.requestId } }), 0);
     assert.equal(await db.operationOutbox.count({ where: { requestId: activation.requestId } }), 0);
