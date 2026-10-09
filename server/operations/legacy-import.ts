@@ -10,6 +10,7 @@ import { commercialAddress, commercialPreferences } from "./member-fields.js";
 import { sourceRecordSchema } from "./legacy-source-contract.js";
 import { legacyBatchRoutes } from "./legacy-batches.js";
 import { legacyHistoryRoutes } from "./legacy-history.js";
+import { assertLegacyHistorySourceAllowed } from "./legacy-source-policy.js";
 
 const MAX_BASE64_BYTES = 8 * 1024 * 1024 - 1024;
 const MAX_STAGED_RECORDS = 100_000;
@@ -77,6 +78,7 @@ registerCommand("LegacySnapshotStaged", {
   schema: stageSnapshotSchema,
   execute: async (ctx) => {
     const value = ctx.envelope.data as z.infer<typeof stageSnapshotSchema>;
+    assertLegacyHistorySourceAllowed(value.sourceSystem);
     const authority = await ctx.tx.operationAuthority.findUnique({ where: { id: "operations" }, select: { mode: true, epoch: true } });
     const authorityMode = authority?.mode ?? "shadow";
     const authorityEpoch = authority?.epoch ?? 1;
@@ -203,6 +205,7 @@ registerCommand("LegacySnapshotReviewed", {
   execute: async (ctx) => {
     const snapshot = await ctx.tx.legacyImportSnapshot.findUnique({ where: { id: ctx.envelope.targetId } });
     if (!snapshot) throw new OperationError(404, "IMPORT_NOT_FOUND", "No se encontró el lote legado.");
+    assertLegacyHistorySourceAllowed(snapshot.sourceSystem);
     if (snapshot.createdBy === ctx.actor.id) throw new OperationError(409, "INDEPENDENT_REVIEW_REQUIRED", "Quien importó el lote no puede revisarlo.");
     if (snapshot.fileHash !== ctx.envelope.data.fileHash) throw new OperationError(409, "IMPORT_CONTENT_CHANGED", "El contenido cambió desde que se preparó la revisión.");
     if (snapshot.status !== "staged") throw new OperationError(409, "IMPORT_NOT_REVIEWABLE", "El lote ya no está pendiente de revisión.");
@@ -232,6 +235,7 @@ registerCommand("LegacyExceptionResolved", {
     const snapshot = await ctx.tx.legacyImportSnapshot.findUnique({ where: { id: data.snapshotId } });
     if (!snapshot || snapshot.id !== ctx.envelope.targetId)
       throw new OperationError(404, "IMPORT_NOT_FOUND", "No se encontró el lote legado.");
+    assertLegacyHistorySourceAllowed(snapshot.sourceSystem);
     if (snapshot.status !== "reviewed" || !snapshot.reviewedBy || snapshot.createdBy === snapshot.reviewedBy)
       throw new OperationError(423, "IMPORT_REVIEW_REQUIRED", "El lote requiere una revisión independiente antes de resolver excepciones.");
     if (snapshot.createdBy === ctx.actor.id || snapshot.reviewedBy === ctx.actor.id)
@@ -267,6 +271,7 @@ registerCommand("LegacyRecordsMapped", {
   execute: async (ctx) => {
     const snapshot = await ctx.tx.legacyImportSnapshot.findUnique({ where: { id: ctx.envelope.targetId } });
     if (!snapshot || snapshot.id !== ctx.envelope.data.snapshotId) throw new OperationError(404, "IMPORT_NOT_FOUND", "No se encontró el lote legado.");
+    assertLegacyHistorySourceAllowed(snapshot.sourceSystem);
     if (snapshot.status !== "reviewed" || !snapshot.reviewedBy || snapshot.createdBy === snapshot.reviewedBy)
       throw new OperationError(423, "IMPORT_REVIEW_REQUIRED", "El lote requiere una revisión independiente antes de mapear maestros.");
     if (snapshot.createdBy === ctx.actor.id) throw new OperationError(403, "INDEPENDENT_REVIEW_REQUIRED", "Quien importó el lote no puede promover ni mapear sus registros.");
@@ -370,6 +375,7 @@ registerCommand("LegacyMasterActivated", {
     const snapshot = await ctx.tx.legacyImportSnapshot.findUnique({ where: { id: ctx.envelope.targetId } });
     if (!snapshot || snapshot.id !== input.snapshotId)
       throw new OperationError(404, "IMPORT_NOT_FOUND", "No se encontró el lote legado.");
+    assertLegacyHistorySourceAllowed(snapshot.sourceSystem);
     if (snapshot.status !== "reviewed" || !snapshot.reviewedBy || snapshot.createdBy === snapshot.reviewedBy)
       throw new OperationError(423, "IMPORT_REVIEW_REQUIRED", "La activación requiere una revisión independiente del lote.");
     if (snapshot.createdBy === ctx.actor.id || snapshot.reviewedBy === ctx.actor.id)

@@ -380,7 +380,7 @@ async function readBackupManifest(backupPath: string): Promise<BackupManifestRea
   }
 }
 
-async function verifyBackupReference(value: string): Promise<VerifiedBackup> {
+export async function verifyBackupReference(value: string): Promise<VerifiedBackup> {
   const backupPath = resolve(value);
   if (!value.trim()) throw new FinancialSourceStageError("backup_reference_required");
   await import("dotenv/config");

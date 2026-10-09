@@ -1,0 +1,39 @@
+.manual-reference {
+  display: grid;
+  gap: 1.4rem;
+}
+
+.manual-reference-group {
+  display: grid;
+  gap: 0.9rem;
+  padding: clamp(1rem, 2vw, 1.4rem);
+  border: 1px solid var(--ops-line, #dedfd5);
+  border-radius: 1rem;
+  background: var(--ops-surface, #fffefa);
+  box-shadow: 0 8px 24px rgb(45 48 35 / 4%);
+}
+
+.manual-reference-group .ops-section-heading {
+  margin: 0;
+}
+
+.manual-reference-group .ops-table th:first-child span {
+  margin-right: 0.45rem;
+}
+
+.manual-reference-group .ops-table td small {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--ops-muted, #686c5f);
+}
+
+@media (max-width: 640px) {
+  .manual-reference-group {
+    padding: 0.9rem;
+    border-radius: 0.8rem;
+  }
+
+  .manual-reference-group .ops-table {
+    min-width: 620px;
+  }
+}

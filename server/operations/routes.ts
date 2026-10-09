@@ -13,8 +13,10 @@ import "./orders.js";
 import { memberHistory } from "./member-history.js";
 import { productHistory } from "./product-history.js";
 import { resolveStockAvailability } from "./stock-availability.js";
+import { manualReferenceDataRoutes } from "./reference-data.js";
 import { buildOperationAccessSnapshot } from "./access-snapshot.js";
 export const operationsRoutes=Router();
+operationsRoutes.use(manualReferenceDataRoutes);
 const areas:Record<string,string[]>={members:["member"],policies:["pricePolicy","pack","promotion"],packs:["pack"],promotions:["promotion"],tasks:["task"],accounts:["account","accountBootstrap","fx"],collections:["collection"],settlements:["rendition"],payables:["payable"],purchases:["purchase"],receipts:["receipt"],stock:["sku","stock","stockCount","lot"],orders:["order"],deliveries:["delivery"],routes:["route"],access:["access","device"],authority:["authority","cutover"],documents:["document","template"]};
 operationsRoutes.get("/context",async(req,res)=>{
  const [grant,authority]=await Promise.all([
@@ -39,6 +41,12 @@ operationsRoutes.post("/:area/:id/commands",async(req,res)=>{
 const pageSize=(query:unknown)=>z.coerce.number().int().min(1).max(200).parse(query??100);
 const pageCursor=(query:unknown)=>z.string().min(1).max(100).optional().parse(query);
 async function versions(ids:string[]){return Object.fromEntries((await db.operationObject.findMany({where:{id:{in:ids}},select:{id:true,version:true}})).map(o=>[o.id,o.version]));}
+async function skuNamesForOrderLines(lines:Array<{skuId:string}>){
+ const skuIds=[...new Set(lines.map(line=>line.skuId).filter(Boolean))];
+ if(!skuIds.length)return new Map<string,string>();
+ const skus=await db.catalogSku.findMany({where:{id:{in:skuIds}},select:{id:true,name:true}});
+ return new Map(skus.map(sku=>[sku.id,sku.name] as const));
+}
 operationsRoutes.get("/members",async(req,res)=>{
  await requireCapability(db,req.user,"members.read");
  const q=z.string().max(120).parse(req.query.q??"");
@@ -127,18 +135,25 @@ operationsRoutes.get("/orders",async(req,res)=>{
  if(cursor&&!await db.operationOrder.findFirst({where:{AND:[where,{id:cursor}]},select:{id:true}}))throw new OperationError(400,"PAGE_CURSOR","Reiniciá los pedidos con sus filtros actuales");
  const rows=await db.operationOrder.findMany({where,include:{lines:true},orderBy:[{createdAt:"desc"},{id:"desc"}],take:limit+1,...(cursor?{cursor:{id:cursor},skip:1}:{})});
  const orders=rows.slice(0,limit);
+ const skuNameById=await skuNamesForOrderLines(orders.flatMap(order=>order.lines));
  const financial=(await capabilities(db,req.user)).includes("finance.read");
- const items=orders.map(o=>({...projectInvoiceAmount(o),lines:o.lines.map(l=>({...l,costMinor:financial?l.costMinor:null}))}));
+ const items=orders.map(o=>({...projectInvoiceAmount(o),lines:o.lines.map(l=>({...l,skuName:skuNameById.get(l.skuId)??null,costMinor:financial?l.costMinor:null}))}));
  res.json(wire({items,versions:await versions(orders.map(o=>o.id)),hasMore:rows.length>limit,nextCursor:rows.length>limit?orders.at(-1)!.id:null}));
 });
 operationsRoutes.get("/orders/:id",async(req,res)=>{
  await requireCapability(db,req.user,"operations.read");const id=String(req.params.id);
  const order=await db.operationOrder.findUnique({where:{id},include:{lines:true}});if(!order)throw new OperationError(404,"ORDER_NOT_FOUND","Pedido no encontrado");
  await requireMemberScope(db,req.user,order.memberId);
+ const skuNameById=await skuNamesForOrderLines(order.lines);
  const caps=await capabilities(db,req.user),financial=caps.includes("finance.read"),scope=await objectScope(db,req.user);
- const visibleBalances=scope.locationIds||scope.custodianIds?await db.stockBalance.findMany({where:{...(scope.locationIds?{locationId:{in:scope.locationIds}}:{}),...(scope.custodianIds?{custodianId:{in:scope.custodianIds}}:{})},select:{id:true}}):null;
+ const balanceScope:Prisma.StockBalanceWhereInput={...(scope.locationIds?{locationId:{in:scope.locationIds}}:{}),...(scope.custodianIds?{custodianId:{in:scope.custodianIds}}:{})};
+ const visibleBalances=scope.locationIds||scope.custodianIds?await db.stockBalance.findMany({where:balanceScope,select:{id:true}}):null;
  const reservations=caps.includes("stock.prepare")?await db.stockReservation.findMany({where:{orderId:id,status:"active",...(visibleBalances?{balanceId:{in:visibleBalances.map(balance=>balance.id)}}:{})},select:{id:true,lineId:true,balanceId:true,quantity:true,consumed:true}}):[];
- res.json(wire({order:{...projectInvoiceAmount(order),lines:order.lines.map(l=>({...l,costMinor:financial?l.costMinor:null}))},reservations,allocations:await db.preparationAllocation.findMany({where:{orderId:id,...(visibleBalances?{balanceId:{in:visibleBalances.map(b=>b.id)}}:{})},select:{id:true,lineId:true,lotId:true,balanceId:true,requestedQuantity:true,actualQuantity:true,deliveredQuantity:true,returnedQuantity:true,returnedDeliveredQuantity:true,state:true}}),deliveries:await db.deliveryAssignment.findMany({where:{orderId:id}}),version:(await versions([id]))[id]}));
+ const reservationBalanceIds=[...new Set(reservations.map(reservation=>reservation.balanceId))];
+ const reservationBalances=reservationBalanceIds.length?await db.stockBalance.findMany({where:{id:{in:reservationBalanceIds},...balanceScope},select:{id:true,lotId:true,unit:true,lot:{select:{label:true,skuId:true,sku:{select:{name:true}}}}}}):[];
+ const reservationBalanceById=new Map(reservationBalances.map(balance=>[balance.id,{id:balance.id,lotId:balance.lotId,skuId:balance.lot.skuId,skuName:balance.lot.sku.name,unit:balance.unit,lotLabel:balance.lot.label}] as const));
+ const enrichedReservations=reservations.map(reservation=>({...reservation,balance:reservationBalanceById.get(reservation.balanceId)??null}));
+ res.json(wire({order:{...projectInvoiceAmount(order),lines:order.lines.map(l=>({...l,skuName:skuNameById.get(l.skuId)??null,costMinor:financial?l.costMinor:null}))},reservations:enrichedReservations,allocations:await db.preparationAllocation.findMany({where:{orderId:id,...(visibleBalances?{balanceId:{in:visibleBalances.map(b=>b.id)}}:{})},select:{id:true,lineId:true,lotId:true,balanceId:true,requestedQuantity:true,actualQuantity:true,deliveredQuantity:true,returnedQuantity:true,returnedDeliveredQuantity:true,state:true}}),deliveries:await db.deliveryAssignment.findMany({where:{orderId:id}}),version:(await versions([id]))[id]}));
 });
 operationsRoutes.get("/purchases",async(req,res)=>{
  await requireCapability(db,req.user,"purchases.write");const limit=pageSize(req.query.limit??200),cursor=pageCursor(req.query.cursor);
