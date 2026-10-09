@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
+import { isTechnicalLegacySource } from "../../shared/operations/source-control";
+import { cutoverGateIds } from "../../shared/operations/contracts";
+import { SourcesWorkspace } from "./SourcesWorkspace";
+import { FinanceWorkspace } from "./FinanceWorkspace";
 import { apiGet, apiPost, hasCapability, hasCommand, OperationsApiError, recordValue, responseItems, responseVersion, textValue } from "./api";
 import { amountFormToMinor, formatMinor } from "./money";
 import { ActionButton, DataTable, EmptyState, ErrorState, InfoBand, LoadingState, SectionHeading, StatusTag } from "./Primitives";
@@ -16,6 +20,8 @@ import { ReplacementReadiness } from "./ReplacementReadiness";
 import { useRemote } from "./useRemote";
 import type { ActionField, CommandAction, JsonRecord, OperationsContext, RunCommand } from "./types";
 import { RouteOrderEditor, type RouteOrderStop } from "./RouteOrderEditor";
+import { ManualReferenceData } from "./ManualReferenceData";
+import { ManualStockTools } from "./ManualStockTools";
 
 type Row = Record<string, unknown>;
 function objectValue(value: unknown): Row { return value && typeof value === "object" && !Array.isArray(value) ? value as Row : {}; }
@@ -214,7 +220,7 @@ function tableValue(row: Row, key: string, label: string) {
     if (!items.length) return "Sin supuestos";
     return <details className="ops-line-details"><summary>{items.length} supuestos · {currency}</summary><ul>{items.map((item, index) => <li key={textValue(item.id, String(index))}><strong>{textValue(item.date)} · {textValue(item.kind).replaceAll("_", " ")}</strong><span>{formatMinor(item.amountMinor, currency)} · {textValue(item.description)}{item.commitmentId ? ` · compromiso ${textValue(item.commitmentId)}` : ""}</span></li>)}</ul></details>;
   }
-  if (key === "lines" && Array.isArray(row.lines)) return <details className="ops-line-details"><summary>{row.lines.length} líneas</summary><ul>{(row.lines as Row[]).map((line, index) => <li key={idOf(line) || index}><span>{textValue(line.skuLabel, line.skuId ? `Producto #${shortReference(String(line.skuId))}` : "Artículo")} · {textValue(line.unit, "unidad")} · {textValue(line.requested, "—")}</span></li>)}</ul></details>;
+  if (key === "lines" && Array.isArray(row.lines)) return <details className="ops-line-details"><summary>{row.lines.length} líneas</summary><ul>{(row.lines as Row[]).map((line, index) => <li key={idOf(line) || index}><span>{textValue(line.skuLabel, "Producto sin nombre disponible")} · {textValue(line.unit, "unidad")} · {textValue(line.requested, "—")}</span></li>)}</ul></details>;
   if (key === "items" && Array.isArray(row.items)) return <details className="ops-line-details"><summary>{row.items.length} artículos</summary><ul>{(row.items as Row[]).map((item, index) => <li key={idOf(item) || index}><span>{textValue(item.skuLabel, "Artículo")} · {textValue(item.quantity)} {textValue(item.unit)} · costo unitario {textValue(item.unitCost)}</span></li>)}</ul></details>;
   if (key === "status" || key.endsWith("State") || key === "state") return <StatusTag>{reportStateLabel(displayCell(row, key))}</StatusTag>;
   if (key === "kind" || key === "coverage") return reportStateLabel(displayCell(row, key));
@@ -320,6 +326,26 @@ function quantityForUnit(value: string, unit: unknown, label: string, allowZero 
 function purchaseLines(row: Row): Row[] {
   return Array.isArray(row.items) ? row.items.filter((item): item is Row => Boolean(item) && typeof item === "object") : [];
 }
+function purchaseLineId(line: Row): string {
+  return textValue(line.lineId, "").trim() || idOf(line);
+}
+function activeNamedPurchaseSku(line: Row, catalogRows: Row[]): (Row & { name: string }) | null {
+  const skuId = textValue(line.skuId, "");
+  const matches = skuId ? catalogRows.filter(row => idOf(row) === skuId) : [];
+  if (matches.length !== 1) return null;
+  const sku = matches[0]!;
+  if (sku.active !== true || typeof sku.name !== "string" || !sku.name.trim() || sku.unit !== line.unit) return null;
+  return { ...sku, name: sku.name };
+}
+function visibleInvoiceLineName(line: Row, catalogRows: Row[]) {
+  const skuId = textValue(line.skuId, "");
+  const matches = skuId ? catalogRows.filter(row => idOf(row) === skuId) : [];
+  const catalogName = matches.length === 1 && typeof matches[0]!.name === "string" ? matches[0]!.name.trim() : "";
+  for (const candidate of [catalogName, line.skuLabel, line.skuName, line.name]) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return "";
+}
 function remainingPurchaseLines(row: Row, receipts: Row[]): Array<{ line: Row; remaining: bigint | null }> {
   const receivedByLine = new Map<string, bigint>();
   for (const receipt of receipts) {
@@ -334,7 +360,7 @@ function remainingPurchaseLines(row: Row, receipts: Row[]): Array<{ line: Row; r
   }
   return purchaseLines(row).map(line => {
     const ordered = scaledQuantity(line.quantity);
-    const lineId = idOf(line);
+    const lineId = purchaseLineId(line);
     if (ordered === null || !lineId) return { line, remaining: null };
     const received = receivedByLine.get(lineId) ?? 0n;
     return { line, remaining: received > ordered ? 0n : ordered - received };
@@ -562,6 +588,14 @@ function PeriodCoveragePanel({ context, runCommand, onRefresh, onNotice }: { con
 }
 
 function DocImportPanels({ pageId, context, refreshKey, runCommand, onRefresh, onNotice }: { pageId: "permissions" | "imports"; context: OperationsContext; refreshKey: number; runCommand: RunCommand; onRefresh: () => void; onNotice: (message: string) => void }) {
+  const [searchParams] = useSearchParams();
+  const sourceTarget = (snapshotId: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("section", "sources");
+    next.set("sourceId", snapshotId);
+    for (const key of ["sourceTable", "recordQ", "recordCursor", "recordId", "exceptionsOnly"]) next.delete(key);
+    return { search: `?${next.toString()}` };
+  };
   const canReadDocs = hasCapability(context, "documents.read");
   const canReadMembers = hasCapability(context, "members.read");
   const docs = useRemote<Record<string, unknown>>(canReadDocs ? "/api/operations/documents" : null, refreshKey);
@@ -683,7 +717,9 @@ function DocImportPanels({ pageId, context, refreshKey, runCommand, onRefresh, o
     {imports.loading && <LoadingState label="Leyendo lotes y revisiones…" />}{imports.error && <ErrorState message={imports.error} retry={imports.retry} />}
     {canReviewImports && <ListTable title="Lotes y revisiones recientes" rows={rowsOf(imports.data)} columns={[["filename", "Libro"], ["sourceSystem", "Origen"], ["status", "Estado"], ["createdAt", "Creado"]]} renderActions={row => <>
       {row.status === "uploading" && <ActionButton quiet onClick={() => { const id = idOf(row); setBatchIdInput(id); setProgressBatchId(id); setProgressRefreshKey(value => value + 1); }}>Seguir carga</ActionButton>}
-      {hasCommand(context, "LegacySnapshotReviewed") && row.status === "staged" && <ActionButton quiet onClick={() => void reviewSnapshot(row)} disabled={busy}>Revisar independientemente</ActionButton>}
+      <Link className="ops-button ops-button-quiet ops-button-small" to={sourceTarget(idOf(row))}>Ver tablas y filas</Link>
+      {isTechnicalLegacySource(textValue(row.sourceSystem, "")) && <StatusTag tone="neutral">Fuente de consulta</StatusTag>}
+      {hasCommand(context, "LegacySnapshotReviewed") && row.status === "staged" && !isTechnicalLegacySource(textValue(row.sourceSystem, "")) && <ActionButton quiet onClick={() => void reviewSnapshot(row)} disabled={busy}>Revisar independientemente</ActionButton>}
     </>} />
     }
     {pageId === "imports" && <LegacyHistoryWorkflow context={context} refreshKey={refreshKey} runCommand={runCommand} onRefresh={onRefresh} onNotice={onNotice} />}
@@ -765,6 +801,8 @@ export function OperationalWorkspace(props: Props) {
   const settlementPayables = useRemote<Record<string, unknown>>(pageId === "settlements" && hasCapability(context, "payables.write") ? "/api/operations/payables" : null, refreshKey);
   const payablePurchases = useCursorResource(pageId === "payables" && hasCapability(context, "purchases.write") ? "/api/operations/purchases" : null, refreshKey, "cursor", "nextCursor", "hasMore", ["items"]);
   const stockReference = useRemote<Record<string, unknown>>(["purchases", "catalog", "payables"].includes(pageId) && hasCapability(context, "stock.read") ? "/api/operations/stock/reference-data" : null, refreshKey);
+  const manualReferenceDataPath = ["purchases", "catalog"].includes(pageId) && (hasCapability(context, "purchases.write") || hasCapability(context, "stock.adjust")) ? "/api/operations/manual-reference-data" : null;
+  const manualReferenceData = useRemote<Record<string, unknown>>(manualReferenceDataPath, refreshKey);
   const stockCounts = useRemote<Record<string, unknown>>(pageId === "catalog" && hasCapability(context, "stock.read") ? "/api/operations/stock/counts" : null, refreshKey);
 
   const peopleRows = rowsOf(people.data);
@@ -817,15 +855,28 @@ export function OperationalWorkspace(props: Props) {
   }, [pageId, query.data, gates.data, payablePurchases.data, stockReference.data]);
 
   if (pageId === "home") return <HomeWorkspace context={context} refreshKey={refreshKey} runCommand={runCommand} openAction={openAction} onNotice={onNotice} onRefresh={onRefresh} />;
+  if (pageId === "sources") return <SourcesWorkspace context={context} refreshKey={refreshKey} runCommand={runCommand} openAction={openAction} onNotice={onNotice} onRefresh={onRefresh} />;
+  if (pageId === "finance") return <FinanceWorkspace context={context} refreshKey={refreshKey} runCommand={runCommand} openAction={openAction} onNotice={onNotice} onRefresh={onRefresh} />;
   if (pageId === "imports" || pageId === "permissions") return <DocImportPanels pageId={pageId} context={context} refreshKey={refreshKey} runCommand={runCommand} onRefresh={onRefresh} onNotice={onNotice} />;
   if (pageId === "reports") return <ReportsPanel context={context} refreshKey={refreshKey} />;
 
   const memberRows = pageId === "members" ? rowsOf(query.data) : rowsOf(members.data);
   const accountRows = rowsOf(pageId === "accounts" ? query.data : accounts.data);
   const catalogRows = rowsOf(pageId === "catalog" ? query.data : needsCatalogChoices ? catalogChoices.data : catalogReference.data);
-  const supplierRows = rowsOf(stockReference.data, "suppliers");
-  const locationRows = rowsOf(stockReference.data, "locations");
-  const custodianRows = rowsOf(stockReference.data, "custodians");
+  const purchaseCatalogReady = needsCatalogChoices && Boolean(catalogChoices.data) && !catalogChoices.loading && !catalogChoices.error;
+  const stockReferencesUsable = hasCapability(context, "stock.read") && Boolean(stockReference.data) && !stockReference.error;
+  const manualReferencesUsable = Boolean(manualReferenceDataPath) && Boolean(manualReferenceData.data) && !manualReferenceData.error;
+  const supplierRows = mergePageRows(manualReferencesUsable ? rowsOf(manualReferenceData.data, "suppliers") : [], stockReferencesUsable ? rowsOf(stockReference.data, "suppliers") : []);
+  const locationRows = mergePageRows(manualReferencesUsable ? rowsOf(manualReferenceData.data, "locations") : [], stockReferencesUsable ? rowsOf(stockReference.data, "locations").map(row => ({ ...row, active: row.active !== false })) : []).filter(row => row.active === true);
+  const custodianRows = stockReferencesUsable ? rowsOf(stockReference.data, "custodians") : [];
+  const namedLocationRows = locationRows.filter(row => typeof row.name === "string" && row.name.trim());
+  const namedCustodianRows = custodianRows.filter(row => typeof row.name === "string" && row.name.trim());
+  const locationReferencesLoading = (hasCapability(context, "stock.read") && stockReference.loading)
+    || (Boolean(manualReferenceDataPath) && manualReferenceData.loading);
+  const locationReferencesAvailable = stockReferencesUsable || manualReferencesUsable;
+  const locationReferencesReady = !locationReferencesLoading && locationReferencesAvailable && namedLocationRows.length > 0;
+  const movementReferencesReady = hasCapability(context, "stock.read") && !stockReference.loading && !stockReference.error
+    && Boolean(stockReference.data) && namedLocationRows.length > 0 && namedCustodianRows.length > 0;
   const stockBalanceRows: Row[] = catalogRows.flatMap(sku => {
     const lots = Array.isArray(sku.lots) ? sku.lots.filter((lot): lot is Row => Boolean(lot) && typeof lot === "object") : [];
     return lots.flatMap(lot => {
@@ -833,7 +884,7 @@ export function OperationalWorkspace(props: Props) {
       return balances.map(balance => ({
         ...balance,
         skuId: idOf(sku),
-        skuName: textValue(sku.name, idOf(sku)),
+        skuName: textValue(sku.name, "Producto sin nombre disponible"),
         category: textValue(sku.category),
         unit: textValue(balance.unit, textValue(sku.unit)),
         lotId: idOf(lot),
@@ -878,7 +929,8 @@ export function OperationalWorkspace(props: Props) {
     const reference = shortReference(rawId);
     const labelledLines = (key: "lines" | "items") => Array.isArray(row[key]) ? (row[key] as Row[]).map(line => {
       const sku = catalogRows.find(candidate => idOf(candidate) === String(line.skuId ?? ""));
-      return { ...line, ...(sku ? { skuLabel: textValue(sku.name) } : {}) };
+      const skuName = key === "lines" ? visibleInvoiceLineName(line, catalogRows) : sku ? textValue(sku.name) : "";
+      return { ...line, ...(skuName ? { skuLabel: skuName } : {}) };
     }) : row[key];
     const orderQuote = recordValue(row, "quote");
     const appSheetInvoice = pageId === "orders" && recordValue(orderQuote, "source") === "appsheet-invoice";
@@ -924,6 +976,46 @@ export function OperationalWorkspace(props: Props) {
   const approvedPromotions = rowsOf(pricing.data, "promotions").filter(row => row.status === "approved" && (hasCapability(context, "prices.approve") || Object.keys(recordValue(row.definition, "eligibility") as object ?? {}).length === 0));
   const accessData = pageId === "access" ? query.data : access.data;
   const userRows = rowsOf(accessData, "users").filter(user => user.active !== false);
+  const gateRowsById = new Map<string, Row | null>();
+  for (const gate of rowsOf(gates.data, "gates")) {
+    const gateId = idOf(gate);
+    if (!gateId || !(cutoverGateIds as readonly string[]).includes(gateId)) continue;
+    gateRowsById.set(gateId, gateRowsById.has(gateId) ? null : gate);
+  }
+  const activeGateUserIds = new Set(rowsOf(access.data, "users")
+    .filter(user => user.active === true)
+    .map(idOf)
+    .filter(Boolean));
+  const approvedGateCount = cutoverGateIds.filter(gateId => gateRowsById.get(gateId)?.status === "approved").length;
+  const gatesHaveIndependentActiveReview = cutoverGateIds.every(gateId => {
+    const gate = gateRowsById.get(gateId);
+    const authorId = typeof gate?.approvedBy === "string" ? gate.approvedBy : "";
+    const reviewerId = typeof gate?.reviewedBy === "string" ? gate.reviewedBy : "";
+    return gate?.status === "approved" && authorId.length > 0 && reviewerId.length > 0
+      && authorId !== reviewerId && activeGateUserIds.has(authorId) && activeGateUserIds.has(reviewerId);
+  });
+  const authorityRow = recordValue(gates.data, "authority");
+  const serverAuthorityMode = authorityRow === null ? "shadow"
+    : typeof recordValue(authorityRow, "mode") === "string" ? String(recordValue(authorityRow, "mode")) : "unknown";
+  const operationalApprovalConfigured = context.operationalApprovalConfigured === true;
+  const authorityActivationBlocker = !hasCapability(context, "cutover.approve") ? "Tu perfil no tiene permiso para activar la autoridad."
+    : !hasCommand(context, "AuthorityActivated") ? "El servidor no ofrece la acción de activación para esta sesión."
+    : context.rehearsal ? "La sesión está marcada como ensayo; no se puede activar autoridad real desde aquí."
+    : !operationalApprovalConfigured ? "El servidor aún no está habilitado para activar autoridad y aceptar escrituras reales."
+    : context.authority.mode !== "shadow" ? "El contexto no informa autoridad en sombra; actualizá la vista para confirmar el estado vigente."
+    : !hasCapability(context, "access.manage") ? "Tu perfil no permite comprobar si las personas autoras y revisoras siguen activas; se necesita acceso a la gestión de usuarios."
+    : gates.loading || query.loading || access.loading ? "Esperá a que terminen de cargar las habilitaciones y las personas activas."
+    : gates.error || query.error ? "No se pudo consultar el estado actual de las habilitaciones; reintentá la consulta."
+    : access.error ? "No se pudo comprobar el estado activo de las personas; reintentá la consulta de accesos."
+    : !gates.data || !query.data ? "No hay una respuesta actual del servidor para validar la autoridad."
+    : !access.data ? "No hay una lista actual de personas para validar autores y revisores."
+    : serverAuthorityMode === "active" ? "La autoridad ya figura activa en el servidor."
+    : serverAuthorityMode !== "shadow" ? "El estado de autoridad no se pudo confirmar como sombra."
+    : approvedGateCount !== cutoverGateIds.length ? `Hay ${approvedGateCount} de ${cutoverGateIds.length} controles aprobados; el servidor exige que estén aprobados todos.`
+    : !gatesHaveIndependentActiveReview ? "Cada control debe conservar una persona autora y otra revisora, distintas y activas."
+    : null;
+  const canActivateAuthority = pageId === "gates"
+    && authorityActivationBlocker === null;
   const profileValues = recordValue(query.data, "profiles");
   const profileOptions = Array.isArray(profileValues) ? profileValues.filter((profile): profile is string => typeof profile === "string").map(profile => ({ value: profile, label: profile.replaceAll("_", " ") })) : [];
   const documentRows = rowsOf(documents.data).filter(document => document.sensitivity !== "clinical");
@@ -949,7 +1041,7 @@ export function OperationalWorkspace(props: Props) {
   };
 
   const version = (row: Row, fallback = Number.NaN) => versionFor(query.data, row, fallback);
-  const runAction = (command: string, title: string, fieldsIn: ActionField[], build: (values: Record<string, string | boolean>) => JsonRecord, row?: Row, description?: string, create = false, actionHint?: string) => {
+  const runAction = (command: string, title: string, fieldsIn: ActionField[], build: (values: Record<string, string | boolean>) => JsonRecord, row?: Row, description?: string, create = false, actionHint?: string, options: { targetId?: string; requestIdIsTarget?: boolean } = {}) => {
     if (!hasCommand(context, command)) return;
     if (query.loading || query.error) { onNotice("Esperá a que termine la actualización antes de registrar otro cambio."); return; }
     const expectedVersion = row ? version(row) : create ? 0 : undefined;
@@ -957,8 +1049,19 @@ export function OperationalWorkspace(props: Props) {
       onNotice(`Acción bloqueada: GET ${spec.path ?? "de esta sección"} no devuelve una versión para ${idOf(row)}. El API debe exponer versions[${idOf(row)}].`);
       return;
     }
-    openAction(action(command, title, fieldsIn, build, row ? idOf(row) : undefined, expectedVersion, create, actionHint ?? description));
+    openAction(action(command, title, fieldsIn, build, row ? idOf(row) : options.targetId, expectedVersion, options.requestIdIsTarget ?? create, actionHint ?? description));
   };
+  const activateAuthority = () => runAction(
+    "AuthorityActivated",
+    "Activar autoridad del circuito",
+    fields(evidenceField("Evidencia humana explícita de la decisión de activar autoridad")),
+    values => ({ evidence: note(values) }),
+    undefined,
+    "El servidor volverá a validar la configuración operativa, los 14 controles aprobados y las personas autoras y revisoras activas. La autoridad sólo cambia después de guardar el comando y su comprobante.",
+    true,
+    undefined,
+    { targetId: "operations", requestIdIsTarget: false },
+  );
   const reconcileAccount = (account: Row) => runAction("AccountReconciled", "Registrar arqueo de cuenta", fields(
     field("date", "Fecha del arqueo", "date", { required: true, defaultValue: localDate() }),
     field("counted", "Saldo contado", "amount", { required: true, help: `Importe expresado en ${textValue(account.currency)}.` }),
@@ -984,12 +1087,12 @@ export function OperationalWorkspace(props: Props) {
       ), values => ({ balanceId, quantity: quantityForUnit(str(values, "quantity"), unit, "Cantidad descartada"), reason: str(values, "reason"), evidence: note(values) }), undefined, "La merma queda asociada al lote y se descuenta del saldo disponible.", true),
     });
 
-    if (balanceId && hasCommand(context, "StockMoved") && (available === null || available > 0n)) buttons.push({
+    if (balanceId && hasCommand(context, "StockMoved") && movementReferencesReady && (available === null || available > 0n)) buttons.push({
       label: "Trasladar saldo",
       onClick: () => runAction("StockMoved", "Trasladar stock entre custodias", fields(
         field("quantity", "Cantidad a trasladar", "decimal", { required: true, help: quantityHelp }),
-        locationRows.length ? select("toLocationId", "Ubicación de destino", optionsOf(locationRows)) : field("toLocationId", "ID de ubicación activa de destino", "text", { required: true }),
-        custodianRows.length ? select("toCustodianId", "Persona custodio de destino", optionsOf(custodianRows, ["name", "id"])) : field("toCustodianId", "ID de persona custodio activa", "text", { required: true }),
+        select("toLocationId", "Ubicación de destino", optionsOf(namedLocationRows)),
+        select("toCustodianId", "Persona custodio de destino", optionsOf(namedCustodianRows, ["name"])),
         field("reason", "Motivo del traslado", "textarea", { required: true }),
         evidenceField(),
       ), values => ({ balanceId, quantity: quantityForUnit(str(values, "quantity"), unit, "Cantidad a trasladar"), toLocationId: str(values, "toLocationId"), toCustodianId: str(values, "toCustodianId"), reason: str(values, "reason"), evidence: note(values) }), undefined, "El sistema descuenta el saldo de origen y lo incorpora a la ubicación y custodia elegidas.", true),
@@ -1027,7 +1130,7 @@ export function OperationalWorkspace(props: Props) {
     const buttons: Array<{ label: string; onClick: () => void }> = [];
     if (pageId === "members" && hasCommand(context, "MemberCreated")) buttons.push({ label: "＋ Nuevo socio", onClick: () => runAction("MemberCreated", "Crear socio", fields(field("name", "Nombre completo", "text", { required: true }), field("email", "Correo electrónico", "email"), field("phone", "Teléfono", "tel")), v => ({ name: str(v, "name"), email: str(v, "email"), phone: str(v, "phone"), address: {}, preferences: {} }), undefined, "", true) });
     if (pageId === "orders" && hasCommand(context, "OrderCreated")) buttons.push({ label: "＋ Pedido avanzado", onClick: () => runAction("OrderCreated", "Iniciar pedido", fields({ ...select("memberId", "Socio", optionsOf(memberRows), true), lookupPath: "/api/operations/members" }, select("channel", "Modalidad", [{ value: "local", label: "Retiro" }, { value: "delivery", label: "Reparto" }]), currencyField(), field("address", "Domicilio de reparto (opcional)", "textarea"), field("preorder", "Crear como preventa", "checkbox")), v => ({ memberId: str(v, "memberId"), channel: str(v, "channel"), currency: str(v, "currency"), address: str(v, "address") ? { address: str(v, "address") } : {}, preorder: v.preorder === true }), undefined, "", true) });
-    const purchaseSupplierOptions = supplierRows.flatMap(row => idOf(row) && typeof row.name === "string" && row.name.trim() ? [{ value: idOf(row), label: row.name }] : []);
+    const purchaseSupplierOptions = rowsOf(manualReferenceData.data, "suppliers").flatMap(row => row.active === true && idOf(row) && typeof row.name === "string" && row.name.trim() ? [{ value: idOf(row), label: row.name }] : []);
     const purchaseSkuOptions = catalogRows.flatMap(row => {
       const value = idOf(row), label = textValue(row.name, textValue(row.code, ""));
       return value && label && (row.unit === "g" || row.unit === "ud") ? [{ value, label }] : [];
@@ -1043,7 +1146,7 @@ export function OperationalWorkspace(props: Props) {
         field("unitCost", "Costo unitario exacto", "decimal", { required: true, step: "any", help: "Se conserva como decimal exacto, hasta 12 posiciones." }),
       ];
     };
-    if (pageId === "purchases" && hasCommand(context, "PurchaseOrderCreated") && purchaseSupplierOptions.length > 0 && purchaseSkuOptions.length > 0) buttons.push({ label: "＋ Nueva compra", onClick: () => runAction("PurchaseOrderCreated", "Registrar acuerdo de compra", fields(select("supplierId", "Proveedor activo", purchaseSupplierOptions), field("agreementDate", "Fecha del acuerdo", "date", { required: true, defaultValue: localDate() }), field("expectedDate", "Fecha prevista (opcional)", "date"), currencyField(), field("items", "Artículos del acuerdo", "repeat", { fields: purchaseLineFields({}), rowFields: purchaseLineFields, initialRows: 1, maxRows: 200, addLabel: "Agregar artículo", required: true }), evidenceField("Nota del acuerdo")), v => {
+    if (pageId === "purchases" && hasCommand(context, "PurchaseOrderCreated") && !manualReferenceData.loading && !manualReferenceData.error && purchaseSupplierOptions.length > 0 && purchaseSkuOptions.length > 0) buttons.push({ label: "＋ Nueva compra", onClick: () => runAction("PurchaseOrderCreated", "Registrar acuerdo de compra", fields(select("supplierId", "Proveedor activo", purchaseSupplierOptions), field("agreementDate", "Fecha del acuerdo", "date", { required: true, defaultValue: localDate() }), field("expectedDate", "Fecha prevista (opcional)", "date"), currencyField(), field("items", "Artículos del acuerdo", "repeat", { fields: purchaseLineFields({}), rowFields: purchaseLineFields, initialRows: 1, maxRows: 200, addLabel: "Agregar artículo", required: true }), evidenceField("Nota del acuerdo")), v => {
       const lineValues = repeatedValues(v, "items").filter(item => str(item, "skuId") || str(item, "quantity") || str(item, "unitCost"));
       if (!lineValues.length) throw new Error("Agregá al menos un artículo al acuerdo.");
       const items = lineValues.map(line => {
@@ -1214,6 +1317,17 @@ export function OperationalWorkspace(props: Props) {
     gates: [["id", "Habilitación"], ["status", "Estado"], ["approvedBy", "Autor"], ["reviewedBy", "Revisor"], ["approvedAt", "Fecha"]],
   };
   const title = spec.title;
+  const purchaseRemainingLines = (purchase: Row) => remainingPurchaseLines(purchase, rowsOf(query.data, "receipts"));
+  const purchaseReceiptLinesAreValid = (purchase: Row) => {
+    const remaining = purchaseRemainingLines(purchase);
+    if (!remaining.length || remaining.some(item => item.remaining === null)) return false;
+    const pending = remaining.filter(item => item.remaining! > 0n);
+    return pending.length === 0 || (purchaseCatalogReady && pending.every(({ line }) => Boolean(purchaseLineId(line)) && activeNamedPurchaseSku(line, catalogRows) !== null));
+  };
+  const hasPurchaseAwaitingReceipt = pageId === "purchases" && mainRows.some(row => ["approved", "partially_received"].includes(String(row.status)));
+  const purchasesBlockedByCatalog = hasPurchaseAwaitingReceipt && hasCommand(context, "GoodsReceived")
+    ? mainRows.filter(row => ["approved", "partially_received"].includes(String(row.status)) && !purchaseReceiptLinesAreValid(row))
+    : [];
   const actionButtonsFor = (row: Row) => {
     const id = idOf(row);
     const buttons: Array<{ label: string; onClick: () => void }> = [];
@@ -1222,15 +1336,19 @@ export function OperationalWorkspace(props: Props) {
     const isConfirmedAppSheetInvoice = isAppSheetInvoice && row.commercialState === "confirmed";
     if (pageId === "catalog" && hasCapability(context, "stock.read")) buttons.push({ label: "Historia del producto", onClick: () => setSelectedProductId(id) });
     if (pageId === "purchases" && row.status === "draft" && hasCommand(context, "PurchaseOrderApproved")) buttons.push({ label: "Aprobar compra", onClick: () => runAction("PurchaseOrderApproved", "Revisar y aprobar la compra", fields(evidenceField("Motivo de aprobación")), v => ({ evidence: note(v) }), row, "La persona que aprobó debe ser distinta de quien creó el acuerdo.") });
-    if (pageId === "purchases" && ["approved", "partially_received"].includes(String(row.status)) && hasCommand(context, "GoodsReceived")) {
-      const remaining = remainingPurchaseLines(row, rowsOf(query.data, "receipts"));
+    if (pageId === "purchases" && ["approved", "partially_received"].includes(String(row.status)) && hasCommand(context, "GoodsReceived") && locationReferencesReady && purchaseReceiptLinesAreValid(row)) {
+      const remaining = purchaseRemainingLines(row);
       const receivable = remaining.filter(item => item.remaining !== null && item.remaining > 0n);
       if (remaining.length > 0 && remaining.every(item => item.remaining !== null) && receivable.length > 0) {
-      const receiveFields: ActionField[] = [field("receivedDate", "Fecha de recepción", "date", { required: true, defaultValue: localDate() }), locationRows.length ? select("locationId", "Ubicación de ingreso", optionsOf(locationRows)) : field("locationId", "Identificador de ubicación activa", "text", { required: true, help: stockReference.error ? "No se pudo cargar la lista disponible para este perfil." : "Pegá el identificador de una ubicación activa." }), custodianRows.length ? select("custodianId", "Custodio (opcional; por defecto, vos)", [{ value: "", label: "Yo recibo" }, ...optionsOf(custodianRows)]) : field("custodianId", "Identificador de custodio (opcional; por defecto, vos)", "text")];
+      const receiveFields: ActionField[] = [
+        field("receivedDate", "Fecha de recepción", "date", { required: true, defaultValue: localDate() }),
+        select("locationId", "Ubicación de ingreso", optionsOf(namedLocationRows)),
+        select("custodianId", "Custodio (opcional; por defecto, vos)", [{ value: "", label: "Yo recibo" }, ...optionsOf(namedCustodianRows, ["name"])], false),
+      ];
         for (const item of receivable) {
-          const lineId = idOf(item.line);
-          const sku = catalogRows.find(value => idOf(value) === item.line.skuId);
-          const label = `${textValue(sku?.name, `SKU ${textValue(item.line.skuId)}`)} · ${formatScaled(item.remaining!)} ${textValue(item.line.unit)}`;
+          const lineId = purchaseLineId(item.line);
+          const sku = activeNamedPurchaseSku(item.line, catalogRows)!;
+          const label = `${sku.name.trim()} · ${formatScaled(item.remaining!)} ${textValue(item.line.unit)}`;
           receiveFields.push(field(`quantity_${lineId}`, `Cantidad recibida · ${label}`, "decimal", { help: `Pendiente según las recepciones anteriores: ${formatScaled(item.remaining!)} ${textValue(item.line.unit)}. Vacío para no recibir este renglón.` }));
           receiveFields.push(field(`lotLabel_${lineId}`, `Etiqueta del lote · ${label}`, "text", { help: "Obligatoria si ingresás una cantidad." }));
           receiveFields.push(field(`expiresOn_${lineId}`, `Vencimiento del lote · ${label}`, "date"));
@@ -1239,14 +1357,16 @@ export function OperationalWorkspace(props: Props) {
         buttons.push({ label: "Registrar recepción", onClick: () => runAction("GoodsReceived", "Registrar recepción de mercadería", receiveFields, v => {
           const receivedDate = str(v, "receivedDate");
           const items = receivable.flatMap(({ line }) => {
-            const lineId = idOf(line);
+            const lineId = purchaseLineId(line);
+            const sku = activeNamedPurchaseSku(line, catalogRows);
+            if (!sku) throw new Error("El catálogo vigente ya no identifica todos los productos de esta compra; actualizá la vista antes de recibirla.");
             const rawQuantity = str(v, `quantity_${lineId}`);
             if (!rawQuantity) return [];
             const lotLabel = str(v, `lotLabel_${lineId}`).trim();
-            if (!lotLabel) throw new Error(`Agregá la etiqueta del lote para ${textValue(line.skuId)}.`);
+            if (!lotLabel) throw new Error(`Agregá la etiqueta del lote para ${sku.name.trim()}.`);
             const quantity = quantityForUnit(rawQuantity, line.unit, "Cantidad recibida");
-            const available = remaining.find(candidate => idOf(candidate.line) === lineId)?.remaining;
-            if (available !== null && available !== undefined && scaledQuantity(quantity)! > available) throw new Error(`La cantidad supera lo pendiente para ${textValue(line.skuId)}.`);
+            const available = remaining.find(candidate => purchaseLineId(candidate.line) === lineId)?.remaining;
+            if (available !== null && available !== undefined && scaledQuantity(quantity)! > available) throw new Error(`La cantidad supera lo pendiente para ${sku.name.trim()}.`);
             const expiresOn = str(v, `expiresOn_${lineId}`);
             if (expiresOn && expiresOn < receivedDate) throw new Error("El vencimiento no puede ser anterior a la fecha de recepción.");
             return [{ lineId, quantity, lotLabel, ...(expiresOn ? { expiresOn } : {}) }];
@@ -1349,20 +1469,97 @@ export function OperationalWorkspace(props: Props) {
       };
     }, row, "Los productos conservan su tarifa y escala seleccionadas. Packs, promociones y beneficios requieren versiones aprobadas. Cualquier recargo reemplazado exige un motivo autorizado.") });
     if (pageId === "orders" && ["draft", "preorder"].includes(String(row.commercialState)) && hasCommand(context, "OrderCancelled")) buttons.push({ label: "Cancelar borrador", onClick: () => runAction("OrderCancelled", "Cancelar pedido", fields(field("reason", "Motivo", "textarea", { required: true }), evidenceField()), v => ({ reason: str(v, "reason"), evidence: note(v) }), row) });
+    if (pageId === "orders" && isConfirmedAppSheetInvoice && ["unprepared", "partially_prepared"].includes(String(row.fulfillmentState)) && hasCommand(context, "OrderLinesCancelled")) {
+      const cancellableLines = (Array.isArray(row.lines) ? row.lines as Row[] : []).flatMap((line, index) => {
+        const requested = scaledQuantity(line.requested);
+        const prepared = scaledQuantity(line.prepared ?? "0");
+        const cancelled = scaledQuantity(line.cancelled ?? "0");
+        const lineId = idOf(line);
+        if (!lineId || requested === null || prepared === null || cancelled === null) return [];
+        const remaining = requested - prepared - cancelled;
+        return remaining > 0n ? [{ line, lineId, lineNumber: index + 1, productName: visibleInvoiceLineName(line, catalogRows), remaining }] : [];
+      });
+      const eligibleLines = cancellableLines.filter(candidate => candidate.productName);
+      const hasUnidentifiedCancellableLine = cancellableLines.some(candidate => !candidate.productName);
+      if (eligibleLines.length && !hasUnidentifiedCancellableLine) {
+        const correctionFields = [
+          ...eligibleLines.map(({ line, lineId, lineNumber, productName, remaining }) => {
+            return field(`cancel_${lineId}`, `Cantidad a corregir · renglón ${lineNumber}: ${productName}`, "decimal", { help: `Máximo todavía no preparado: ${formatScaled(remaining)} ${textValue(line.unit)}.` });
+          }),
+          evidenceField("Motivo y evidencia de la corrección"),
+        ];
+        buttons.push({ label: "Corregir cantidades", onClick: () => runAction(
+          "OrderLinesCancelled",
+          "Corregir líneas de factura confirmada",
+          correctionFields,
+          values => {
+            const lines = eligibleLines.flatMap(({ line, lineId, productName, remaining }) => {
+              const raw = str(values, `cancel_${lineId}`);
+              if (!raw) return [];
+              const quantity = quantityForUnit(raw, line.unit, "Cantidad a corregir");
+              const scaled = scaledQuantity(quantity);
+              if (scaled === null || scaled > remaining) throw new Error(`La cantidad para ${productName} supera lo que todavía no se preparó.`);
+              return [{ lineId, quantity }];
+            });
+            if (!lines.length) throw new Error("Ingresá al menos una cantidad a corregir.");
+            return { lines, evidence: note(values) };
+          },
+          row,
+          "Sólo permite cancelar cantidades todavía no preparadas antes del despacho. No cambia cobros ni registra un reembolso; cualquier devolución de dinero es un paso separado.",
+        ) });
+      } else if (hasUnidentifiedCancellableLine) {
+        buttons.push({ label: "Corrección pausada", onClick: () => onNotice("No se puede corregir esta factura hasta identificar con nombre visible todos los productos todavía no preparados. No se aceptan identificadores de producto en lugar del nombre.") });
+      }
+    }
     if (pageId === "orders" && !isAppSheetInvoice && ["draft", "preorder"].includes(String(row.commercialState)) && Number(row.quoteVersion) > 0 && hasCommand(context, "OrderConfirmed")) buttons.push({ label: "Confirmar pedido", onClick: () => runAction("OrderConfirmed", "Confirmar cotización aceptada", fields(field("quoteVersion", "Versión cotizada", "integer", { required: true, defaultValue: String(row.quoteVersion) }), evidenceField("Aceptación registrada")), v => ({ quoteVersion: Number.parseInt(str(v, "quoteVersion"), 10), acceptance: note(v) }), row, "La confirmación reserva stock y exige permiso operativo vigente del socio." ) });
     if (pageId === "orders" && row.commercialState === "confirmed" && ["unprepared", "partially_prepared"].includes(String(row.fulfillmentState)) && hasCommand(context, "OrderPrepared")) buttons.push({ label: "Preparar por lote", onClick: () => {
       void apiGet<Row>(`/api/operations/orders/${encodeURIComponent(id)}`).then(detail => {
-        const reservations = rowsOf(detail, "reservations").flatMap(reservation => {
-          const balance = stockBalanceRows.find(balance => balance.id === reservation.balanceId);
-          const line = (Array.isArray(row.lines) ? row.lines as Row[] : []).find(line => line.id === reservation.lineId);
+        const detailOrder = objectValue(recordValue(detail, "order"));
+        const detailLines = Array.isArray(detailOrder.lines) ? detailOrder.lines.filter((line): line is Row => Boolean(line) && typeof line === "object") : [];
+        const lineById = new Map(detailLines.map(line => [idOf(line), line]));
+        const visibleReservations = rowsOf(detail, "reservations");
+        const reservationCandidates: Array<{ balance: Row; line: Row; productName: string; remaining: bigint }> = [];
+        let unidentifiedPendingReservation = false;
+        for (const reservation of visibleReservations) {
           const quantity = scaledQuantity(reservation.quantity), consumed = scaledQuantity(reservation.consumed);
-          return balance && line && quantity !== null && consumed !== null && quantity > consumed ? [{ reservation, balance, line, remaining: quantity - consumed }] : [];
-        });
-        if (!reservations.length) { onNotice("No hay reservas pendientes visibles para preparar. Actualizá stock y el pedido."); return; }
+          if (quantity === null || consumed === null || quantity < 0n || consumed < 0n || consumed > quantity) {
+            unidentifiedPendingReservation = true;
+            break;
+          }
+          if (quantity === consumed) continue;
+
+          const lineId = textValue(reservation.lineId, "").trim();
+          const line = lineById.get(lineId);
+          const balance = objectValue(reservation.balance);
+          const reservationBalanceId = textValue(reservation.balanceId, "").trim();
+          const balanceId = idOf(balance);
+          const balanceSkuId = textValue(balance.skuId, "").trim();
+          const balanceUnit = textValue(balance.unit, "").trim();
+          const lotId = textValue(balance.lotId, "").trim();
+          const lotLabel = textValue(balance.lotLabel, "").trim();
+          const lineSkuId = textValue(line?.skuId, "").trim();
+          const lineUnit = textValue(line?.unit, "").trim();
+          const metadataMatchesLine = Boolean(line && lineId && reservationBalanceId && balanceId === reservationBalanceId
+            && balanceSkuId && balanceSkuId === lineSkuId && balanceUnit && balanceUnit === lineUnit && lotId && lotLabel);
+          const productName = line
+            ? visibleInvoiceLineName(line, catalogRows) || (metadataMatchesLine ? textValue(balance.skuName, "").trim() : "")
+            : "";
+          if (!metadataMatchesLine || !productName) {
+            unidentifiedPendingReservation = true;
+            break;
+          }
+          reservationCandidates.push({ balance, line: line!, productName, remaining: quantity - consumed });
+        }
+        if (unidentifiedPendingReservation) {
+          onNotice("La preparación queda pausada: una reserva pendiente no tiene nombre, lote o unidad verificables, o no coincide con el renglón. Actualizá el pedido y el stock antes de continuar.");
+          return;
+        }
+        if (!reservationCandidates.length) { onNotice("No hay reservas pendientes visibles para preparar. Actualizá stock y el pedido."); return; }
+        const reservations = reservationCandidates;
         runAction("OrderPrepared", "Preparar pedido con lote y peso real", [
           ...reservations.flatMap((entry, index) => [
-            field(`requested-${index}`, `Cantidad reservada · ${textValue(entry.balance.skuName)} · ${textValue(entry.balance.lotLabel)}`, "decimal", { defaultValue: formatScaled(entry.remaining), help: `${textValue(entry.line.unit)}. Para una preparación parcial, reducí esta cantidad; cero deja la reserva pendiente.` }),
-            field(`actual-${index}`, `Peso real · ${textValue(entry.balance.skuName)}`, "decimal", { defaultValue: formatScaled(entry.remaining), help: "Incluí el excedente físico. No modifica el importe confirmado." }),
+            field(`requested-${index}`, `Cantidad reservada · ${entry.productName} · ${textValue(entry.balance.lotLabel)}`, "decimal", { defaultValue: formatScaled(entry.remaining), help: `${textValue(entry.line.unit)}. Para una preparación parcial, reducí esta cantidad; cero deja la reserva pendiente.` }),
+            field(`actual-${index}`, `Peso real · ${entry.productName}`, "decimal", { defaultValue: formatScaled(entry.remaining), help: "Incluí el excedente físico. No modifica el importe confirmado." }),
           ]), evidenceField("Evidencia de preparación"),
         ], v => ({ allocations: reservations.flatMap((entry, index) => {
           const requestedQuantity = quantityForUnit(str(v, `requested-${index}`), entry.line.unit, "Cantidad reservada", true);
@@ -1371,18 +1568,25 @@ export function OperationalWorkspace(props: Props) {
         }), evidence: note(v) }), row, "Las reservas indican el lote asignado. El peso real consume existencias y se conserva para la entrega y el costo.");
       }).catch(error => onNotice(error instanceof Error ? error.message : "No pudo cargarse la reserva."));
     } });
-    if (pageId === "orders" && row.channel === "local" && row.commercialState === "confirmed" && ["prepared", "partially_delivered", "dispatched"].includes(String(row.fulfillmentState)) && hasCommand(context, "LocalPickupCompleted")) buttons.push({ label: "Completar retiro", onClick: () => {
-      const lines = (Array.isArray(row.lines) ? row.lines as Row[] : []).filter(line => (scaledQuantity(line.requested) ?? 0n) > (scaledQuantity(line.delivered) ?? 0n) + (scaledQuantity(line.cancelled) ?? 0n));
-      runAction("LocalPickupCompleted", "Registrar retiro y cantidades físicas", [
-        ...lines.flatMap((line, index) => {
-          const sku = catalogRows.find(sku => sku.id === line.skuId), remaining = (scaledQuantity(line.requested) ?? 0n) - (scaledQuantity(line.delivered) ?? 0n) - (scaledQuantity(line.cancelled) ?? 0n);
-          return [field(`quantity-${index}`, `Cantidad entregada · ${labelOf(sku ?? line, ["name", "skuId"])}`, "decimal", { defaultValue: formatScaled(remaining) }), field(`actual-${index}`, `Cantidad física · ${labelOf(sku ?? line, ["name", "skuId"])}`, "decimal", { required: true, help: "Registrá el peso que efectivamente retira el socio, incluido el excedente preparado." })];
-        }), evidenceField("Evidencia del retiro"),
-      ], v => ({ lines: lines.flatMap((line, index) => {
-        const quantity = quantityForUnit(str(v, `quantity-${index}`), line.unit, "Cantidad entregada", true);
-        return scaledQuantity(quantity) === 0n ? [] : [{ lineId: idOf(line), quantity, actualQuantity: quantityForUnit(str(v, `actual-${index}`), line.unit, "Cantidad física") }];
-      }), evidence: note(v) }), row);
-    } });
+    if (pageId === "orders" && row.channel === "local" && row.commercialState === "confirmed" && ["prepared", "partially_delivered", "dispatched"].includes(String(row.fulfillmentState)) && hasCommand(context, "LocalPickupCompleted")) {
+      const lines = (Array.isArray(row.lines) ? row.lines as Row[] : []).flatMap((line, index) => {
+        const remaining = (scaledQuantity(line.requested) ?? 0n) - (scaledQuantity(line.delivered) ?? 0n) - (scaledQuantity(line.cancelled) ?? 0n);
+        const productName = visibleInvoiceLineName(line, catalogRows);
+        return remaining > 0n ? [{ line, index, remaining, productName }] : [];
+      });
+      if (lines.length && lines.every(line => line.productName)) buttons.push({ label: "Completar retiro", onClick: () => {
+        runAction("LocalPickupCompleted", "Registrar retiro y cantidades físicas", [
+          ...lines.flatMap(({ line, index, remaining, productName }) => [
+            field(`quantity-${index}`, `Cantidad entregada · renglón ${index + 1}: ${productName}`, "decimal", { defaultValue: formatScaled(remaining) }),
+            field(`actual-${index}`, `Cantidad física · renglón ${index + 1}: ${productName}`, "decimal", { required: true, help: "Registrá el peso que efectivamente retira el socio, incluido el excedente preparado." }),
+          ]), evidenceField("Evidencia del retiro"),
+        ], v => ({ lines: lines.flatMap(({ line, index }) => {
+          const quantity = quantityForUnit(str(v, `quantity-${index}`), line.unit, "Cantidad entregada", true);
+          return scaledQuantity(quantity) === 0n ? [] : [{ lineId: idOf(line), quantity, actualQuantity: quantityForUnit(str(v, `actual-${index}`), line.unit, "Cantidad física") }];
+        }), evidence: note(v) }), row);
+      } });
+      else if (lines.length) buttons.push({ label: "Retiro pausado", onClick: () => onNotice("No se puede registrar el retiro hasta identificar con nombre visible todos los productos pendientes. Cargá las páginas faltantes del catálogo o revisá si algún producto está inactivo.") });
+    }
     const refundBalance = typeof row.verifiedMinor === "string" && typeof row.refundedMinor === "string" && /^\d+$/.test(row.verifiedMinor) && /^\d+$/.test(row.refundedMinor) ? BigInt(row.verifiedMinor) - BigInt(row.refundedMinor) : 0n;
     const refundAccounts = accountRows.filter(account => account.currency === row.currency && typeof account.balanceMinor === "string" && /^-?\d+$/.test(account.balanceMinor));
     if (pageId === "orders" && ["confirmed", "cancelled"].includes(String(row.commercialState)) && refundBalance > 0n && refundAccounts.length > 0 && hasCommand(context, "OrderRefunded")) buttons.push({ label: "Preparar reintegro", onClick: () => runAction("OrderRefunded", "Asignar cada parte del reintegro", fields(select("accountId", "Cuenta conciliada · misma moneda", optionsOf(refundAccounts, ["name", "id"])), field("lines", "Importes por línea · una por renglón: ID de línea | importe", "textarea", { help: "Usá los identificadores mostrados en el detalle del pedido. Dejá afuera entrega y recargos." }), field("delivery", "Parte de entrega", "amount", { defaultValue: "0" }), field("surcharge", "Parte de recargos", "amount", { defaultValue: "0" }), field("reason", "Motivo", "textarea", { required: true }), evidenceField()), v => refundAllocation(v), row, "El total se calcula sumando las líneas, entrega y recargos; no se admite un importe global sin asignación." ) });
@@ -1443,7 +1647,8 @@ export function OperationalWorkspace(props: Props) {
   };
 
   if (query.loading && !query.data && pageId !== "members" && pageId !== "routes") return <div className="ops-page-body"><SectionHeading eyebrow={spec.eyebrow} title={title} /><LoadingState /></div>;
-  if (query.error && !query.data && pageId !== "members" && pageId !== "routes") return <div className="ops-page-body"><SectionHeading eyebrow={spec.eyebrow} title={title} /><ErrorState message={query.error} retry={query.retry} /></div>;
+  const catalogAdminWithoutStockRead = pageId === "catalog" && (hasCapability(context, "stock.adjust") || hasCapability(context, "openings.approve"));
+  if (query.error && !query.data && pageId !== "members" && pageId !== "routes" && !catalogAdminWithoutStockRead) return <div className="ops-page-body"><SectionHeading eyebrow={spec.eyebrow} title={title} /><ErrorState message={query.error} retry={query.retry} /></div>;
 
   const headerActions = <div className="ops-header-actions">
     <button type="button" className="ops-button ops-button-quiet" onClick={onRefresh}>↻ Actualizar</button>
@@ -1463,16 +1668,33 @@ export function OperationalWorkspace(props: Props) {
 
   return <div className="ops-page-body">
     <SectionHeading title={title} detail={pageId === "orders" ? "Productos, cobros y entregas de cada pedido." : pageId === "accounts" ? "Cuentas por moneda. El saldo requiere una apertura conciliada." : undefined} action={headerActions} />
+    {["catalog", "purchases"].includes(pageId) && !context.rehearsal && context.authority.mode !== "active" && <InfoBand tone="warning" title={context.authority.mode === "shadow" ? "Circuito en sombra · habilitación pendiente" : "Autoridad del circuito por confirmar"}><p>El contexto no confirma autoridad activa. El servidor puede rechazar altas y cambios de catálogo, compras, recepciones y otros registros hasta la habilitación correspondiente. Esta pantalla no activa esa autoridad. La apertura inicial usa una regla administrativa separada y todavía requiere producto y ubicación activos, costo y una persona preparadora distinta de quien aprueba.</p></InfoBand>}
     {pageId === "catalog" && <InfoBand title="Stock disponible"><p>El stock disponible descuenta las reservas. Al preparar un pedido, elegí el lote y registrá el peso real.</p></InfoBand>}
     {pageId === "catalog" && <AppSheetCatalogue context={context} refreshKey={refreshKey} runCommand={runCommand} onRefresh={onRefresh} onNotice={onNotice} />}
+    {(["catalog", "purchases"].includes(pageId) && (hasCapability(context, "stock.adjust") || hasCapability(context, "purchases.write"))) && <ManualReferenceData context={context} refreshKey={refreshKey} openAction={openAction} onNotice={onNotice} />}
+    {pageId === "catalog" && <ManualStockTools context={context} refreshKey={refreshKey} openAction={openAction} onNotice={onNotice} />}
     {pageId === "orders" && <PricingReference policies={approvedPolicies} packs={approvedPacks} promotions={approvedPromotions} />}
     {pageId === "purchases" && <><PurchaseJourneyStatus context={context} /><PurchaseReference suppliers={supplierRows} catalog={catalogRows} locations={locationRows} />
       {hasCommand(context, "PurchaseOrderCreated") && !catalogRows.length && <InfoBand tone="info" title="Catálogo no disponible"><p>Para crear una compra, el perfil necesita consultar los productos y sus unidades en Inventario. No se puede registrar una línea escribiendo identificadores.</p></InfoBand>}
-      {hasCommand(context, "PurchaseOrderCreated") && stockReference.data && !supplierRows.length && <InfoBand tone="info" title="Sin proveedores activos"><p>Agregá un proveedor activo desde Inventario antes de iniciar el acuerdo de compra.</p></InfoBand>}
-      {stockReference.error && (hasCommand(context, "GoodsReceived") || hasCommand(context, "PurchaseOrderCreated")) && <InfoBand tone="warning" title="No se pudieron cargar las referencias"><p>Actualizá la sección para volver a consultar proveedores, ubicaciones y custodios disponibles.</p></InfoBand>}
-      {!hasCapability(context, "stock.read") && (hasCommand(context, "GoodsReceived") || hasCommand(context, "PurchaseOrderCreated")) && <InfoBand tone="info" title="Referencias sin consulta para este perfil"><p>Este perfil no puede consultar proveedores y ubicaciones desde Inventario; la captura de compras queda deshabilitada hasta disponer de esas referencias.</p></InfoBand>}
+      {hasCommand(context, "PurchaseOrderCreated") && manualReferenceData.data && !rowsOf(manualReferenceData.data, "suppliers").some(row => row.active === true) && <InfoBand tone="info" title="Sin proveedores activos"><p>Creá o activá un proveedor desde Referencias de compras antes de iniciar el acuerdo.</p></InfoBand>}
+      {hasCommand(context, "PurchaseOrderCreated") && manualReferenceData.error && <InfoBand tone="warning" title="No se pudieron cargar proveedores"><p>La creación de compras queda pausada hasta cargar proveedores activos con nombre visible.</p></InfoBand>}
+      {hasCommand(context, "GoodsReceived") && !locationReferencesReady && <InfoBand tone="warning" title="Recepción pausada: falta una ubicación visible"><p>Para registrar una recepción se necesita una ubicación activa dentro del alcance de este perfil. No se aceptan identificadores escritos a mano. Consultá las referencias o pedí que agreguen la ubicación a tu alcance.</p></InfoBand>}
+      {purchasesBlockedByCatalog.length > 0 && <InfoBand tone="warning" title="Recepción pausada: no se pudieron validar las líneas pendientes"><p>{!needsCatalogChoices
+        ? "Este perfil no puede consultar el catálogo activo. Se necesita stock.read o orders.write para validar los productos antes de recibirlos."
+        : catalogChoices.error
+          ? "No se pudo cargar el catálogo activo; las recepciones quedan pausadas hasta reintentar la consulta."
+          : catalogChoices.loading
+            ? "El catálogo todavía se está cargando o actualizando; las recepciones se habilitan cuando todas las líneas tengan un producto activo, con nombre y unidad coincidente."
+            : !purchaseCatalogReady
+              ? "No hay una respuesta vigente del catálogo. Actualizá la vista y comprobá la consulta antes de recibir."
+              : catalogChoices.hasMore
+                ? "La página cargada no identifica todas las líneas pendientes. Cargá más productos para validar sus nombres y unidades."
+                : "Una línea pendiente no se pudo validar: debe tener cantidad y renglón válidos, además de un producto activo con nombre y unidad coincidentes. Revisá la compra, las recepciones y el catálogo antes de continuar."}</p>
+        {needsCatalogChoices && catalogChoices.hasMore && !catalogChoices.loading && !catalogChoices.error && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={catalogChoices.loadMore}>Cargar más productos para validar líneas pendientes</button>}
+        {needsCatalogChoices && catalogChoices.error && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={catalogChoices.retry}>Reintentar catálogo</button>}
+      </InfoBand>}
     </>}
-    {pageId === "gates" && <InfoBand tone="warning" title="El cambio de sistema requiere revisión"><p>Cada habilitación requiere evidencia y la revisión de dos personas distintas. Registrar estas revisiones no activa el reemplazo del sistema anterior.</p></InfoBand>}
+    {pageId === "gates" && <InfoBand tone="warning" title="Activar autoridad exige una revisión completa"><p>El servidor exige los 14 controles aprobados, cada uno con autor y revisor distintos y activos, además de la habilitación del servidor para operar. La activación requiere evidencia humana explícita y el servidor vuelve a validar esas condiciones al registrar el cambio.</p></InfoBand>}
     {pageId === "accounts" && <InfoBand title="Saldo desconocido hasta una apertura conciliada"><p>Crear o verificar la titularidad no asigna saldo. Efectivo reportado se verifica en caja o custodia; el depósito bancario es una transferencia independiente.</p></InfoBand>}
     {pageId === "collections" && <InfoBand title="Reporte y verificación son pasos separados"><p>Un cobro reportado no modifica una cuenta. Verificá la recepción en caja/custodia para efectivo o en banco para transferencia, Mercado Pago o tarjeta.</p></InfoBand>}
     {pageId === "payables" && <InfoBand title="Devengamiento y clasificación antes del objetivo"><p>Indicá el mes YYYY-MM al que corresponde cada obligación. Un gasto operativo requiere clasificación variable o fija y verificación; si falta cualquiera de esos datos, la contribución frente al objetivo queda desconocida o sin avance.</p>{pendingManagementPayables.length > 0 && <p>{pendingManagementPayables.length} obligaciones variables o gastos operativos visibles siguen pendientes de verificación, período o clasificación.</p>}</InfoBand>}
@@ -1481,7 +1703,25 @@ export function OperationalWorkspace(props: Props) {
     {pageId === "members" && <div className="ops-list-controls"><label className="ops-list-filter"><span>Buscar socio</span><input type="search" value={memberSearch} onChange={event => setMemberSearch(event.target.value)} placeholder="Nombre, correo o teléfono" /></label>{memberSearch && <button type="button" className="ops-button ops-button-quiet" onClick={() => setMemberSearch("")}>Borrar búsqueda</button>}<p className="ops-list-filter-count" role="status">La búsqueda consulta nombre, correo y teléfono de los socios dentro del alcance del perfil.</p></div>}
     {pageId === "access" && profileOptions.length === 0 && hasCommand(context, "AccessGranted") && <InfoBand tone="warning" title="No se pudieron cargar los perfiles vigentes"><p>La lista de perfiles debe venir del servidor para poder conceder acceso. Actualizá Accesos y verificá la respuesta publicada antes de asignar un perfil.</p></InfoBand>}
     {pageId === "access" && <InfoBand title="La certificación del dispositivo requiere una prueba humana"><p>Probá manualmente la persistencia y el reinicio antes de registrar el resultado. La consola sólo guarda la evidencia y no certifica el dispositivo de forma automática.</p></InfoBand>}
-    {pageId === "gates" && audit.error && <InfoBand tone="info" title="Auditoría"><p>El historial general requiere acceso.manage. {audit.error}</p></InfoBand>}
+    {pageId === "gates" && audit.error && <InfoBand tone="info" title="Auditoría"><p>El historial general requiere permisos de gestión de accesos. {audit.error}</p></InfoBand>}
+    {pageId === "gates" && <section className="ops-sheet" aria-label="Activación de autoridad">
+      <SectionHeading eyebrow="Autoridad del circuito" title="Activar autoridad" detail="La acción queda disponible sólo cuando el servidor confirma todos los requisitos vigentes." />
+      {gates.loading && <LoadingState label="Consultando estado de autoridad…" />}
+      {gates.error && <ErrorState message={`No se pudo confirmar el estado vigente de la autoridad. ${gates.error}`} retry={gates.retry} />}
+      {!gates.loading && !gates.error && gates.data && serverAuthorityMode === "active" && <InfoBand title="La autoridad ya figura activa en el servidor"><p>Estado leído desde la respuesta vigente de Habilitación y auditoría. Actualizá la vista para volver a consultar el registro guardado.</p></InfoBand>}
+      {!gates.loading && !gates.error && gates.data && serverAuthorityMode !== "active" && <>
+        <p><StatusTag tone={approvedGateCount === cutoverGateIds.length ? "good" : "warn"}>{approvedGateCount} de {cutoverGateIds.length} controles aprobados</StatusTag></p>
+        {access.loading && <LoadingState label="Comprobando si autores y revisores siguen activos…" />}
+        {access.error && <ErrorState message={`No se pudo comprobar el estado activo de autores y revisores. ${access.error}`} retry={access.retry} />}
+        {!canActivateAuthority && <InfoBand tone="warning" title="Activación pausada"><p>{authorityActivationBlocker ?? "Actualizá el estado de autoridad antes de continuar."}</p></InfoBand>}
+        {canActivateAuthority && <div className="ops-heading-action"><ActionButton onClick={activateAuthority}>Activar autoridad</ActionButton></div>}
+      </>}
+      <InfoBand tone={operationalApprovalConfigured ? "info" : "warning"} title="Habilitación del servidor para escrituras reales">
+        <p>{operationalApprovalConfigured
+          ? "El servidor confirma que está habilitado para operar. Las escrituras reales también requieren que la autoridad quede activa y que cada comando supere sus validaciones."
+          : "El servidor aún no está habilitado para activar autoridad y aceptar escrituras reales. Esta pantalla no cambia esa habilitación."}</p>
+      </InfoBand>
+    </section>}
     {pageId === "gates" && query.data && <ReplacementReadiness context={context} gates={rowsOf(gates.data, "gates")} stale={gates.loading || Boolean(gates.error)} />}
     {pageId === "accounts" && query.data && <AccountSetup context={context} snapshot={query.data} loading={query.loading} snapshotError={query.error} runCommand={runCommand} onRefresh={onRefresh} onNotice={onNotice} />}
     {needsCatalogChoices && catalogChoices.loading && !catalogChoices.data && <LoadingState label="Cargando productos para los selectores…" />}
@@ -1501,8 +1741,8 @@ export function OperationalWorkspace(props: Props) {
     {pageId === "purchases" && query.hasMore && <button type="button" className="ops-button ops-button-quiet" onClick={query.loadMore} disabled={query.loading}>Cargar más compras</button>}
     {pageId === "catalog" && query.hasMore && <button type="button" className="ops-button ops-button-quiet" onClick={query.loadMore} disabled={query.loading}>Cargar más productos</button>}
     {pageId === "payables" && payablePurchases.hasMore && <button type="button" className="ops-button ops-button-quiet" onClick={payablePurchases.loadMore} disabled={payablePurchases.loading || Boolean(payablePurchases.error)}>Cargar más compras para vincular</button>}
-    {needsCatalogChoices && catalogChoices.hasMore && <button type="button" className="ops-button ops-button-quiet" onClick={catalogChoices.loadMore} disabled={catalogChoices.loading}>Cargar más productos para selectores</button>}
-    {pageId === "catalog" && stockReference.error && <InfoBand tone="warning" title="Referencias de stock sin lista disponible"><p>Las cantidades siguen visibles si el catálogo está dentro del alcance, pero los destinos de traslado deberán identificarse por sus códigos.</p></InfoBand>}
+    {needsCatalogChoices && catalogChoices.hasMore && !(pageId === "purchases" && purchasesBlockedByCatalog.length > 0) && <button type="button" className="ops-button ops-button-quiet" onClick={catalogChoices.loadMore} disabled={catalogChoices.loading}>Cargar más productos para selectores</button>}
+    {pageId === "catalog" && hasCommand(context, "StockMoved") && stockBalanceRows.length > 0 && !movementReferencesReady && <InfoBand tone="warning" title="Traslados pausados: faltan referencias visibles"><p>Para trasladar stock se necesitan ubicaciones y personas custodio activas dentro del alcance. La acción queda oculta hasta que cargue la lista completa; no se aceptan códigos manuales.</p></InfoBand>}
     {pageId === "catalog" && stockCounts.loading && <section className="ops-sheet"><LoadingState label="Cargando conteos de stock…" /></section>}
     {pageId === "catalog" && stockCounts.error && <section className="ops-sheet"><SectionHeading eyebrow="Inventario" title="Conteos de stock" /><ErrorState message={stockCounts.error} retry={stockCounts.retry} /></section>}
     {pageId === "catalog" && stockCountRows.length > 0 && <ListTable title={`Conteos de stock · ${stockCountRows.length}`} rows={stockCountRows} columns={[["balanceLabel", "Producto · lote · ubicación"], ["recordedQuantity", "Registrado"], ["countedQuantity", "Contado"], ["unit", "Unidad"], ["countedByLabel", "Contó"], ["status", "Estado"]]} renderActions={row => {
@@ -1885,20 +2125,24 @@ function OrderReturnInspector({ orderId, context, refreshKey, catalog, openActio
     const available = returnAvailability(allocation);
     return available !== null && (available.customer > 0n || available.undelivered > 0n);
   });
+  const namedEligibleAllocations = eligibleAllocations.filter(allocation => {
+    const line = lineById.get(textValue(allocation.lineId, ""));
+    return Boolean(line && visibleInvoiceLineName(line, catalog));
+  });
+  const unidentifiedEligibleAllocationCount = eligibleAllocations.length - namedEligibleAllocations.length;
   const detailVersion = recordValue(detail.data, "version");
   const version = typeof detailVersion === "number" ? detailVersion : Number.NaN;
   const fieldsIn: ActionField[] = [];
-  for (const allocation of eligibleAllocations) {
+  for (const allocation of namedEligibleAllocations) {
     const allocationId = idOf(allocation);
     const line = lineById.get(textValue(allocation.lineId, ""));
-    const sku = catalog.find(item => idOf(item) === line?.skuId);
     const available = returnAvailability(allocation)!;
     const originOptions = [
       ...(available.customer > 0n ? [{ value: "customer", label: `Devuelto por cliente · hasta ${formatScaled(available.customer)} ${textValue(line?.unit)}` }] : []),
       ...(available.undelivered > 0n ? [{ value: "undelivered", label: `Preparado y no entregado · hasta ${formatScaled(available.undelivered)} ${textValue(line?.unit)}` }] : []),
     ];
     const maxAvailable = available.customer > available.undelivered ? available.customer : available.undelivered;
-    const label = `${textValue(sku?.name, `SKU ${textValue(line?.skuId)}`)} · lote ${textValue(allocation.lotId, "sin lote")}`;
+    const label = `${visibleInvoiceLineName(line ?? {}, catalog)} · lote ${textValue(allocation.lotId, "sin lote")}`;
     fieldsIn.push(field(`quantity_${allocationId}`, `Cantidad a inspeccionar · ${label}`, "decimal", { help: `Línea ${textValue(allocation.lineId)} · preparación ${allocationId} · máximo posible ${formatScaled(maxAvailable)} ${textValue(line?.unit)}. El origen elegido determina el límite exacto.` }));
     fieldsIn.push(select(`origin_${allocationId}`, `Origen · ${label}`, originOptions, false));
     fieldsIn.push(select(`disposition_${allocationId}`, `Destino · ${label}`, [{ value: "restock", label: "Reingresar al stock" }, { value: "merma", label: "Registrar como merma" }], false));
@@ -1915,7 +2159,7 @@ function OrderReturnInspector({ orderId, context, refreshKey, catalog, openActio
       return;
     }
     openAction(action("OrderReturnInspected", "Inspeccionar devolución física", fieldsIn, values => {
-      const returns = eligibleAllocations.flatMap(allocation => {
+      const returns = namedEligibleAllocations.flatMap(allocation => {
         const allocationId = idOf(allocation);
         const rawQuantity = str(values, `quantity_${allocationId}`);
         if (!rawQuantity) return [];
@@ -1942,7 +2186,7 @@ function OrderReturnInspector({ orderId, context, refreshKey, catalog, openActio
   return <section className="ops-sheet ops-return-inspector"><SectionHeading eyebrow="Devoluciones" title="Inspección física" detail="Elegí la preparación, el origen y el destino de cada cantidad devuelta." action={<button type="button" className="ops-button ops-button-quiet" onClick={onClose}>Cerrar</button>} />
     {detail.loading && <p className="ops-inline-status" role="status">Actualizando preparación; los últimos datos confirmados siguen visibles y la inspección está pausada.</p>}
     {detail.error && <ErrorState message={`No se pudo actualizar la preparación. ${detail.error}`} retry={detail.retry} />}
-    {eligibleAllocations.length ? <><p>Las cantidades se limitan a lo entregado al cliente o preparado y aún no entregado. La inspección requiere revisión independiente de quien llevó el pedido.</p><div className="ops-return-allocations">{allocations.map(allocation => { const line = lineById.get(textValue(allocation.lineId, "")); const sku = catalog.find(item => idOf(item) === line?.skuId); const available = returnAvailability(allocation); return <article key={idOf(allocation)}><strong>{textValue(sku?.name, `SKU ${textValue(line?.skuId)}`)} · lote {textValue(allocation.lotId, "sin lote")}</strong><span>{textValue(line?.unit)} · cliente {available ? formatScaled(available.customer) : "—"} · no entregado {available ? formatScaled(available.undelivered) : "—"}</span><code>{textValue(allocation.lineId)} · preparación {idOf(allocation)}</code></article>; })}</div><button type="button" className="ops-button ops-button-primary" onClick={submit} disabled={detail.loading || Boolean(detail.error)}>Completar inspección</button></>
+    {eligibleAllocations.length ? <><p>Las cantidades se limitan a lo entregado al cliente o preparado y aún no entregado. La inspección requiere revisión independiente de quien llevó el pedido.</p>{unidentifiedEligibleAllocationCount > 0 && <InfoBand tone="warning" title="Hay preparaciones sin producto identificable"><p>Las cantidades cuyo producto no tiene un nombre visible quedan excluidas. Actualizá el catálogo o reactivá el nombre antes de inspeccionar esas devoluciones.</p></InfoBand>}<div className="ops-return-allocations">{allocations.map(allocation => { const line = lineById.get(textValue(allocation.lineId, "")); const available = returnAvailability(allocation); return <article key={idOf(allocation)}><strong>{visibleInvoiceLineName(line ?? {}, catalog) || "Producto sin nombre disponible"} · lote {textValue(allocation.lotId, "sin lote")}</strong><span>{textValue(line?.unit)} · cliente {available ? formatScaled(available.customer) : "—"} · no entregado {available ? formatScaled(available.undelivered) : "—"}</span><code>{textValue(allocation.lineId)} · preparación {idOf(allocation)}</code></article>; })}</div>{namedEligibleAllocations.length > 0 ? <button type="button" className="ops-button ops-button-primary" onClick={submit} disabled={detail.loading || Boolean(detail.error)}>Completar inspección</button> : <InfoBand tone="warning" title="Inspección pausada"><p>No se puede registrar una inspección hasta identificar con nombre visible el producto de cada preparación elegible.</p></InfoBand>}</>
       : <EmptyState title="No hay cantidades disponibles para inspeccionar" detail={allocations.length ? "Las preparaciones visibles ya no tienen cantidades entregadas o no entregadas elegibles, o la consulta no devolvió los acumulados requeridos." : "El pedido todavía no tiene asignaciones despachadas o entregadas disponibles."} />}
   </section>;
 }

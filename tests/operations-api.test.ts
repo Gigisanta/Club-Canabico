@@ -47,6 +47,7 @@ test("canonical financial commands preserve cash custody, debt and global replay
    for(const [id,active] of [["cutover-author",true],["cutover-reviewer",true],["cutover-inactive-author",false],["cutover-activator",true]] as const)
     await db.user.create({data:{id,name:id,email:`${id}@test.local`,password:passphrase,role:"owner",active}});
    for(const id of ["cutover-author","cutover-reviewer","cutover-activator"])await login(id);
+   assert.notEqual(process.env.CLUB_OPERATIONS_APPROVED,"true","the API fixture must exercise the unapproved operational state");
    const assertNoCommandEffects=async(request:CommandEnvelope)=>{
     assert.equal(await db.commandReceipt.findUnique({where:{requestId:request.requestId}}),null);
     assert.equal(await db.operationAudit.count({where:{requestId:request.requestId}}),0);
@@ -67,6 +68,30 @@ test("canonical financial commands preserve cash custody, debt and global replay
    const approvals=await db.cutoverGate.findMany({where:{id:{in:[...cutoverGateIds]}}});
    assert.equal(approvals.length,cutoverGateIds.length);
    assert.ok(approvals.every(gate=>gate.status==="approved"&&gate.approvedBy==="cutover-author"&&gate.reviewedBy==="cutover-reviewer"));
+
+   const approvalFlagBefore=process.env.CLUB_OPERATIONS_APPROVED;
+   const unconfiguredActivation=e("operations","AuthorityActivated",{evidence:{note:"synthetic unapproved activation regression"}});
+   const unconfiguredActivationResponse=await call("/operations/commands","cutover-activator",unconfiguredActivation);
+   const unconfiguredActivationBody=await unconfiguredActivationResponse.json();
+   assert.equal(unconfiguredActivationResponse.status,423);
+   assert.equal(unconfiguredActivationBody.code,"CLUB_OPERATIONS_APPROVAL_REQUIRED");
+   await assertNoCommandEffects(unconfiguredActivation);
+   assert.equal(await db.operationAuthority.findUnique({where:{id:"operations"}}),null);
+   assert.deepEqual(await db.cutoverGate.findMany({where:{id:{in:[...cutoverGateIds]}},orderBy:{id:"asc"}}),
+    approvals.slice().sort((left,right)=>left.id.localeCompare(right.id)),"rejected activation preserves all 14 approved gates");
+   assert.equal(process.env.CLUB_OPERATIONS_APPROVED,approvalFlagBefore,"the command rejection does not mutate process configuration");
+
+   const ownerContextResponse=await call("/operations/context","owner");
+   assert.equal(ownerContextResponse.status,200);
+   const ownerContext=await ownerContextResponse.json();
+   assert.equal(ownerContext.canManageDecisionInputs,true);
+   assert.equal(ownerContext.operationalApprovalConfigured,false);
+   const financeContextResponse=await call("/operations/context","finance");
+   assert.equal(financeContextResponse.status,200);
+   assert.equal((await financeContextResponse.json()).canManageDecisionInputs,true,"admin roles match the financial attestation manager rule");
+   const driverContextResponse=await call("/operations/context","driver");
+   assert.equal(driverContextResponse.status,200);
+   assert.equal((await driverContextResponse.json()).canManageDecisionInputs,false,"non-manager roles cannot declare decision-input coverage");
 
    const assertActivationRejected=async()=>{
     const request=e("operations","AuthorityActivated",{evidence:{note:"synthetic stale-approval regression"}});

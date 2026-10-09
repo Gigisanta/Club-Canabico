@@ -3,6 +3,20 @@ import { profileCapabilities, type Capability } from "../../shared/operations/co
 
 type AccessSubject = Pick<User, "id" | "role">;
 type CapabilityGrant = Pick<OperationAccess, "enabled" | "capabilities"> | null;
+type DecisionInputGrant = Pick<OperationAccess, "enabled" | "profile" | "scope"> | null;
+
+export function canManageDecisionInputAttestations(
+  user: Pick<AccessSubject, "role">,
+  grant: DecisionInputGrant,
+): boolean {
+  if (user.role !== "owner" && user.role !== "admin") return false;
+  if (!grant) return true;
+  if (!grant.enabled || grant.profile === "clinical" || grant.profile === "driver") return false;
+
+  const scope = grant.scope;
+  if (typeof scope !== "object" || scope === null || Array.isArray(scope)) return false;
+  return Object.keys(scope).length === 0;
+}
 
 export function capabilitiesFromGrant(
   user: Pick<AccessSubject, "role">,
@@ -17,6 +31,7 @@ export function buildOperationAccessSnapshot(user: AccessSubject, grant: Operati
   return {
     profile: grant?.profile ?? user.role,
     isOwner: user.role === "owner",
+    canManageDecisionInputs: canManageDecisionInputAttestations(user, grant),
     capabilities: capabilitiesFromGrant(user, grant),
   };
 }

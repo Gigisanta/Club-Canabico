@@ -1,9 +1,12 @@
 import { Router } from "express";
 import { z } from "zod";
 import { db } from "../db.js";
+import { financialReportCurrencies, type FinancialReportCurrency } from "../../shared/operations/financial-report.js";
 import type { Capability } from "../../shared/operations/contracts.js";
 import { capabilities, objectScope, OperationError, requireCapability, wire } from "./core.js";
-import { queryOperationsReport, supportsReportScope, validateReportScope } from "./report-queries.js";
+import { queryOperationsReport, reportTodayCivilDate, supportsReportScope, validateReportScope, type ReportScope } from "./report-queries.js";
+import { queryFinancialStatementsReport } from "./financial-report.js";
+import { parseFinancialSourceReportParams, queryFinancialSourceReconciliationReport } from "./financial-source-report.js";
 
 export const reportAreaIds = [
   "sales-revenue",
@@ -498,6 +501,26 @@ const reportParamsSchema = z.strictObject({
   to: z.iso.date().optional(),
 });
 
+const financialStatementParamsSchema = z.strictObject({
+  from: z.iso.date().optional(),
+  to: z.iso.date().optional(),
+  currency: z.enum(financialReportCurrencies).optional(),
+});
+
+export function parseFinancialStatementParams(value: unknown, today = reportTodayCivilDate()): {
+  from: string;
+  to: string;
+  cutoffDate: string;
+  currency: FinancialReportCurrency;
+} {
+  const parsed = financialStatementParamsSchema.safeParse(value);
+  if (!parsed.success) throw new OperationError(400, "INVALID_REPORT_QUERY", "Indicá un período y una moneda válidos");
+  const to = parsed.data.to ?? today;
+  const from = parsed.data.from ?? `${to.slice(0, 7)}-01`;
+  if (to > today || from > to) throw new OperationError(400, "INVALID_REPORT_QUERY", "El período debe estar en orden y no puede terminar en una fecha futura");
+  return { from, to, cutoffDate: today, currency: parsed.data.currency ?? "ARS" };
+}
+
 export function parseReportParams(value: unknown, requireArea = true): { area?: ReportAreaId; from?: string; to?: string } {
   const parsed = reportParamsSchema.safeParse(value);
   if (!parsed.success) {
@@ -583,4 +606,31 @@ operationsReports.get("/summary", async (req, res) => {
   const { definition, scope } = await authorizeReport(req, area);
   const summary = await queryOperationsReport(area, { from: params.from, to: params.to }, scope);
   res.json(wire({ definition: { id: definition.id, title: definition.title }, summary }));
+});
+
+operationsReports.get("/financial-statements", async (req, res) => {
+  await requireCapability(db, req.user, "reports.read");
+  await requireCapability(db, req.user, "finance.read");
+  const params = parseFinancialStatementParams(req.query);
+  const scope = await objectScope(db, req.user);
+  validateReportScope(scope);
+  const sources = ["sales-revenue", "product-contribution", "operating-expenses", "cash-ledger", "obligations-13-weeks"] as const;
+  if (sources.some(area => !supportsReportScope(area, scope))) {
+    throw new OperationError(403, "REPORT_SCOPE_UNSUPPORTED", "El informe financiero consolidado requiere alcance completo en todas sus fuentes");
+  }
+  res.json(wire(await queryFinancialStatementsReport(params, scope)));
+});
+
+operationsReports.get("/financial-source-reconciliation", async (req, res) => {
+  await requireCapability(db, req.user, "reports.read");
+  await requireCapability(db, req.user, "finance.read");
+  await requireCapability(db, req.user, "imports.review");
+  const today = reportTodayCivilDate();
+  const params = parseFinancialSourceReportParams(req.query, today);
+  const scope = await objectScope(db, req.user);
+  validateReportScope(scope);
+  if (Object.values(scope).some(value => value !== undefined)) {
+    throw new OperationError(403, "REPORT_SCOPE_UNSUPPORTED", "El reporte de fuentes financieras requiere alcance completo; no puede filtrar objetos individuales");
+  }
+  res.json(wire(await queryFinancialSourceReconciliationReport(params.cutoffDate, today)));
 });

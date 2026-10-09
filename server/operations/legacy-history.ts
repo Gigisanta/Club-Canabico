@@ -6,6 +6,7 @@ import { db } from "../db.js";
 import { registerCommand, requireCapability, objectId, evidence, json, wire, OperationError, type Tx } from "./core.js";
 import { legacyPayloadHash } from "./legacy-upload-contract.js";
 import { isCredentialBearingHeader } from "./legacy-reader.js";
+import { assertLegacyHistorySourceAllowed } from "./legacy-source-policy.js";
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const state = z.enum(["known", "absent", "invalid", "not-applicable"]);
@@ -63,7 +64,10 @@ export function projectHistoricalRecord(record: LegacySourceRecord, mapping: Map
 }
 async function approvedSource(tx: Tx, snapshotId: string, actorId: string, fileHash: string) {
   const snapshot = await tx.legacyImportSnapshot.findUnique({ where: { id: snapshotId }, include: { upload: true } });
-  if (!snapshot || snapshot.status !== "reviewed" || !snapshot.reviewedBy || snapshot.reviewedBy === snapshot.createdBy || snapshot.upload && !snapshot.upload.completedAt)
+  if (!snapshot)
+    throw new OperationError(423, "HISTORY_SOURCE_PENDING", "La historia requiere un lote completo y revisado de forma independiente.");
+  assertLegacyHistorySourceAllowed(snapshot.sourceSystem);
+  if (snapshot.status !== "reviewed" || !snapshot.reviewedBy || snapshot.reviewedBy === snapshot.createdBy || snapshot.upload && !snapshot.upload.completedAt)
     throw new OperationError(423, "HISTORY_SOURCE_PENDING", "La historia requiere un lote completo y revisado de forma independiente.");
   if (snapshot.createdBy === actorId) throw new OperationError(403, "INDEPENDENT_REVIEW_REQUIRED", "El importador no puede publicar su propia fuente.");
   if (snapshot.fileHash !== fileHash) throw new OperationError(409, "IMPORT_CONTENT_CHANGED", "Cambió la identidad del archivo.");
@@ -150,7 +154,9 @@ legacyHistoryRoutes.get("/publications", async (req, res) => { await requireCapa
 legacyHistoryRoutes.get("/publication-preview", async (req, res) => {
   await requireCapability(db, req.user, "imports.review");
   const snapshotId = objectId.parse(req.query.snapshotId), snapshot = await db.legacyImportSnapshot.findUnique({ where: { id: snapshotId }, select: { sourceSystem: true, fileHash: true, status: true } });
-  if (!snapshot || snapshot.status !== "reviewed") throw new OperationError(423, "HISTORY_SOURCE_PENDING", "La fuente requiere una revisión independiente.");
+  if (!snapshot) throw new OperationError(423, "HISTORY_SOURCE_PENDING", "La fuente requiere una revisión independiente.");
+  assertLegacyHistorySourceAllowed(snapshot.sourceSystem);
+  if (snapshot.status !== "reviewed") throw new OperationError(423, "HISTORY_SOURCE_PENDING", "La fuente requiere una revisión independiente.");
   res.json(wire({ snapshotId, fileHash: snapshot.fileHash, replacement: await replacementEvidence(db, snapshot.sourceSystem, snapshotId) }));
 });
 legacyHistoryRoutes.get("/projection-status", async (req, res) => {
@@ -158,7 +164,9 @@ legacyHistoryRoutes.get("/projection-status", async (req, res) => {
   const query = z.strictObject({ snapshotId: objectId, mappingId: objectId.optional() }).parse(req.query);
   const result = await db.$transaction(async tx => {
     const snapshot = await tx.legacyImportSnapshot.findUnique({ where: { id: query.snapshotId }, include: { upload: { select: { completedAt: true } } } });
-    if (!snapshot || snapshot.status !== "reviewed" || snapshot.upload && !snapshot.upload.completedAt)
+    if (!snapshot) throw new OperationError(423, "HISTORY_SOURCE_PENDING", "La fuente requiere una revisión independiente.");
+    assertLegacyHistorySourceAllowed(snapshot.sourceSystem);
+    if (snapshot.status !== "reviewed" || snapshot.upload && !snapshot.upload.completedAt)
       throw new OperationError(423, "HISTORY_SOURCE_PENDING", "La fuente requiere una revisión independiente.");
     if (query.mappingId) await approvedMapping(tx, query.mappingId);
     const [headers, count, version] = await Promise.all([

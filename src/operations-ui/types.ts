@@ -6,6 +6,8 @@ export interface OperationsContext {
   userId: string;
   profile: string;
   isOwner?: boolean;
+  canManageDecisionInputs: boolean;
+  operationalApprovalConfigured: boolean;
   capabilities: string[];
   rehearsal: boolean;
   authority: {

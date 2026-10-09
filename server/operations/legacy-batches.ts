@@ -7,6 +7,7 @@ import { executeCommand, registerCommand, requireCapability, OperationError, env
 import { sourceRecordSchema } from "./legacy-source-contract.js";
 import { containsRecognizableCredential } from "./legacy-reader.js";
 import { LEGACY_CHUNK_BYTES, LEGACY_CHUNK_RECORDS, LEGACY_UPLOAD_BYTES, legacyPayloadHash } from "./legacy-upload-contract.js";
+import { assertLegacyHistorySourceAllowed } from "./legacy-source-policy.js";
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const id = z.string().min(1).max(100);
@@ -36,6 +37,7 @@ async function ownedUpload(ctx: CommandContext) {
   const snapshot = await ctx.tx.legacyImportSnapshot.findUnique({ where: { id: ctx.envelope.targetId }, include: { upload: true } });
   if (!snapshot?.upload) throw new OperationError(404, "IMPORT_BATCH_NOT_FOUND", "Lote reanudable no encontrado.");
   if (snapshot.createdBy !== ctx.actor.id) throw new OperationError(403, "IMPORT_ACTOR_MISMATCH", "La carga pertenece a otro importador.");
+  assertLegacyHistorySourceAllowed(snapshot.sourceSystem);
   return snapshot;
 }
 async function quarantineOnAuthorityChange(ctx: CommandContext, snapshot: Awaited<ReturnType<typeof ownedUpload>>) {
@@ -53,6 +55,7 @@ registerCommand("LegacyUploadBegun", {
   kind: "legacyImport", capability: "imports.write", create: true, administrative: true, internal: true, schema: beginSchema,
   execute: async ctx => {
     const data = beginSchema.parse(ctx.envelope.data);
+    assertLegacyHistorySourceAllowed(data.sourceSystem);
     const existing = await ctx.tx.legacyImportSnapshot.findUnique({ where: { sourceSystem_fileHash_importerVersion: { sourceSystem: data.sourceSystem, fileHash: data.fileHash, importerVersion: data.importerVersion } } });
     if (existing) throw new OperationError(409, "IMPORT_ALREADY_STAGED", "Esta fuente y versión ya tienen un lote; retomá su identidad original.", { snapshotId: existing.id });
     const previous = await ctx.tx.legacyImportSnapshot.findFirst({ where: { sourceSystem: data.sourceSystem }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], select: { id: true, fileHash: true } });

@@ -3,7 +3,9 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { existsSync } from "node:fs";
+import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { createServer, isIP } from "node:net";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import dotenv from "dotenv";
@@ -229,6 +231,7 @@ async function main() {
   let adminClient;
   let schema;
   let schemaCreated = false;
+  let privateObjectRoot;
   ephemeralDemoPassword = randomBytes(32).toString("base64url");
   try {
     if (process.argv.slice(2).some(file => !/^tests\/browser\/[a-zA-Z0-9_-]+\.spec\.ts$/.test(file) || !existsSync(resolve(projectRoot, file))))
@@ -259,6 +262,11 @@ async function main() {
     childEnv.JWT_SECRET = randomBytes(48).toString("hex");
     childEnv.COOKIE_SECURE = "false";
     childEnv.PUBLIC_SITE_APPROVED = "false";
+    privateObjectRoot = await mkdtemp(resolve(tmpdir(), "bombo-e2e-private-"));
+    await chmod(privateObjectRoot, 0o700);
+    childEnv.PRIVATE_OBJECT_ROOT = privateObjectRoot;
+    childEnv.PRIVATE_OBJECT_PROVIDER = "local";
+    childEnv.PRIVATE_S3_BUCKET = "";
 
     const prismaCLI = resolve(projectRoot, "node_modules/prisma/build/index.js");
     if (!existsSync(prismaCLI)) throw new Error("No se encontró Prisma instalado en node_modules.");
@@ -324,6 +332,14 @@ async function main() {
       } catch {
         exitCode = 1;
         console.error("[e2e] No se pudo cerrar la conexión local de pruebas.");
+      }
+    }
+    if (privateObjectRoot) {
+      try {
+        await rm(privateObjectRoot, { recursive: true, force: true });
+      } catch {
+        exitCode = 1;
+        console.error("[e2e] No se pudo eliminar la raíz privada temporal de objetos.");
       }
     }
   }

@@ -10,6 +10,7 @@ import { UpcomingPaymentsSection } from "./UpcomingPayments";
 import { cashCategories as categories } from "./cash-categories";
 import type { BreakEvenResult } from "../shared/break-even";
 import type { UpcomingPaymentsReport } from "../shared/upcoming-payments";
+import { FinancialStatements } from "./operations-ui/FinancialStatements";
 import "./panorama.css";
 import "./finance.css";
 
@@ -17,7 +18,7 @@ const scenarios = ["base", "cautious", "growth"] as const;
 const scenarioNames = { base: "Base", cautious: "Prudente", growth: "Crecimiento" };
 const incomeCategories = ["opening_balance", "capital_contribution", "delivery_receipt", "other_income", "adjustment"];
 const outflowCategories = ["operating_expense", "stock_purchase", "local_investment", "owner_draw", "other_outflow", "adjustment"];
-type View = "overview" | "activity" | "forecast";
+type View = "reports" | "overview" | "activity" | "forecast";
 type Account = "all" | "cash" | "bank";
 const accountNames: Record<Account, string> = { all: "Todas", cash: "Efectivo", bank: "Banco" };
 type CheckState = "recorded" | "review" | "pending" | "empty";
@@ -31,23 +32,28 @@ function StateTag({ state }: { state: CheckState }) {
 export default function Finance() {
   const { state, money, reload } = useClub();
   const navigate = useNavigate();
+  const location = useLocation();
   const [mode, setMode] = useState<"entry" | "plan" | null>(null);
   const [direction, setDirection] = useState<"income" | "outflow">("outflow");
   const [category, setCategory] = useState("operating_expense");
   const [entryKey, setEntryKey] = useState(() => crypto.randomUUID());
   const [scenario, setScenario] = useState<(typeof scenarios)[number]>("base");
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
   const requestedView = params.get("view");
-  const view: View = requestedView === "activity" || requestedView === "forecast" ? requestedView : "overview";
+  const defaultView: View = location.hash === "#proximos-pagos" ? "overview" : "reports";
+  const view: View = requestedView === "activity" || requestedView === "forecast"
+    ? requestedView
+    : requestedView === "summary" || requestedView === "overview" ? "overview" : defaultView;
   const requestedAccount = params.get("account");
   const account: Account = requestedAccount === "cash" || requestedAccount === "bank" ? requestedAccount : "all";
   function setView(next: View, nextAccount: Account = "all") {
     const query = new URLSearchParams(params);
-    if (next === "overview") query.delete("view");
+    if (next === "reports") query.delete("view");
+    else if (next === "overview") query.set("view", "summary");
     else query.set("view", next);
     if (next === "activity" && nextAccount !== "all") query.set("account", nextAccount);
     else query.delete("account");
-    setParams(query, { replace: true });
+    navigate({ pathname: location.pathname, search: query.toString() ? `?${query}` : "", hash: "" }, { replace: true });
   }
   const stockDetail = useRef<HTMLDetailsElement>(null);
   const [cashCursor, setCashCursor] = useState<string | null>(null);
@@ -66,7 +72,6 @@ export default function Finance() {
   const breakEven = useResource<BreakEvenResult>(view === "overview" ? "/finance/break-even" : null);
   const upcoming = useResource<UpcomingPaymentsReport>(view === "overview" ? "/finance/upcoming-payments" : null);
   // Inicio links to #proximos-pagos: scroll there once the section has its content.
-  const location = useLocation();
   const upcomingLoaded = Boolean(upcoming.data);
   useEffect(() => {
     if (upcomingLoaded && location.hash === "#proximos-pagos") document.getElementById("proximos-pagos")?.scrollIntoView({ block: "start" });
@@ -184,16 +189,25 @@ export default function Finance() {
 
   return <div className="panorama-finance">
     <PageHeader
-      eyebrow="Finanzas · operación local"
+      eyebrow={view === "reports" ? "Finanzas · informes canónicos" : "Finanzas · herramientas locales"}
       title="Finanzas"
-      description="Resultado del mes y próximos pasos."
-      actions={<button className="button primary" onClick={openEntry}>Registrar movimiento</button>}
+      description={view === "reports"
+        ? "Estado de resultados, flujo de efectivo y obligaciones con cobertura visible."
+        : view === "overview"
+          ? "Resumen local preliminar, con su fuente y límites a la vista."
+          : view === "activity"
+            ? "Movimientos locales de caja y banco."
+            : "Planificación local basada en partidas y supuestos de trabajo."}
+      actions={view === "reports" ? undefined : <button className="button primary" onClick={openEntry}>Registrar movimiento local</button>}
     />
     <div className="finance-nav" role="group" aria-label="Vistas de finanzas">
-      <button type="button" className={view === "overview" ? "active" : ""} aria-pressed={view === "overview"} onClick={() => setView("overview")}>Resumen</button>
+      <button type="button" className={view === "reports" ? "active" : ""} aria-pressed={view === "reports"} onClick={() => setView("reports")}>Reportes</button>
+      <button type="button" className={view === "overview" ? "active" : ""} aria-pressed={view === "overview"} onClick={() => setView("overview")}>Resumen local</button>
       <button type="button" className={view === "activity" ? "active" : ""} aria-pressed={view === "activity"} onClick={() => setView("activity")}>Caja</button>
       <button type="button" className={view === "forecast" ? "active" : ""} aria-pressed={view === "forecast"} onClick={() => setView("forecast")}>Planificación</button>
     </div>
+
+    {view === "reports" && <FinancialStatements />}
 
     {view === "overview" && <div className="finance-section">
       <div className="finance-topline">
@@ -249,7 +263,7 @@ export default function Finance() {
     </div>}
 
     {view === "activity" && <div className="finance-section">
-      <div className="finance-activity-lead"><div><span className="finance-status-label">Movimientos reales</span><h2>Un registro de entradas y salidas</h2><p>Las ventas locales entran automáticamente. Un gasto cargado en Gastos afecta la caja cuando registrás su pago acá.</p></div><button className="button primary" type="button" onClick={openEntry}>Nuevo movimiento</button></div>
+      <div className="finance-activity-lead"><div><span className="finance-status-label">Movimientos locales</span><h2>Un registro de entradas y salidas</h2><p>Las ventas locales entran automáticamente. Un gasto cargado en Gastos afecta la caja cuando registrás su pago acá.</p></div><button className="button primary" type="button" onClick={openEntry}>Nuevo movimiento local</button></div>
       <div className="cash-accounts" role="group" aria-label="Cuenta">
         {(["all", "cash", "bank"] as const).map((key) => {
           const balance = !ledgerSummary ? null : key === "cash" ? ledgerSummary.cashBalance : key === "bank" ? ledgerSummary.bankBalance : ledgerSummary.cashBalance + ledgerSummary.bankBalance;
@@ -298,7 +312,7 @@ export default function Finance() {
     </div>}
 
     {view === "forecast" && <div className="finance-section">
-      <div className="finance-plan-head"><div><span className="finance-status-label">Próximas 13 semanas</span><h2>Planificar sin confundirlo con caja real</h2><p>Elegí un escenario y cargá sus cobros, pagos y compromisos. Cada escenario tiene sus propias partidas.</p></div><button className="button primary" type="button" onClick={openPlan}>Agregar proyección</button></div>
+      <div className="finance-plan-head"><div><span className="finance-status-label">Planificación local · próximas 13 semanas</span><h2>Planificar sin confundirlo con caja real</h2><p>Elegí un escenario y cargá sus cobros, pagos y compromisos. Cada escenario tiene sus propias partidas.</p></div><button className="button primary" type="button" onClick={openPlan}>Agregar partida local</button></div>
       <div className="finance-plan-summary"><label>Escenario<select aria-label="Escenario de planificación" value={scenario} onChange={(event) => setScenario(event.target.value as typeof scenario)}>{scenarios.map((item) => <option key={item} value={item}>{scenarioNames[item]}</option>)}</select></label><div><span>Movimiento neto previsto</span><strong>{horizonCount ? money(horizonChange) : "Sin partidas"}</strong><small>{horizonCount ? `${horizonCount} ${horizonCount === 1 ? "partida" : "partidas"} en 13 semanas · no es saldo final` : "No se interpreta como $0 confirmado"}</small></div><div><span>Saldo de cierre</span><strong>Pendiente</strong><small>Requiere apertura y obligaciones conciliadas</small></div></div>
       <div className="finance-missing-opening" role="note"><div><strong>Para proyectar un saldo confiable falta una apertura conciliada.</strong><p>Estos movimientos son supuestos de trabajo. El análisis de caja exige saldos, fuentes y cobertura completos antes de mostrar un cierre.</p></div><button type="button" onClick={() => navigate("/app/preparar?view=cash")}>Preparar datos de caja <ArrowRight size={16} /></button></div>
       {!horizonCount ? <div className="forecast-empty"><div><strong>No hay partidas en las próximas 13 semanas.</strong><p>Agregá cobros y pagos con fecha para ver el movimiento previsto del escenario.</p></div><button className="button" type="button" onClick={openPlan}>Agregar primera partida <ArrowRight size={16} /></button></div> : <Panel title="Movimiento previsto por semana" sub="Verde: ingreso neto; naranja: egreso neto. Son cambios planificados, no saldos de caja.">

@@ -1,13 +1,16 @@
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { ArrowClockwise, CheckCircle, Plus, WarningCircle, X } from "@phosphor-icons/react";
-import { send, useResource } from "./lib";
+import { send, useClub, useResource } from "./lib";
+import { apiPost, isUncertainCommandOutcome } from "./operations-ui/api";
+import { clearPendingAttestationRequest, fingerprintAttestationPayload, readPendingAttestationRequest, writePendingAttestationRequest } from "./attestation-request";
+import { decisionInputAttestationDomains, type DecisionInputAttestationDomain, type DecisionInputAttestationInput } from "../shared/operations/decision-inputs";
 import "./decision-inputs.css";
 
 type Scenario = "low" | "base" | "high";
 type Account = "cash" | "bank";
 type MappingStatus = "shared" | "separate";
-type AttestationDomain = "delivery_sales" | "cash_plan";
+type AttestationDomain = DecisionInputAttestationDomain;
 
 type Product = {
   id: string;
@@ -239,6 +242,175 @@ function reviewed(form: FormData, message: string) {
   if (form.get("humanReview") !== "on") throw new Error(message);
 }
 
+function attestationDomainName(domain: AttestationDomain): string {
+  if (domain === "delivery_sales") return "Ventas de delivery";
+  if (domain === "cash_plan") return "Plan de caja";
+  return "Obligaciones";
+}
+
+function createAttestationInput(form: FormData, requestId: string): DecisionInputAttestationInput {
+  reviewed(form, "Confirmá que revisaste el período, la cobertura y la fuente.");
+  const rawDomain = textValue(form, "domain", "Dominio");
+  if (!decisionInputAttestationDomains.includes(rawDomain as AttestationDomain)) throw new Error("Elegí un dominio de cobertura válido.");
+  const domain = rawDomain as AttestationDomain;
+  const fromDate = dateValue(form, "fromDate", "Desde");
+  const throughDate = dateValue(form, "throughDate", "Hasta");
+  if (fromDate > throughDate) throw new Error("La fecha Desde debe ser anterior o igual a Hasta.");
+  if ((Date.parse(`${throughDate}T00:00:00Z`) - Date.parse(`${fromDate}T00:00:00Z`)) / 86_400_000 > 730)
+    throw new Error("El período de cobertura no puede superar dos años.");
+  if (domain === "delivery_sales" && throughDate > today()) throw new Error("No se puede certificar historia futura.");
+  const sourceReference = referenceValue(form, "sourceReference", "Referencia de la fuente");
+  if (domain === "delivery_sales" && !/^batch:[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/.test(sourceReference))
+    throw new Error("Para ventas de delivery, usá batch:<id UUID> de un lote conciliado. Al marcar completa, el servidor valida el lote y su rango.");
+  const complete = form.get("complete") === "on";
+  if (domain === "cash_plan") {
+    const scenario = textValue(form, "scenario", "Escenario");
+    if (scenario !== "low" && scenario !== "base" && scenario !== "high") throw new Error("Elegí un escenario válido para el plan de caja.");
+    return { domain, scenario, fromDate, throughDate, complete, sourceReference, requestId };
+  }
+  return { domain, scenario: null, fromDate, throughDate, complete, sourceReference, requestId };
+}
+
+function AttestationForm({ onSaved }: { onSaved?: () => void }) {
+  const { user } = useClub();
+  const [attestationDomain, setAttestationDomain] = useState<AttestationDomain>("delivery_sales");
+  const [requestId, setRequestId] = useState<string>(() => crypto.randomUUID());
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [mutationError, setMutationError] = useState("");
+  const [outcomeUncertain, setOutcomeUncertain] = useState(false);
+  const [retrySamePayload, setRetrySamePayload] = useState(false);
+  const [uncertainInput, setUncertainInput] = useState<DecisionInputAttestationInput | null>(null);
+  const [recoveryRequired, setRecoveryRequired] = useState(false);
+
+  function changed(event: ChangeEvent<HTMLFormElement>) {
+    if (event.target instanceof HTMLInputElement && event.target.name === "retrySamePayload") return;
+    if (outcomeUncertain) return;
+    setRequestId(crypto.randomUUID());
+    setUncertainInput(null);
+    setRecoveryRequired(false);
+    setNotice("");
+    setMutationError("");
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    if (outcomeUncertain && !retrySamePayload) return;
+    setSaving(true);
+    setNotice("");
+    setMutationError("");
+    let requestWasSent = false;
+    let submittedRequestId = requestId;
+    try {
+      let input = outcomeUncertain ? uncertainInput : createAttestationInput(new FormData(form), requestId);
+      if (!input) throw new Error("No hay un borrador pendiente para reintentar.");
+      submittedRequestId = input.requestId ?? requestId;
+      if (!outcomeUncertain) {
+        const pendingRead = await readPendingAttestationRequest("decision-inputs", user.id);
+        if (!pendingRead.ok) {
+          setMutationError("No pude comprobar ni guardar el identificador de recuperación en esta pestaña. No envié la atestación; habilitá el almacenamiento de sesión e intentá otra vez.");
+          return;
+        }
+        const pending = pendingRead.record;
+        if (pending) {
+          const fingerprint = await fingerprintAttestationPayload(input, user.id);
+          setRecoveryRequired(true);
+          if (!fingerprint || fingerprint !== pending.fingerprint) {
+            setMutationError("Hay una declaración previa cuyo resultado no se confirmó. Reconstruí exactamente sus fechas, dominio, escenario, cobertura y referencia; no enviaré otro contenido hasta resolverla.");
+            return;
+          }
+          input = { ...input, requestId: pending.requestId };
+          submittedRequestId = pending.requestId;
+          setRequestId(pending.requestId);
+          setUncertainInput(input);
+          setOutcomeUncertain(true);
+          setRetrySamePayload(false);
+          setRecoveryRequired(false);
+          setMutationError("Encontré un reintento pendiente para este mismo borrador. No lo envié todavía; confirmá abajo el reintento idéntico con el ID existente.");
+          return;
+        }
+        if (input.domain === "cash_plan" && input.fromDate <= today()) throw new Error("El plan de caja certificado debe empezar después de hoy.");
+        const fingerprint = await fingerprintAttestationPayload(input, user.id);
+        if (!fingerprint) {
+          setMutationError("No pude preparar un fingerprint seguro para recuperar esta solicitud. No envié la atestación; intentá desde una pestaña con Web Crypto habilitado.");
+          return;
+        }
+        const pendingRecord = { requestId: submittedRequestId, fingerprint };
+        if (!await writePendingAttestationRequest("decision-inputs", user.id, pendingRecord)) {
+          setMutationError("No pude guardar el ID de recuperación en esta pestaña. No envié la atestación; habilitá el almacenamiento de sesión e intentá otra vez.");
+          return;
+        }
+      }
+      let receipt: unknown;
+      try {
+        requestWasSent = true;
+        receipt = await apiPost<unknown>("/api/decision-inputs/attestations", input);
+      } catch (error) {
+        if (isUncertainCommandOutcome(error)) {
+          setUncertainInput(input);
+          setOutcomeUncertain(true);
+          setRetrySamePayload(false);
+          setRecoveryRequired(false);
+          setMutationError("El servidor no confirmó el resultado. Conservé la declaración y el mismo ID; confirmá abajo un reintento idéntico para recuperar su comprobante.");
+          onSaved?.();
+          return;
+        }
+        throw error;
+      }
+      if (!receipt || typeof receipt !== "object" || (receipt as { id?: unknown }).id !== submittedRequestId || (receipt as { complete?: unknown }).complete !== input.complete) {
+        setUncertainInput(input);
+        setOutcomeUncertain(true);
+        setRetrySamePayload(false);
+        setRecoveryRequired(false);
+        setMutationError("El comprobante no confirma esta declaración. Conservé el formulario y el mismo ID; confirmá abajo un reintento idéntico para recuperarlo.");
+        onSaved?.();
+        return;
+      }
+      await clearPendingAttestationRequest("decision-inputs", user.id, submittedRequestId);
+      form.reset();
+      setAttestationDomain("delivery_sales");
+      setRequestId(crypto.randomUUID());
+      setUncertainInput(null);
+      setOutcomeUncertain(false);
+      setRetrySamePayload(false);
+      setRecoveryRequired(false);
+      setNotice("Atestación guardada. La pantalla vuelve a consultar los datos del servidor.");
+      onSaved?.();
+    } catch (error) {
+      if (requestWasSent) {
+        await clearPendingAttestationRequest("decision-inputs", user.id, submittedRequestId);
+        setRecoveryRequired(false);
+      }
+      setUncertainInput(null);
+      setOutcomeUncertain(false);
+      setRetrySamePayload(false);
+      setMutationError(`${error instanceof Error ? error.message : "No se pudo registrar esta atestación."} Conservé el borrador; corregilo si hace falta y cualquier cambio generará un ID nuevo.`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <form className="di-form di-form--topline" aria-busy={saving} onSubmit={(event) => void submit(event)} onChange={changed}>
+    <div className="di-form-grid">
+      <Field label="Dominio" name="di-attestation-domain"><select id="di-attestation-domain" name="domain" value={attestationDomain} onChange={(event) => setAttestationDomain(event.target.value as AttestationDomain)} disabled={saving || outcomeUncertain}>{decisionInputAttestationDomains.map(domain => <option key={domain} value={domain}>{attestationDomainName(domain)}</option>)}</select></Field>
+      {attestationDomain === "cash_plan" && <Field label="Escenario" name="di-attestation-scenario"><select id="di-attestation-scenario" name="scenario" defaultValue="base" disabled={saving || outcomeUncertain}>{scenarios.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>}
+      <Field label="Desde" name="di-attestation-from"><input id="di-attestation-from" name="fromDate" type="date" min={attestationDomain === "cash_plan" ? tomorrow() : undefined} disabled={saving || outcomeUncertain} required /></Field>
+      <Field label="Hasta" name="di-attestation-through"><input id="di-attestation-through" name="throughDate" type="date" max={attestationDomain === "delivery_sales" ? today() : undefined} disabled={saving || outcomeUncertain} required /></Field>
+      <Field label={attestationDomain === "delivery_sales" ? "Lote conciliado · batch:<id>" : "Referencia de la fuente"} name="di-attestation-source" hint={attestationDomain === "delivery_sales" ? "Debe identificar un lote delivery conciliado. Si declarás cobertura completa, el servidor valida el lote y el período." : attestationDomain === "payables" ? "Declaración humana sobre la población de obligaciones; no crea ni verifica obligaciones. No ingreses claves ni tokens: el servidor valida la referencia." : "La referencia documenta el período del plan; no genera saldos por sí sola. No ingreses claves ni tokens."}>
+        <input id="di-attestation-source" name="sourceReference" type="text" disabled={saving || outcomeUncertain} required maxLength={240} placeholder={attestationDomain === "delivery_sales" ? "batch:ID-del-lote" : attestationDomain === "payables" ? "Planilla de vencimientos · corte…" : "Planilla de pagos y cobros · corte…"} />
+      </Field>
+    </div>
+    <label className="di-review"><input name="complete" type="checkbox" disabled={saving || outcomeUncertain} /><span>{attestationDomain === "payables" ? "Declaro que la fuente incluye todas las obligaciones del período." : "Declaro completa la cobertura de esta fuente durante todo el período."}</span></label>
+    <ReviewConsent id="di-review-attestation" disabled={saving || outcomeUncertain}>Revisé las fechas, la cobertura y la referencia de esta fuente.</ReviewConsent>
+    {outcomeUncertain && <label className="di-review"><input name="retrySamePayload" type="checkbox" checked={retrySamePayload} disabled={saving} onChange={(event) => setRetrySamePayload(event.target.checked)} /><span>Confirmo reintentar exactamente esta declaración con el mismo ID.</span></label>}
+    {recoveryRequired && !outcomeUncertain && <div className="di-error" role="status"><div><strong>Hay una declaración pendiente de recuperar.</strong><p>Reconstruí el borrador original; se comparará sin guardar el texto y se bloqueará cualquier payload distinto.</p></div></div>}
+    {mutationError && <div className="di-error" role="alert"><div><strong>No se pudo confirmar la atestación.</strong><p>{mutationError}</p></div></div>}
+    {notice && <div className="di-success" role="status"><CheckCircle size={18} weight="fill" aria-hidden="true" />{notice}</div>}
+    <button className="di-button di-button--primary" type="submit" disabled={saving || (outcomeUncertain && !retrySamePayload)}>{saving ? "Guardando…" : outcomeUncertain ? "Reintentar la misma atestación" : "Guardar atestación"}</button>
+  </form>;
+}
+
 function productName(products: Product[], productId: string): string {
   const product = products.find((item) => item.id === productId);
   return product ? `${product.name}${product.lot ? ` · lote ${product.lot}` : ""}` : "Producto sin nombre";
@@ -319,13 +491,15 @@ function SectionHeading({
 function ReviewConsent({
   id,
   children,
+  disabled = false,
 }: {
   id: string;
   children: ReactNode;
+  disabled?: boolean;
 }) {
   return (
     <label className="di-review" htmlFor={id}>
-      <input id={id} name="humanReview" type="checkbox" required />
+      <input id={id} name="humanReview" type="checkbox" required disabled={disabled} />
       <span>{children}</span>
     </label>
   );
@@ -402,7 +576,6 @@ export default function DecisionInputs() {
   const data = resource.data;
   const [filters, setFilters] = useState<Filters>({ productId: "", from: "", through: "", search: "" });
   const [cashScenario, setCashScenario] = useState<Scenario>("base");
-  const [attestationDomain, setAttestationDomain] = useState<AttestationDomain>("delivery_sales");
   const [accountRows, setAccountRows] = useState<Array<{ id: number; account: Account }>>([{ id: 1, account: "cash" }]);
   const [nextAccountRow, setNextAccountRow] = useState(2);
   const [saving, setSaving] = useState("");
@@ -806,42 +979,12 @@ export default function DecisionInputs() {
         </div>
 
         <article className="di-card di-card--attestations">
-          <div className="di-subheading"><div><h3>Cobertura de fuentes</h3><p className="di-muted">La atestación registra un período y una declaración de cobertura; no completa ni concilia datos por sí sola.</p></div></div>
+          <div className="di-subheading"><div><h3>Cobertura de fuentes</h3><p className="di-muted">La atestación documenta un período y una declaración humana; no completa ni concilia datos ni aprueba automáticamente el informe.</p></div></div>
           <div className="di-table-scroll"><table><thead><tr><th>Dominio</th><th>Escenario</th><th>Período</th><th>Declaración</th><th>Fuente exigida</th></tr></thead><tbody>
-            {visibleAttestations.map((item) => <tr key={item.id}><th scope="row">{item.domain === "delivery_sales" ? "Ventas de delivery" : "Plan de caja"}</th><td>{item.scenario ? scenarioName(item.scenario) : "—"}</td><td>{dateLabel(item.fromDate)} – {dateLabel(item.throughDate)}</td><td><span className={`di-status ${item.complete ? "di-status--pending" : "di-status--muted"}`}>{item.complete ? "Declarado completo" : "Parcial / incompleto"}</span></td><td><code>{sourceText(item.sourceReference)}</code></td></tr>)}
+            {visibleAttestations.map((item) => <tr key={item.id}><th scope="row">{attestationDomainName(item.domain)}</th><td>{item.scenario ? scenarioName(item.scenario) : "—"}</td><td>{dateLabel(item.fromDate)} – {dateLabel(item.throughDate)}</td><td><span className={`di-status ${item.complete ? "di-status--pending" : "di-status--muted"}`}>{item.complete ? "Declarado completo" : "Parcial / incompleto"}</span></td><td><code>{sourceText(item.sourceReference)}</code></td></tr>)}
             {!visibleAttestations.length && <tr><td colSpan={5} className="di-empty-cell">Sin atestaciones para estos filtros.</td></tr>}
           </tbody></table></div>
-          <form className="di-form di-form--topline" onSubmit={(event) => void saveForm(event, "/decision-inputs/attestations", "attestations", "Atestación", (form) => {
-            reviewed(form, "Confirmá que revisaste el período, la cobertura y la fuente.");
-            const domain = textValue(form, "domain", "Dominio");
-            if (domain !== "delivery_sales" && domain !== "cash_plan") throw new Error("Elegí ventas de delivery o plan de caja.");
-            const fromDate = dateValue(form, "fromDate", "Desde");
-            const throughDate = dateValue(form, "throughDate", "Hasta");
-            if (fromDate > throughDate) throw new Error("La fecha Desde debe ser anterior o igual a Hasta.");
-            if ((Date.parse(`${throughDate}T00:00:00Z`) - Date.parse(`${fromDate}T00:00:00Z`)) / 86_400_000 > 730)
-              throw new Error("El período de cobertura no puede superar dos años.");
-            if (domain === "cash_plan" && fromDate <= today()) throw new Error("El plan de caja certificado debe empezar después de hoy.");
-            if (domain === "delivery_sales" && throughDate > today()) throw new Error("No se puede certificar historia futura.");
-            const sourceReference = referenceValue(form, "sourceReference", "Referencia de la fuente");
-            if (domain === "delivery_sales" && !/^batch:[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/.test(sourceReference))
-              throw new Error("Para ventas de delivery, usá batch:<id UUID> de un lote conciliado. Al marcar completa, el servidor valida el lote y su rango.");
-            const scenario = domain === "cash_plan" ? textValue(form, "scenario", "Escenario") : null;
-            if (scenario !== null && scenario !== "low" && scenario !== "base" && scenario !== "high") throw new Error("Elegí un escenario válido para el plan de caja.");
-            return { domain, scenario, fromDate, throughDate, complete: form.get("complete") === "on", sourceReference };
-          })}>
-            <div className="di-form-grid">
-              <Field label="Dominio" name="di-attestation-domain"><select id="di-attestation-domain" name="domain" value={attestationDomain} onChange={(event) => setAttestationDomain(event.target.value as AttestationDomain)}><option value="delivery_sales">Ventas de delivery</option><option value="cash_plan">Plan de caja</option></select></Field>
-              {attestationDomain === "cash_plan" && <Field label="Escenario" name="di-attestation-scenario"><select id="di-attestation-scenario" name="scenario" defaultValue="base">{scenarios.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>}
-              <Field label="Desde" name="di-attestation-from"><input id="di-attestation-from" name="fromDate" type="date" min={attestationDomain === "cash_plan" ? tomorrow() : undefined} required /></Field>
-              <Field label="Hasta" name="di-attestation-through"><input id="di-attestation-through" name="throughDate" type="date" max={attestationDomain === "delivery_sales" ? today() : undefined} required /></Field>
-              <Field label={attestationDomain === "delivery_sales" ? "Lote conciliado · batch:<id>" : "Referencia descriptiva"} name="di-attestation-source" hint={attestationDomain === "delivery_sales" ? "La referencia debe identificar un lote delivery_sales conciliado. Si declarás cobertura completa, el servidor valida el lote y el período." : "Podés guardar esta atestación antes del snapshot; por sí sola no genera saldo."}>
-                <input id="di-attestation-source" name="sourceReference" type="text" required placeholder={attestationDomain === "delivery_sales" ? "batch:ID-del-lote" : "Planilla de pagos y cobros · corte…"} />
-              </Field>
-            </div>
-            <label className="di-review"><input name="complete" type="checkbox" /><span>Declaro completa la cobertura de esta fuente durante todo el período.</span></label>
-            <ReviewConsent id="di-review-attestation">Revisé las fechas, la cobertura y la referencia de esta fuente.</ReviewConsent>
-            <button className="di-button di-button--primary" type="submit" disabled={Boolean(saving)}>{saving === "attestations" ? "Guardando…" : "Guardar atestación"}</button>
-          </form>
+          <AttestationForm onSaved={() => void resource.reload()} />
         </article>
       </section>
       }

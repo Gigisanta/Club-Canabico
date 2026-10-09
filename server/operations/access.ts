@@ -4,6 +4,7 @@ import { db } from "../db.js";
 import { profileCapabilities, cutoverGateIds, type Capability } from "../../shared/operations/contracts.js";
 import { registerCommand, OperationError, json, capabilities, requireCapability, objectId, evidence, civilDate, requireMemberScope, requireDocumentScope, objectScope, type CommandContext } from "./core.js";
 import { commercialAddress, commercialPreferences } from "./member-fields.js";
+import { canManageDecisionInputAttestations } from "./access-snapshot.js";
 const profile = z.enum(["owner","finance","commercial","stock","logistics","driver","cashier","clinical","viewer"]);
 const defaultCapabilities = new Set(Object.values(profileCapabilities).flat());
 registerCommand("AccessGranted",{kind:"access",capability:"access.manage",create:true,administrative:true,
@@ -83,21 +84,29 @@ registerCommand("CutoverGateReviewed",{kind:"cutover",capability:"cutover.approv
   if(!author.active)throw new OperationError(409,"AUTHOR_INACTIVE","El autor del control debe estar activo");
   await ctx.tx.cutoverGate.upsert({where:{id:v.gateId},create:{id:v.gateId,status:"approved",evidence:json(v.evidence),approvedBy:v.authorId,reviewedBy:ctx.actor.id,approvedAt:ctx.now},update:{status:"approved",evidence:json(v.evidence),approvedBy:v.authorId,reviewedBy:ctx.actor.id,approvedAt:ctx.now}});
   return {gateId:v.gateId,status:"approved"};
- }});
+}});
+async function requireApprovedCutoverGates(ctx:CommandContext){
+ const gates=await ctx.tx.cutoverGate.findMany({where:{id:{in:[...cutoverGateIds]},status:"approved"}});
+ const gateActorIds=[...new Set(gates.flatMap(g=>[g.approvedBy,g.reviewedBy].filter((id):id is string=>typeof id==="string"&&id.length>0)))];
+ const activeGateActors=gateActorIds.length?await ctx.tx.user.findMany({where:{id:{in:gateActorIds},active:true},select:{id:true}}):[];
+ const activeGateActorIds=new Set(activeGateActors.map(user=>user.id));
+ const gatesById=new Map(gates.map(g=>[g.id,g]));
+ const missing=cutoverGateIds.filter(id=>{
+  const gate=gatesById.get(id);
+  return !gate?.approvedBy||!gate.reviewedBy||gate.approvedBy===gate.reviewedBy||!activeGateActorIds.has(gate.approvedBy)||!activeGateActorIds.has(gate.reviewedBy);
+ });
+ if(missing.length)throw new OperationError(422,"CUTOVER_GATES_PENDING","Faltan controles para el cambio de autoridad",{missing});
+}
 registerCommand("AuthorityActivated",{kind:"authority",capability:"cutover.approve",create:true,administrative:true,
  schema:z.strictObject({evidence}),
+ authorize:async ctx=>{
+  if(ctx.envelope.targetId!=="operations")throw new OperationError(400,"AUTHORITY_ID","Circuito inválido");
+  await requireApprovedCutoverGates(ctx);
+  if(process.env.CLUB_OPERATIONS_APPROVED!=="true")throw new OperationError(423,"CLUB_OPERATIONS_APPROVAL_REQUIRED","La habilitación operativa requiere aprobación documentada");
+ },
  execute:async ctx=>{
   if(ctx.envelope.targetId!=="operations")throw new OperationError(400,"AUTHORITY_ID","Circuito inválido");
-  const gates=await ctx.tx.cutoverGate.findMany({where:{id:{in:[...cutoverGateIds]},status:"approved"}});
-  const gateActorIds=[...new Set(gates.flatMap(g=>[g.approvedBy,g.reviewedBy].filter((id):id is string=>typeof id==="string"&&id.length>0)))];
-  const activeGateActors=gateActorIds.length?await ctx.tx.user.findMany({where:{id:{in:gateActorIds},active:true},select:{id:true}}):[];
-  const activeGateActorIds=new Set(activeGateActors.map(user=>user.id));
-  const gatesById=new Map(gates.map(g=>[g.id,g]));
-  const missing=cutoverGateIds.filter(id=>{
-   const gate=gatesById.get(id);
-   return !gate?.approvedBy||!gate.reviewedBy||gate.approvedBy===gate.reviewedBy||!activeGateActorIds.has(gate.approvedBy)||!activeGateActorIds.has(gate.reviewedBy);
-  });
-  if(missing.length)throw new OperationError(422,"CUTOVER_GATES_PENDING","Faltan controles para el cambio de autoridad",{missing});
+  await requireApprovedCutoverGates(ctx);
   const old=await ctx.tx.operationAuthority.findUnique({where:{id:"operations"}});
   if(old?.mode==="active")throw new OperationError(409,"AUTHORITY_ALREADY_ACTIVE","El circuito ya está activo");
   const authority=await ctx.tx.operationAuthority.upsert({where:{id:"operations"},create:{id:"operations",mode:"active",epoch:2,approvedBy:ctx.actor.id,evidence:json(ctx.envelope.data.evidence)},update:{mode:"active",epoch:{increment:1},approvedBy:ctx.actor.id,evidence:json(ctx.envelope.data.evidence)}});
@@ -107,6 +116,7 @@ registerCommand("AuthorityActivated",{kind:"authority",capability:"cutover.appro
 export const legacyAccessGuard: RequestHandler = async (req,res,next)=>{
   try {
     if(/^\/(operations|delivery|legacy-imports)(\/|$)/.test(req.path)||/^\/reports\/operations(\/|$)/.test(req.path))return next();
+    const decisionInputAttestationPost = req.method === "POST" && req.path === "/decision-inputs/attestations";
     const grant=await db.operationAccess.findUnique({where:{userId:req.user.id}});
     const caps=await capabilities(db,req.user);
     if(grant&&(!grant.enabled||["driver","clinical"].includes(grant.profile)))throw new OperationError(403,"LEGACY_SCOPE","Usá las vistas autorizadas de tu perfil");
@@ -115,9 +125,12 @@ export const legacyAccessGuard: RequestHandler = async (req,res,next)=>{
     const finance=/^\/(finance|cash|expenses|closures|decision-analysis\/(cash|finance))/.test(req.path)||req.path==="/views/finance";
     if(finance&&grant&&!caps.includes("finance.read"))throw new OperationError(403,"CAPABILITY_REQUIRED","Acceso financiero restringido");
     if(/^\/reports/.test(req.path)&&grant&&!caps.includes("reports.read"))throw new OperationError(403,"CAPABILITY_REQUIRED","Exportación restringida");
+    if(decisionInputAttestationPost&&!canManageDecisionInputAttestations(req.user,grant))
+      throw new OperationError(403,"LEGACY_SCOPE","La declaración financiera requiere un perfil gestor sin alcance por objeto");
     if(req.method!=="GET"&&req.method!=="HEAD"){
       const authority=await db.operationAuthority.findUnique({where:{id:"operations"}});
-      if(authority?.mode==="active")throw new OperationError(410,"LEGACY_WRITER_RETIRED","Este circuito usa los comandos operativos de Bombo");
+      if(authority?.mode==="active"&&!(decisionInputAttestationPost&&canManageDecisionInputAttestations(req.user,grant)))
+        throw new OperationError(410,"LEGACY_WRITER_RETIRED","Este circuito usa los comandos operativos de Bombo");
     }
     next();
   }catch(e){next(e);}

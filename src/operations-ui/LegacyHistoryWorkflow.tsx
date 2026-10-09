@@ -3,6 +3,7 @@ import { hasCapability, hasCommand, isUncertainCommandOutcome, responseVersion }
 import { useRemote } from "./useRemote";
 import { ActionButton, ErrorState, InfoBand, LoadingState } from "./Primitives";
 import type { JsonRecord, OperationsContext, RunCommand } from "./types";
+import { isTechnicalLegacySource } from "../../shared/operations/source-control";
 
 type Snapshot = { id: string; filename: string; sourceSystem: string; status: string; reviewedBy: string | null; createdBy: string; fileHash: string };
 type Rule = { table: string; kind: string; dateField: string | null; amountField: string | null; quantityField: string | null; currencyField: string | null; unitField: string | null; defaultCurrency: string | null; defaultUnit: string | null };
@@ -26,7 +27,7 @@ export function LegacyHistoryWorkflow({ context, refreshKey, runCommand, onRefre
   const [policyVersion, setPolicyVersion] = useState("1");
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [pending, setPending] = useState<Pending | null>(null);
   const [revision, setRevision] = useState(0);
-  const source = sources.data?.items.find(row => row.id === snapshotId);
+  const source = sources.data?.items.find(row => row.id === snapshotId && !isTechnicalLegacySource(row.sourceSystem));
   const mapping = policies.data?.items.find(row => row.id === mappingId && row.kind === "legacy_history_mapping");
   const progress = useRemote<Progress>(source ? `/api/legacy-imports/history/projection-status?snapshotId=${encodeURIComponent(source.id)}${mapping?.state === "approved" ? `&mappingId=${encodeURIComponent(mapping.id)}` : ""}` : null, refreshKey + revision);
   const preview = useRemote<{ replacement: Replacement | null }>(source ? `/api/legacy-imports/history/publication-preview?snapshotId=${encodeURIComponent(source.id)}` : null, refreshKey + revision);
@@ -77,7 +78,7 @@ export function LegacyHistoryWorkflow({ context, refreshKey, runCommand, onRefre
     <InfoBand title="Historia y apertura"><p>La publicación conserva los hechos anteriores para consulta. Ninguna tabla recibe una clasificación automática: elegí un tratamiento para cada una; los valores ausentes siguen desconocidos. Este paso no crea saldo, stock, deuda ni permisos operativos.</p></InfoBand>
     <div className="ops-form-grid">
       <label className="ops-field"><span>Fuente revisada</span><select value={snapshotId} disabled={!editable} onChange={event => { setSnapshotId(event.target.value); setRules([]); setSelectedTable(""); setError(""); }}>
-        <option value="">Elegir una fuente</option>{sources.data?.items.filter(row => row.status === "reviewed" && row.reviewedBy && row.reviewedBy !== row.createdBy).map(row => <option key={row.id} value={row.id}>{row.filename} · {row.sourceSystem} · {row.fileHash.slice(0, 10)}</option>)}
+        <option value="">Elegir una fuente</option>{sources.data?.items.filter(row => !isTechnicalLegacySource(row.sourceSystem) && row.status === "reviewed" && row.reviewedBy && row.reviewedBy !== row.createdBy).map(row => <option key={row.id} value={row.id}>{row.filename} · {row.sourceSystem} · {row.fileHash.slice(0, 10)}</option>)}
       </select></label>
       <label className="ops-field"><span>Interpretación histórica</span><select value={mappingId} disabled={!editable} onChange={event => { setMappingId(event.target.value); setError(""); }}><option value="">Elegir una versión</option>{policyOptions.map(row => <option key={row.id} value={row.id}>{row.name} · {row.state === "approved" ? "Aprobada" : "Propuesta"}</option>)}</select></label>
       <label className="ops-field"><span>Evidencia de interpretación o publicación</span><textarea value={note} disabled={!editable} onChange={event => setNote(event.target.value)} maxLength={1000} /></label>
