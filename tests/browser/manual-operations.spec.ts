@@ -65,6 +65,16 @@ type CommandEnvelope = {
   expectedVersion: number;
   data: Record<string, unknown>;
 };
+type CatalogSkuFields = {
+  id: string;
+  code: string;
+  name: string;
+  variety: string;
+  category: string;
+  unit: string;
+  minQuantity: string;
+  minVarieties: number;
+};
 
 async function login(page: Page) {
   await page.goto("/app/operations");
@@ -106,6 +116,46 @@ function watchCommandPosts(page: Page) {
 
 function commandEnvelope(command: string, targetId: string, expectedVersion: number, data: Record<string, unknown>) {
   return { schemaVersion: 1, requestId: randomUUID(), targetId, expectedVersion, occurredAt: new Date().toISOString(), command, data };
+}
+
+async function restoreActiveSku(page: Page, sku: CatalogSkuFields, evidenceReference: string) {
+  const before = await getOperation<{
+    items: Array<{ id: string; active: boolean }>;
+    versions: Record<string, number>;
+  }>(page, "catalogue-sheets");
+  const currentSku = before.items.find(item => item.id === sku.id);
+  expect(currentSku, `SKU ${sku.id} still exists during cleanup`).toBeDefined();
+  const currentVersion = before.versions[sku.id];
+  expect(Number.isInteger(currentVersion), `version for SKU ${sku.id} is available during cleanup`).toBe(true);
+
+  if (!currentSku!.active) {
+    const origin = new URL(page.url()).origin;
+    const response = await page.request.post("/api/operations/commands", {
+      headers: { Origin: origin },
+      data: commandEnvelope("CatalogSkuUpdated", sku.id, currentVersion, {
+        code: sku.code,
+        name: sku.name,
+        variety: sku.variety,
+        category: sku.category,
+        unit: sku.unit,
+        minQuantity: sku.minQuantity,
+        minVarieties: sku.minVarieties,
+        active: true,
+        evidence: { reference: evidenceReference, scope: "synthetic rehearsal fixture cleanup" },
+      }),
+    });
+    const body = await response.json();
+    expect(response.status(), `CatalogSkuUpdated restore: ${JSON.stringify(body)}`).toBe(200);
+    expect(body.version).toBe(currentVersion + 1);
+    expect(body.result.sku).toMatchObject({ id: sku.id, active: true });
+  }
+
+  const after = await getOperation<{
+    items: Array<{ id: string; active: boolean }>;
+    versions: Record<string, number>;
+  }>(page, "catalogue-sheets");
+  expect(after.items.find(item => item.id === sku.id)).toMatchObject({ id: sku.id, active: true });
+  expect(after.versions[sku.id]).toBe(currentVersion + (currentSku!.active ? 0 : 1));
 }
 
 async function submitCommand(page: Page, command: string, submitLabel: string) {
@@ -278,6 +328,7 @@ test("a catalog failure blocks receiving only the pending line after another SKU
   let purchaseId = "";
   let purchaseLineA = "";
   let purchaseLineB = "";
+  let skuADeactivationAttempted = false;
   try {
     const stockLogin = await stockContext.request.post("/api/auth/login", {
       data: { email: "ops-stock@demo.bombo.local", password: getIsolatedE2EPassword() },
@@ -364,6 +415,7 @@ test("a catalog failure blocks receiving only the pending line after another SKU
     const currentSkuA = catalogAfterReceipt.items.find(sku => sku.id === skuA!.id);
     expect(currentSkuA?.active).toBe(true);
     expect(currentSkuA).toBeDefined();
+    skuADeactivationAttempted = true;
     const deactivateResponse = await page.request.post("/api/operations/commands", {
       headers: { Origin: appOrigin },
       data: commandEnvelope("CatalogSkuUpdated", skuA!.id, catalogAfterReceipt.versions[skuA!.id], {
@@ -453,7 +505,13 @@ test("a catalog failure blocks receiving only the pending line after another SKU
     expect(inventoryReportSnapshot(await getInventoryReport(page))).toEqual(inventoryBeforeFailure);
     commandPosts.stop();
   } finally {
-    await stockContext.close();
+    try {
+      if (skuADeactivationAttempted) {
+        await restoreActiveSku(page, skuA!, "e2e-restore-sku-a-after-receiving-guard");
+      }
+    } finally {
+      await stockContext.close();
+    }
   }
 });
 
@@ -541,155 +599,163 @@ test("a confirmed reservation remains preparable by lot after its SKU is deactiv
   expect(Number(inventoryReserved.reservedQuantity)).toBe(reservedBefore + 5);
   expect(Number(inventoryReserved.availableQuantity)).toBe(Number(inventoryBefore.availableQuantity) - 5);
 
-  const deactivated = await postCommand("CatalogSkuUpdated", skuId, catalogBefore.versions[skuId], {
-    code: sku!.code,
-    name: sku!.name,
-    variety: sku!.variety,
-    category: sku!.category,
-    unit: sku!.unit,
-    minQuantity: sku!.minQuantity,
-    minVarieties: sku!.minVarieties,
-    active: false,
-    evidence: { reference: "e2e-inactive-sku-reservation", scope: "synthetic rehearsal fixture" },
-  });
-  expect(deactivated.result.sku).toMatchObject({ id: skuId, active: false });
+  let skuDeactivationAttempted = false;
+  try {
+    skuDeactivationAttempted = true;
+    const deactivated = await postCommand("CatalogSkuUpdated", skuId, catalogBefore.versions[skuId], {
+      code: sku!.code,
+      name: sku!.name,
+      variety: sku!.variety,
+      category: sku!.category,
+      unit: sku!.unit,
+      minQuantity: sku!.minQuantity,
+      minVarieties: sku!.minVarieties,
+      active: false,
+      evidence: { reference: "e2e-inactive-sku-reservation", scope: "synthetic rehearsal fixture" },
+    });
+    expect(deactivated.result.sku).toMatchObject({ id: skuId, active: false });
 
-  const inactiveCatalog = await getOperation<{ items: Array<{ id: string; active: boolean }> }>(page, "catalog");
-  expect(inactiveCatalog.items.some(item => item.id === skuId)).toBe(false);
-  const inactiveDetail = await getOperation<OrderDetail>(page, `orders/${orderId}`);
-  expect(inactiveDetail.order.lines).toHaveLength(1);
-  expect(inactiveDetail.order.lines[0]).toMatchObject({ id: lineId, skuId, skuName: sku!.name, unit: "g" });
-  expect(inactiveDetail.reservations[0]?.balance).toMatchObject({
-    id: seededStock.id,
-    lotId: seededLot.id,
-    skuId,
-    skuName: sku!.name,
-    unit: "g",
-    lotLabel: seededLot.label,
-  });
+    const inactiveCatalog = await getOperation<{ items: Array<{ id: string; active: boolean }> }>(page, "catalog");
+    expect(inactiveCatalog.items.some(item => item.id === skuId)).toBe(false);
+    const inactiveDetail = await getOperation<OrderDetail>(page, `orders/${orderId}`);
+    expect(inactiveDetail.order.lines).toHaveLength(1);
+    expect(inactiveDetail.order.lines[0]).toMatchObject({ id: lineId, skuId, skuName: sku!.name, unit: "g" });
+    expect(inactiveDetail.reservations[0]?.balance).toMatchObject({
+      id: seededStock.id,
+      lotId: seededLot.id,
+      skuId,
+      skuName: sku!.name,
+      unit: "g",
+      lotLabel: seededLot.label,
+    });
 
-  await page.goto("/app/operations?section=orders");
-  const orderRow = page.getByRole("row").filter({ hasText: `Pedido #${orderId.slice(0, 8).toUpperCase()}` });
-  await expect(orderRow).toBeVisible();
-  await expect(orderRow.getByRole("button", { name: "Preparar por lote", exact: true })).toBeVisible();
-  const commandPosts = watchCommandPosts(page);
-  const detailPath = `/api/operations/orders/${orderId}`;
-  await page.route(`**${detailPath}`, async route => {
-    const response = await route.fetch();
-    const body = await response.json();
-    expect(body.reservations?.[0]?.balance).toMatchObject({ id: seededStock.id, skuId });
-    body.reservations[0].balance = null;
-    await route.fulfill({ response, json: body });
-  });
+    await page.goto("/app/operations?section=orders");
+    const orderRow = page.getByRole("row").filter({ hasText: `Pedido #${orderId.slice(0, 8).toUpperCase()}` });
+    await expect(orderRow).toBeVisible();
+    await expect(orderRow.getByRole("button", { name: "Preparar por lote", exact: true })).toBeVisible();
+    const commandPosts = watchCommandPosts(page);
+    const detailPath = `/api/operations/orders/${orderId}`;
+    await page.route(`**${detailPath}`, async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      expect(body.reservations?.[0]?.balance).toMatchObject({ id: seededStock.id, skuId });
+      body.reservations[0].balance = null;
+      await route.fulfill({ response, json: body });
+    });
 
-  await orderRow.getByRole("button", { name: "Preparar por lote", exact: true }).click();
-  await expect(page.getByText("La preparación queda pausada", { exact: false })).toBeVisible();
-  expect(commandPosts.envelopes.filter(envelope => envelope.command === "OrderPrepared")).toHaveLength(0);
-  expect(inventoryBalance(await getInventoryReport(page))).toEqual(inventoryReserved);
-  const unchangedAfterBlock = await getOperation<OrderDetail>(page, `orders/${orderId}`);
-  expect(unchangedAfterBlock.order.fulfillmentState).toBe("unprepared");
-  expect(unchangedAfterBlock.allocations).toHaveLength(0);
-  await page.unroute(`**${detailPath}`);
+    await orderRow.getByRole("button", { name: "Preparar por lote", exact: true }).click();
+    await expect(page.getByText("La preparación queda pausada", { exact: false })).toBeVisible();
+    expect(commandPosts.envelopes.filter(envelope => envelope.command === "OrderPrepared")).toHaveLength(0);
+    expect(inventoryBalance(await getInventoryReport(page))).toEqual(inventoryReserved);
+    const unchangedAfterBlock = await getOperation<OrderDetail>(page, `orders/${orderId}`);
+    expect(unchangedAfterBlock.order.fulfillmentState).toBe("unprepared");
+    expect(unchangedAfterBlock.allocations).toHaveLength(0);
+    await page.unroute(`**${detailPath}`);
 
-  await orderRow.getByRole("button", { name: "Preparar por lote", exact: true }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByLabel(`Cantidad reservada · ${sku!.name} · ${seededLot.label}`)).toHaveValue("5");
-  await expect(dialog.getByLabel(`Peso real · ${sku!.name}`, { exact: true })).toHaveValue("5");
-  await dialog.getByLabel("Evidencia de preparación").fill("Preparación sintética sobre la reserva confirmada.");
-  const prepared = await submitCommand(page, "OrderPrepared", "Revisar y registrar");
-  expect(prepared.envelope.targetId).toBe(orderId);
-  expect(prepared.envelope.data.allocations).toEqual([{
-    lineId,
-    lotId: seededLot.id,
-    balanceId: seededStock.id,
-    requestedQuantity: "5",
-    actualQuantity: "5",
-  }]);
-  commandPosts.stop();
-  expect(commandPosts.envelopes.filter(envelope => envelope.command === "OrderPrepared")).toHaveLength(1);
+    await orderRow.getByRole("button", { name: "Preparar por lote", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByLabel(`Cantidad reservada · ${sku!.name} · ${seededLot.label}`)).toHaveValue("5");
+    await expect(dialog.getByLabel(`Peso real · ${sku!.name}`, { exact: true })).toHaveValue("5");
+    await dialog.getByLabel("Evidencia de preparación").fill("Preparación sintética sobre la reserva confirmada.");
+    const prepared = await submitCommand(page, "OrderPrepared", "Revisar y registrar");
+    expect(prepared.envelope.targetId).toBe(orderId);
+    expect(prepared.envelope.data.allocations).toEqual([{
+      lineId,
+      lotId: seededLot.id,
+      balanceId: seededStock.id,
+      requestedQuantity: "5",
+      actualQuantity: "5",
+    }]);
+    commandPosts.stop();
+    expect(commandPosts.envelopes.filter(envelope => envelope.command === "OrderPrepared")).toHaveLength(1);
 
-  const preparedDetail = await getOperation<OrderDetail>(page, `orders/${orderId}`);
-  expect(preparedDetail.order).toMatchObject({ fulfillmentState: "prepared" });
-  expect(preparedDetail.order.lines[0]?.skuName).toBe(sku!.name);
-  expect(Number(preparedDetail.order.lines.find(line => line.id === lineId)?.prepared)).toBe(5);
-  expect(preparedDetail.allocations).toContainEqual(expect.objectContaining({
-    lineId,
-    lotId: seededLot.id,
-    balanceId: seededStock.id,
-    requestedQuantity: "5",
-    actualQuantity: "5",
-    state: "prepared",
-  }));
-  expect(preparedDetail.reservations).toHaveLength(0);
-  expect(preparedDetail.version).toBe(prepared.envelope.expectedVersion + 1);
-  const inventoryPrepared = inventoryBalance(await getInventoryReport(page));
-  expect(Number(inventoryPrepared.balanceQuantity)).toBe(quantityBefore - 5);
-  expect(Number(inventoryPrepared.reservedQuantity)).toBe(reservedBefore);
-  expect(Number(inventoryPrepared.availableQuantity)).toBe(Number(inventoryReserved.availableQuantity));
+    const preparedDetail = await getOperation<OrderDetail>(page, `orders/${orderId}`);
+    expect(preparedDetail.order).toMatchObject({ fulfillmentState: "prepared" });
+    expect(preparedDetail.order.lines[0]?.skuName).toBe(sku!.name);
+    expect(Number(preparedDetail.order.lines.find(line => line.id === lineId)?.prepared)).toBe(5);
+    expect(preparedDetail.allocations).toContainEqual(expect.objectContaining({
+      lineId,
+      lotId: seededLot.id,
+      balanceId: seededStock.id,
+      requestedQuantity: "5",
+      actualQuantity: "5",
+      state: "prepared",
+    }));
+    expect(preparedDetail.reservations).toHaveLength(0);
+    expect(preparedDetail.version).toBe(prepared.envelope.expectedVersion + 1);
+    const inventoryPrepared = inventoryBalance(await getInventoryReport(page));
+    expect(Number(inventoryPrepared.balanceQuantity)).toBe(quantityBefore - 5);
+    expect(Number(inventoryPrepared.reservedQuantity)).toBe(reservedBefore);
+    expect(Number(inventoryPrepared.availableQuantity)).toBe(Number(inventoryReserved.availableQuantity));
 
-  const ordersBeforePickupResponse = page.waitForResponse(response =>
-    new URL(response.url()).pathname === "/api/operations/orders" && response.request().method() === "GET" && response.status() === 200,
-  );
-  await page.reload();
-  await ordersBeforePickupResponse;
-  const ordersBeforePickup = await getOperation<{
-    items: Array<{
-      id: string;
-      channel: string;
-      commercialState: string;
-      fulfillmentState: string;
-      lines: Array<{ id: string; skuId: string; skuName: string | null; unit: string; requested: string; prepared: string; delivered: string }>;
-    }>;
-    versions: Record<string, number>;
-  }>(page, "orders");
-  const orderBeforePickup = ordersBeforePickup.items.find(item => item.id === orderId);
-  expect(orderBeforePickup).toMatchObject({ id: orderId, channel: "local", commercialState: "confirmed", fulfillmentState: "prepared" });
-  expect(orderBeforePickup?.lines).toHaveLength(1);
-  expect(orderBeforePickup?.lines[0]).toMatchObject({ id: lineId, skuId, skuName: sku!.name, unit: "g" });
-  expect(Number(orderBeforePickup?.lines[0]?.requested)).toBe(5);
-  expect(Number(orderBeforePickup?.lines[0]?.prepared)).toBe(5);
-  expect(Number(orderBeforePickup?.lines[0]?.delivered)).toBe(0);
-  const pickupVersionBefore = ordersBeforePickup.versions[orderId];
-  expect(pickupVersionBefore).toBe(preparedDetail.version);
+    const ordersBeforePickupResponse = page.waitForResponse(response =>
+      new URL(response.url()).pathname === "/api/operations/orders" && response.request().method() === "GET" && response.status() === 200,
+    );
+    await page.reload();
+    await ordersBeforePickupResponse;
+    const ordersBeforePickup = await getOperation<{
+      items: Array<{
+        id: string;
+        channel: string;
+        commercialState: string;
+        fulfillmentState: string;
+        lines: Array<{ id: string; skuId: string; skuName: string | null; unit: string; requested: string; prepared: string; delivered: string }>;
+      }>;
+      versions: Record<string, number>;
+    }>(page, "orders");
+    const orderBeforePickup = ordersBeforePickup.items.find(item => item.id === orderId);
+    expect(orderBeforePickup).toMatchObject({ id: orderId, channel: "local", commercialState: "confirmed", fulfillmentState: "prepared" });
+    expect(orderBeforePickup?.lines).toHaveLength(1);
+    expect(orderBeforePickup?.lines[0]).toMatchObject({ id: lineId, skuId, skuName: sku!.name, unit: "g" });
+    expect(Number(orderBeforePickup?.lines[0]?.requested)).toBe(5);
+    expect(Number(orderBeforePickup?.lines[0]?.prepared)).toBe(5);
+    expect(Number(orderBeforePickup?.lines[0]?.delivered)).toBe(0);
+    const pickupVersionBefore = ordersBeforePickup.versions[orderId];
+    expect(pickupVersionBefore).toBe(preparedDetail.version);
 
-  const pickupRow = page.getByRole("row").filter({ hasText: `Pedido #${orderId.slice(0, 8).toUpperCase()}` });
-  await expect(pickupRow.getByRole("button", { name: "Completar retiro", exact: true })).toBeVisible();
-  const pickupCommandPosts = watchCommandPosts(page);
-  await pickupRow.getByRole("button", { name: "Completar retiro", exact: true }).click();
-  const pickupDialog = page.getByRole("dialog");
-  await expect(pickupDialog.getByRole("heading", { name: "Registrar retiro y cantidades físicas" })).toBeVisible();
-  await expect(pickupDialog.getByLabel(`Cantidad entregada · renglón 1: ${sku!.name}`)).toHaveValue("5");
-  await pickupDialog.getByLabel(`Cantidad física · renglón 1: ${sku!.name}`).fill("5");
-  await pickupDialog.getByLabel("Evidencia del retiro").fill("Retiro local sintético del pedido confirmado.");
-  const pickup = await submitCommand(page, "LocalPickupCompleted", "Revisar y registrar");
-  pickupCommandPosts.stop();
-  expect(pickup.envelope).toMatchObject({
-    command: "LocalPickupCompleted",
-    targetId: orderId,
-    expectedVersion: pickupVersionBefore,
-    data: { lines: [{ lineId, quantity: "5", actualQuantity: "5" }] },
-  });
-  expect(pickupCommandPosts.envelopes.filter(envelope => envelope.command === "LocalPickupCompleted")).toHaveLength(1);
-  expect(pickup.body.result.result).toMatchObject({
-    orderId,
-    fulfillmentState: "delivered",
-    lines: [expect.objectContaining({ lineId, deliveredQuantity: "5.000" })],
-  });
-  expect(pickup.body.version).toBe(pickupVersionBefore + 1);
+    const pickupRow = page.getByRole("row").filter({ hasText: `Pedido #${orderId.slice(0, 8).toUpperCase()}` });
+    await expect(pickupRow.getByRole("button", { name: "Completar retiro", exact: true })).toBeVisible();
+    const pickupCommandPosts = watchCommandPosts(page);
+    await pickupRow.getByRole("button", { name: "Completar retiro", exact: true }).click();
+    const pickupDialog = page.getByRole("dialog");
+    await expect(pickupDialog.getByRole("heading", { name: "Registrar retiro y cantidades físicas" })).toBeVisible();
+    await expect(pickupDialog.getByLabel(`Cantidad entregada · renglón 1: ${sku!.name}`)).toHaveValue("5");
+    await pickupDialog.getByLabel(`Cantidad física · renglón 1: ${sku!.name}`).fill("5");
+    await pickupDialog.getByLabel("Evidencia del retiro").fill("Retiro local sintético del pedido confirmado.");
+    const pickup = await submitCommand(page, "LocalPickupCompleted", "Revisar y registrar");
+    pickupCommandPosts.stop();
+    expect(pickup.envelope).toMatchObject({
+      command: "LocalPickupCompleted",
+      targetId: orderId,
+      expectedVersion: pickupVersionBefore,
+      data: { lines: [{ lineId, quantity: "5", actualQuantity: "5" }] },
+    });
+    expect(pickupCommandPosts.envelopes.filter(envelope => envelope.command === "LocalPickupCompleted")).toHaveLength(1);
+    expect(pickup.body.result.result).toMatchObject({
+      orderId,
+      fulfillmentState: "delivered",
+      lines: [expect.objectContaining({ lineId, deliveredQuantity: "5.000" })],
+    });
+    expect(pickup.body.version).toBe(pickupVersionBefore + 1);
 
-  const pickedUpDetail = await getOperation<OrderDetail>(page, `orders/${orderId}`);
-  expect(pickedUpDetail.version).toBe(pickupVersionBefore + 1);
-  expect(pickedUpDetail.order).toMatchObject({ id: orderId, fulfillmentState: "delivered" });
-  expect(pickedUpDetail.order.lines).toHaveLength(1);
-  expect(pickedUpDetail.order.lines[0]).toMatchObject({ id: lineId, skuId, skuName: sku!.name, unit: "g" });
-  expect(Number(pickedUpDetail.order.lines[0]?.prepared)).toBe(5);
-  expect(Number(pickedUpDetail.order.lines[0]?.delivered)).toBe(5);
-  expect(pickedUpDetail.allocations).toHaveLength(1);
-  expect(pickedUpDetail.allocations[0]).toMatchObject({
-    lineId,
-    lotId: seededLot.id,
-    balanceId: seededStock.id,
-    state: "delivered",
-  });
-  expect(Number(pickedUpDetail.allocations[0]?.deliveredQuantity)).toBe(5);
+    const pickedUpDetail = await getOperation<OrderDetail>(page, `orders/${orderId}`);
+    expect(pickedUpDetail.version).toBe(pickupVersionBefore + 1);
+    expect(pickedUpDetail.order).toMatchObject({ id: orderId, fulfillmentState: "delivered" });
+    expect(pickedUpDetail.order.lines).toHaveLength(1);
+    expect(pickedUpDetail.order.lines[0]).toMatchObject({ id: lineId, skuId, skuName: sku!.name, unit: "g" });
+    expect(Number(pickedUpDetail.order.lines[0]?.prepared)).toBe(5);
+    expect(Number(pickedUpDetail.order.lines[0]?.delivered)).toBe(5);
+    expect(pickedUpDetail.allocations).toHaveLength(1);
+    expect(pickedUpDetail.allocations[0]).toMatchObject({
+      lineId,
+      lotId: seededLot.id,
+      balanceId: seededStock.id,
+      state: "delivered",
+    });
+    expect(Number(pickedUpDetail.allocations[0]?.deliveredQuantity)).toBe(5);
+  } finally {
+    if (skuDeactivationAttempted) {
+      await restoreActiveSku(page, sku!, "e2e-restore-sku-b-after-local-pickup");
+    }
+  }
 });
