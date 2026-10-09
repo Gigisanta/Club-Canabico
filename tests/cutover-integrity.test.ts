@@ -232,28 +232,24 @@ test("cutover keeps legacy reviews compatible, rejects an unproven AppSheet gate
     assert.equal(stillShadowAndBound.cutoverProfile, "appsheet-replacement");
     assert.equal(stillShadowAndBound.captureManifestId, captureId);
 
-    const staleReactivation = envelope("operations", "AuthorityActivated", {
-      cutoverProfile: "legacy", evidence: { reference: "synthetic reactivation version check" },
-    }, 0);
-    const rejectedReactivation = await call("/operations/commands", "cutover-activator", staleReactivation);
-    assert.equal(rejectedReactivation.status, 409);
-    assert.equal((await rejectedReactivation.json()).code, "VERSION_CONFLICT");
-    assert.equal(await db.commandReceipt.findUnique({ where: { requestId: staleReactivation.requestId } }), null);
-    assert.equal(await db.operationAudit.count({ where: { requestId: staleReactivation.requestId } }), 0);
-    assert.equal(await db.operationOutbox.count({ where: { requestId: staleReactivation.requestId } }), 0);
-    assert.equal((await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } })).mode, "shadow");
-
-    const reactivate = envelope("operations", "AuthorityActivated", {
-      cutoverProfile: "legacy", evidence: { reference: "synthetic reactivation after gate revalidation" },
-    }, 1);
-    const reactivated = await call("/operations/commands", "cutover-activator", reactivate);
-    assert.equal(reactivated.status, 200, await reactivated.clone().text());
-    const reactivatedAuthority = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
-    assert.equal(reactivatedAuthority.mode, "active");
-    assert.equal(reactivatedAuthority.epoch, 9);
-    assert.equal(reactivatedAuthority.firstRealWriteAt?.toISOString(), firstRealWriteAt.toISOString());
-    const reactivatedRead = await call("/operations/authority", "cutover-owner");
-    assert.equal((await reactivatedRead.json()).versions.operations, 2);
+    for (const expectedVersion of [0, 1]) {
+      const legacyReactivation = envelope("operations", "AuthorityActivated", {
+        cutoverProfile: "legacy", evidence: { reference: "synthetic legacy downgrade after suspension" },
+      }, expectedVersion);
+      const rejectedReactivation = await call("/operations/commands", "cutover-activator", legacyReactivation);
+      assert.equal(rejectedReactivation.status, 423);
+      const rejection = await rejectedReactivation.json();
+      assert.equal(rejection.code, "APPSHEET_REPLACEMENT_REQUIRED",
+        "both stale and current versions must preserve the AppSheet replacement profile");
+      assert.equal(rejection.details?.captureId, captureId);
+      assert.equal(await db.commandReceipt.findUnique({ where: { requestId: legacyReactivation.requestId } }), null);
+      assert.equal(await db.operationAudit.count({ where: { requestId: legacyReactivation.requestId } }), 0);
+      assert.equal(await db.operationOutbox.count({ where: { requestId: legacyReactivation.requestId } }), 0);
+      assert.deepEqual(await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } }), suspendedAuthority);
+      assert.equal((await db.operationObject.findUniqueOrThrow({ where: { id: "operations" } })).version, 1);
+    }
+    const stillSuspendedRead = await call("/operations/authority", "cutover-owner");
+    assert.equal((await stillSuspendedRead.json()).versions.operations, 1);
   } finally {
     if (priorApproval === undefined) delete process.env.CLUB_OPERATIONS_APPROVED;
     else process.env.CLUB_OPERATIONS_APPROVED = priorApproval;
