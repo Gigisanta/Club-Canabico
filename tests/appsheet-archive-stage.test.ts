@@ -161,14 +161,16 @@ async function createSchema(testDatabase: URL, schema: string) {
   }
 }
 
-function fixtureManifest(fileHash: string, formulaOnlyRow = false) {
+function fixtureManifest(fileHash: string, formulaOnlyRow = false, collationOrderRows = false) {
   const { APPSHEET_ARCHIVE_SHEETS, APPSHEET_ARCHIVE_SOURCE_SYSTEM } = appSheetStage();
   return {
     schemaVersion: 1,
     fileHash,
     sourceSystem: APPSHEET_ARCHIVE_SOURCE_SYSTEM,
     sheets: APPSHEET_ARCHIVE_SHEETS.map((name) => {
-      const recordCount = name === "C_Cliente" || name === "Movimiento_Nueva" || (formulaOnlyRow && name === "D_Catalogo_Mercaderia") ? 1 : 0;
+      const recordCount = name === "C_Cliente" || name === "Movimiento_Nueva" ||
+        (formulaOnlyRow && name === "D_Catalogo_Mercaderia") ||
+        (collationOrderRows && (name === "C_gastos_operacion" || name === "C_Mercaderia")) ? 1 : 0;
       const primaryKeyHeader = fixturePrimaryKeyHeaders[name] ?? null;
       return {
         name,
@@ -193,10 +195,14 @@ function fixtureCoordinateCoverage(fileHash: string) {
   };
 }
 
-async function syntheticWorkbook(label: string, options: { credentialHeaderOnBusinessSheet?: boolean; formulaOnlyRow?: boolean } = {}) {
+async function syntheticWorkbook(label: string, options: {
+  credentialHeaderOnBusinessSheet?: boolean;
+  formulaOnlyRow?: boolean;
+  collationOrderRows?: boolean;
+} = {}) {
   const { APPSHEET_ARCHIVE_SHEETS, APPSHEET_COORDINATE_ONLY_SHEETS } = appSheetStage();
   const workbook = new ExcelJS.Workbook();
-  const { credentialHeaderOnBusinessSheet = false, formulaOnlyRow = false } = options;
+  const { credentialHeaderOnBusinessSheet = false, formulaOnlyRow = false, collationOrderRows = false } = options;
   for (const name of APPSHEET_ARCHIVE_SHEETS) {
     const sheet = workbook.addWorksheet(name);
     const primaryKeyHeader = fixturePrimaryKeyHeaders[name];
@@ -216,6 +222,8 @@ async function syntheticWorkbook(label: string, options: { credentialHeaderOnBus
     if (name === "C_Cliente") sheet.addRow([0, `Cliente sintético ${label}`, credentialHeaderOnBusinessSheet ? "synthetic-token-only" : 0]);
     if (name === "D_Catalogo_Mercaderia" && formulaOnlyRow) sheet.getCell("B2").value = { formula: "1+1" };
     if (name === "Movimiento_Nueva") sheet.addRow([`movimiento-sintético-${label}`, "Fila de archivo sintética"]);
+    if (name === "C_gastos_operacion" && collationOrderRows) sheet.addRow([`gasto-sintético-${label}`, "Gasto sintético"]);
+    if (name === "C_Mercaderia" && collationOrderRows) sheet.addRow([`mercadería-sintética-${label}`, "Mercadería sintética"]);
   }
 
   for (const name of APPSHEET_COORDINATE_ONLY_SHEETS) {
@@ -268,6 +276,9 @@ test("AppSheet archive staging persists a scoped snapshot atomically and replays
     await chmod(privateObjectRoot, 0o700);
     schemaState = await createSchema(testDatabase, schema);
     const { base, db, scopedUrl } = schemaState;
+    // The migration defines sourceTable as TEXT. Pin only this disposable schema's sort order so the replay regression is independent of the database's default locale.
+    await db.$executeRawUnsafe(`ALTER TABLE "${schema}"."LegacySourceRecord"
+      ALTER COLUMN "sourceTable" TYPE TEXT COLLATE "C" USING "sourceTable"::text`);
     const backupDirectory = join(temporaryRoot, "encrypted-backup");
     assert.equal((globalThis as typeof globalThis & { bomboPrisma?: unknown }).bomboPrisma, undefined,
       "the AppSheet archive test must not inherit an application Prisma singleton");
@@ -306,10 +317,10 @@ test("AppSheet archive staging persists a scoped snapshot atomically and replays
     assert.equal((await readFile(join(backupDirectory, "manifest.sha256"), "utf8")).trim(), backupManifestHash);
 
     const sourceFile = join(temporaryRoot, "fixture-appsheet-archive.xlsx");
-    const bytes = await syntheticWorkbook("first", { formulaOnlyRow: true });
+    const bytes = await syntheticWorkbook("first", { formulaOnlyRow: true, collationOrderRows: true });
     await writeFile(sourceFile, bytes, { mode: 0o600 });
     const fileHash = createHash("sha256").update(bytes).digest("hex");
-    const manifest = fixtureManifest(fileHash, true);
+    const manifest = fixtureManifest(fileHash, true, true);
     const coordinateCoverage = fixtureCoordinateCoverage(fileHash);
     const prepared = await prepareAppSheetArchiveStage({
       filePath: sourceFile,
@@ -321,11 +332,13 @@ test("AppSheet archive staging persists a scoped snapshot atomically and replays
     assert.equal(prepared.snapshot.sourceSystem, APPSHEET_ARCHIVE_SOURCE_SYSTEM);
     assert.equal(prepared.snapshot.importerVersion, APPSHEET_ARCHIVE_IMPORTER_VERSION);
     assert.equal(prepared.snapshot.sheets.length, 32);
-    assert.equal(prepared.records.length, 3);
+    assert.equal(prepared.records.length, 5);
     assert.deepEqual(prepared.records.map((record) => [record.sourceTable, record.sourceKey, record.treatment]), [
       ["C_Cliente", "0", "archive_only"],
       ["D_Catalogo_Mercaderia", "synthetic:D_Catalogo_Mercaderia!A2", "archive_only"],
       ["Movimiento_Nueva", "movimiento-sintético-first", "archive_only"],
+      ["C_gastos_operacion", "gasto-sintético-first", "archive_only"],
+      ["C_Mercaderia", "mercadería-sintética-first", "archive_only"],
     ]);
     const zeroCustomer = prepared.records.find((record) => record.sourceTable === "C_Cliente")!;
     assert.equal(zeroCustomer.normalized.columns.find((column) => column.header === "Monto")?.value, "0");
@@ -345,10 +358,10 @@ test("AppSheet archive staging persists a scoped snapshot atomically and replays
       "an uncached formula is preserved as source evidence without inferring a canonical value");
     assert.equal(formulaOnlyRecord.exceptions.some((exception) => exception.kind === "missing_source_key"), true);
     assert.equal(formulaOnlyRecord.exceptions.some((exception) => exception.kind === "formula_without_cached_result"), true);
-    assert.deepEqual(prepared.snapshot.summary.recordsByTreatment, { fact_candidate: 0, archive_only: 3, overlap_evidence: 0 });
-    assert.equal(prepared.snapshot.summary.keyedRecordCount, 2);
+    assert.deepEqual(prepared.snapshot.summary.recordsByTreatment, { fact_candidate: 0, archive_only: 5, overlap_evidence: 0 });
+    assert.equal(prepared.snapshot.summary.keyedRecordCount, 4);
     assert.equal(JSON.stringify(prepared).includes(authCanary), false, "the excluded T_Usuarios auth canary must not enter prepared data");
-    assert.equal(prepared.metrics.recordCount, 3);
+    assert.equal(prepared.metrics.recordCount, 5);
     assert.equal(prepared.metrics.exceptionCount, 2);
     assert.equal(prepared.metrics.quarantinedRecordCount, 0);
     assert.equal(prepared.metrics.unlabeledRowsOmitted, 0);
@@ -356,7 +369,7 @@ test("AppSheet archive staging persists a scoped snapshot atomically and replays
     assert.equal(prepared.metrics.formulaWithoutCachedResultCells, 1);
     const preview = previewAppSheetArchive(prepared);
     assert.equal(preview.status, "preview");
-    assert.equal(preview.recordCount, 3);
+    assert.equal(preview.recordCount, 5);
     assert.equal(preview.formulaOnlyRows, 1, "preview counts formula definitions even when the cached result is absent");
     assert.equal(preview.formulaWithoutCachedResultCells, 1);
     assert.deepEqual(prepared.coordinateCoverage.sheets.map((sheet) => [sheet.name, sheet.extracted]),
@@ -410,7 +423,7 @@ test("AppSheet archive staging persists a scoped snapshot atomically and replays
       sourceSystem: APPSHEET_ARCHIVE_SOURCE_SYSTEM,
       importerVersion: APPSHEET_ARCHIVE_IMPORTER_VERSION,
       sheetCount: 32,
-      recordCount: 3,
+      recordCount: 5,
       exceptionCount: 2,
       quarantinedRecordCount: 0,
       unlabeledRowsOmitted: 0,
@@ -437,7 +450,7 @@ test("AppSheet archive staging persists a scoped snapshot atomically and replays
     assert.equal(stageControls.status, "staged");
     assert.equal(stageControls.reviewedBy, null);
     assert.equal(stageControls.reviewedAt, null);
-    assert.equal(stageControls.recordCount, 3);
+    assert.equal(stageControls.recordCount, 5);
     assert.equal(stageControls.exceptionCount, 2);
     assert.equal(stageControls.formulaOnlyRows, 1);
     assert.equal(stageControls.formulaWithoutCachedResultCells, 1);
@@ -447,9 +460,11 @@ test("AppSheet archive staging persists a scoped snapshot atomically and replays
       where: { snapshotId: staged.snapshotId },
       orderBy: [{ sourceTable: "asc" }, { sourceRow: "asc" }],
     });
-    assert.equal(persistedRecords.length, 3);
+    assert.equal(persistedRecords.length, 5);
     assert.deepEqual(persistedRecords.map((record) => [record.sourceTable, record.sourceKey, record.treatment]), [
       ["C_Cliente", "0", "archive_only"],
+      ["C_Mercaderia", "mercadería-sintética-first", "archive_only"],
+      ["C_gastos_operacion", "gasto-sintético-first", "archive_only"],
       ["D_Catalogo_Mercaderia", "synthetic:D_Catalogo_Mercaderia!A2", "archive_only"],
       ["Movimiento_Nueva", "movimiento-sintético-first", "archive_only"],
     ]);
@@ -485,7 +500,7 @@ test("AppSheet archive staging persists a scoped snapshot atomically and replays
       rowManifestHash: prepared.rowManifestHash,
       backupManifestHash,
       backupSnapshotAt: backupManifest.snapshotAt,
-      recordCount: 3,
+      recordCount: 5,
       exceptionCount: 2,
       quarantinedRecordCount: 0,
       unlabeledRowsOmitted: 0,
@@ -499,7 +514,7 @@ test("AppSheet archive staging persists a scoped snapshot atomically and replays
     assert.equal(await db.legacyHistoryPublication.count({ where: { snapshotId: staged.snapshotId } }), 0);
     const afterStage = await operationState(db);
     assert.equal(afterStage.snapshots, beforeStage.snapshots + 1);
-    assert.equal(afterStage.records, beforeStage.records + 3);
+    assert.equal(afterStage.records, beforeStage.records + 5);
     assert.equal(afterStage.exceptions, beforeStage.exceptions + 2);
     assert.equal(afterStage.operationObjects, beforeStage.operationObjects + 1);
     assert.equal(afterStage.audits, beforeStage.audits + 1);

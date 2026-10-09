@@ -723,13 +723,15 @@ async function verifyExistingSnapshot(tx: Prisma.TransactionClient, prepared: Pr
     tx.operationAudit.findMany({ where: { objectId: snapshot.id, action: "legacy.appsheet_business_archive_staged" },
       orderBy: { createdAt: "asc" }, select: { actorId: true, action: true, objectId: true, details: true } }),
   ]);
-  const expectedRecords = [...prepared.persistedRecords].sort((a, b) =>
-    a.sourceTable.localeCompare(b.sourceTable) || a.sourceRow - b.sourceRow);
+  const compareRecords = (a: { sourceTable: string; sourceRow: number }, b: { sourceTable: string; sourceRow: number }) =>
+    a.sourceTable.localeCompare(b.sourceTable) || a.sourceRow - b.sourceRow;
+  const actualRecords = [...storedRecords].sort(compareRecords);
+  const expectedRecords = [...prepared.persistedRecords].sort(compareRecords);
   const expectedExceptions = [...prepared.exceptions].sort((a, b) =>
     (a.sourceRecordId ?? "").localeCompare(b.sourceRecordId ?? "") || a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
   const actualExceptions = [...storedExceptions].sort((a, b) =>
     (a.sourceRecordId ?? "").localeCompare(b.sourceRecordId ?? "") || a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
-  if (storedRecords.length !== expectedRecords.length || canonicalJson(storedRecords) !== canonicalJson(expectedRecords) ||
+  if (actualRecords.length !== expectedRecords.length || canonicalJson(actualRecords) !== canonicalJson(expectedRecords) ||
       storedExceptions.length !== expectedExceptions.length || canonicalJson(actualExceptions) !== canonicalJson(expectedExceptions) ||
       !operationObject || operationObject.kind !== "legacyImport" || operationObject.version !== 0 ||
       operationObject.createdBy !== APPSHEET_ARCHIVE_ACTOR || audits.length !== 1 || audits[0]!.actorId !== APPSHEET_ARCHIVE_ACTOR ||
