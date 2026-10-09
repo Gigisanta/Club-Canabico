@@ -8,6 +8,18 @@
   margin-bottom: 0;
 }
 
+.source-workspace .ops-section-heading {
+  min-width: 0;
+}
+
+.source-workspace .ops-section-heading > div:first-child {
+  min-width: 0;
+}
+
+.source-workspace .ops-section-heading :is(h2, p) {
+  overflow-wrap: anywhere;
+}
+
 .source-links {
   display: flex;
   flex-wrap: wrap;
