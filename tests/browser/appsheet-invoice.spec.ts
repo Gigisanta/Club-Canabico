@@ -916,7 +916,7 @@ test("a catalog SKU that disappears after selection stays in the invoice draft a
   expect(catalogReads).toBeGreaterThan(0);
   skuCAvailability = "NO";
   const refreshedCatalog = page.waitForResponse(response => response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/catalog" && catalogReads > 1);
-  await page.locator(".ops-header-actions button").filter({ hasText: "Actualizar" }).evaluate(element => {
+  await page.locator('.ops-header-actions button[title="Actualizar"]').evaluate(element => {
     element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
   });
   await refreshedCatalog;
@@ -966,9 +966,18 @@ test("legacy invoice keeps the not-NO catalog rule and positive sub-gram quantit
   expect(commandPosts).toHaveLength(0);
 });
 
-test("an empty AppSheet preorder shell can be completed and reserved through one InvoiceUpdated save", async ({ page }) => {
+test("a retained AppSheet preorder line requires current availability before InvoiceUpdated", async ({ page }) => {
+  let skuCAvailability = "Sí";
+  let catalogReads = 0;
+  await page.route("**/api/operations/catalog**", async route => {
+    catalogReads += 1;
+    return fulfillCatalogAvailability(route, skuId => skuId === "ops-sku-c" ? skuCAvailability : "NO");
+  });
+  const invoiceUpdatedPosts: Request[] = [];
+  page.on("request", request => { if (isCommand(request, "InvoiceUpdated")) invoiceUpdatedPosts.push(request); });
   await enterOrders(page);
   const financeBefore = await financeSnapshot(page);
+  const stockBefore = await stockSnapshot(page, "ops-sku-c");
   await page.getByTestId("appsheet-preorder-open").click();
   const shell = page.getByTestId("appsheet-invoice-dialog");
   await expect(shell).toBeVisible();
@@ -976,6 +985,13 @@ test("an empty AppSheet preorder shell can be completed and reserved through one
   await expect(field(shell, "invoiceDate")).toBeDisabled();
   await expect(field(shell, "memberId")).toHaveAttribute("required", "");
   await selectMember(shell, "ops-member", "Socio de ensayo", "Buscar nombre del asociado por nombre");
+  await addProduct(page, shell, {
+    date: invoiceDate,
+    skuId: "ops-sku-c",
+    scale: "Precio_5_Gramos",
+    quantity: "3",
+    total: "12.01",
+  });
 
   const shellRefresh = page.waitForResponse(response =>
     response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/orders",
@@ -1002,20 +1018,18 @@ test("an empty AppSheet preorder shell can be completed and reserved through one
   await expect(preorderRow).toHaveCount(1);
   const shellDetail = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
   expect(shellDetail.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "preorder" });
-  expect(shellDetail.order.quote.lines).toEqual([]);
+  expect(shellDetail.order.quote.lines).toHaveLength(1);
+  expect(shellDetail.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201" });
   expect(shellDetail.reservations).toHaveLength(0);
   expect(shellDetail.deliveries).toHaveLength(0);
 
   await preorderRow.getByRole("button", { name: "Formulario de venta", exact: true }).click();
   const editor = page.getByTestId("appsheet-invoice-dialog");
   await expect(editor).toBeVisible();
-  await addProduct(page, editor, {
-    date: invoiceDate,
-    skuId: "ops-sku-c",
-    scale: "Precio_5_Gramos",
-    quantity: "3",
-    total: "12.01",
-  });
+  const historicalLine = editor.locator(".appsheet-dialog-lines li");
+  await expect(historicalLine).toHaveCount(1);
+  await expect(historicalLine).toContainText("3 g");
+  await expect(historicalLine.locator("[data-testid^='appsheet-edit-product-']")).toBeVisible();
 
   const acceptance = field(editor, "acceptance");
   await expect(acceptance).toBeVisible();
@@ -1034,12 +1048,50 @@ test("an empty AppSheet preorder shell can be completed and reserved through one
   await acceptance.fill(acceptanceNote);
   await expect(editor.getByTestId("appsheet-save-invoice")).toBeEnabled();
 
+  const refreshCatalog = async () => {
+    const priorReads = catalogReads;
+    const refreshed = page.waitForResponse(response =>
+      response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/catalog" && catalogReads > priorReads,
+    );
+    await page.locator('.ops-header-actions button[title="Actualizar"]').evaluate(element => {
+      element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+    });
+    await refreshed;
+  };
+
+  skuCAvailability = "NO";
+  await refreshCatalog();
+  await expect(historicalLine).toHaveCount(1);
+  await expect(historicalLine.locator("[data-testid^='appsheet-edit-product-']")).toBeVisible();
+  await expect(historicalLine.locator("small[role='alert']")).toContainText("Variedad conservada desde la preventa original");
+  await expect(historicalLine.locator("small[role='alert']")).toContainText("disponibilidad actual en el catálogo para confirmar");
+
+  await editor.getByTestId("appsheet-save-invoice").click();
+  await expect(editor.locator(".ops-inline-error[role='alert']")).toContainText("requiere disponibilidad actual en el catálogo para confirmar");
+  expect(invoiceUpdatedPosts).toHaveLength(0);
+  const afterBlockedConfirmation = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
+  expect(afterBlockedConfirmation.order).toMatchObject({ commercialState: "preorder" });
+  expect(afterBlockedConfirmation.order.quote.lines).toEqual(shellDetail.order.quote.lines);
+  expect(afterBlockedConfirmation.reservations).toHaveLength(0);
+  expect(afterBlockedConfirmation.deliveries).toHaveLength(0);
+  expect(await stockSnapshot(page, "ops-sku-c")).toEqual(stockBefore);
+  expect(await financeSnapshot(page)).toEqual(financeBefore);
+  await expect(historicalLine).toHaveCount(1);
+  await expect(historicalLine).toContainText("3 g");
+
+  skuCAvailability = "Sí";
+  await refreshCatalog();
+  await expect(historicalLine.locator("small[role='alert']")).toHaveCount(0);
+  await expect(acceptance).toHaveValue(acceptanceNote);
+  await expect(editor.getByTestId("appsheet-save-invoice")).toBeEnabled();
+
   const updateRefresh = page.waitForResponse(response =>
     response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/orders",
   );
   const updatedPromise = saveResponse(page, "InvoiceUpdated");
   await editor.getByTestId("appsheet-save-invoice").click();
   const updated = await updatedPromise;
+  expect(invoiceUpdatedPosts).toHaveLength(1);
   const updatedStatus = updated.status();
   const updatedText = updatedStatus === 200 ? "" : await updated.text();
   expect(updatedStatus, updatedText).toBe(200);
@@ -1173,3 +1225,129 @@ test("a late catalog page cannot leak rows or its cursor into a newer search", a
   expect(catalogueRequests).toContainEqual({ query: "B", cursor: "cursor-B-next" });
   expect(commandPosts).toEqual([]);
 });
+
+test("an empty AppSheet preorder shell can be completed and reserved through one InvoiceUpdated save", async ({ page }) => {
+  await enterOrders(page);
+  const financeBefore = await financeSnapshot(page);
+  await page.getByTestId("appsheet-preorder-open").click();
+  const shell = page.getByTestId("appsheet-invoice-dialog");
+  await expect(shell).toBeVisible();
+  const invoiceDate = await field(shell, "invoiceDate").inputValue();
+  await expect(field(shell, "invoiceDate")).toBeDisabled();
+  await expect(field(shell, "memberId")).toHaveAttribute("required", "");
+  await selectMember(shell, "ops-member", "Socio de ensayo", "Buscar nombre del asociado por nombre");
+
+  const shellRefresh = page.waitForResponse(response =>
+    response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/orders",
+  );
+  const shellSavedPromise = saveResponse(page, "InvoiceSaved");
+  await shell.getByTestId("appsheet-save-invoice").click();
+  const shellSaved = await shellSavedPromise;
+  const shellStatus = shellSaved.status();
+  const shellText = shellStatus === 200 ? "" : await shellSaved.text();
+  expect(shellStatus, shellText).toBe(200);
+  const shellBody = await shellSaved.json();
+  const shellId = shellBody.targetId as string;
+  expect(shellBody.result).toMatchObject({
+    orderId: shellId,
+    commercialState: "preorder",
+    deliveryId: null,
+    reservations: null,
+    quoteFrozen: false,
+  });
+  const shellOrders = await (await shellRefresh).json();
+  expect(shellOrders.items.some((item: { id: string }) => item.id === shellId)).toBe(true);
+
+  let preorderRow = page.locator("tbody tr").filter({ hasText: `Factura #${shellId.slice(0, 8).toUpperCase()}` });
+  await expect(preorderRow).toHaveCount(1);
+  const shellDetail = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
+  expect(shellDetail.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "preorder" });
+  expect(shellDetail.order.quote.lines).toEqual([]);
+  expect(shellDetail.reservations).toHaveLength(0);
+  expect(shellDetail.deliveries).toHaveLength(0);
+
+  await preorderRow.getByRole("button", { name: "Formulario de venta", exact: true }).click();
+  const editor = page.getByTestId("appsheet-invoice-dialog");
+  await expect(editor).toBeVisible();
+  await addProduct(page, editor, {
+    date: invoiceDate,
+    skuId: "ops-sku-c",
+    scale: "Precio_5_Gramos",
+    quantity: "3",
+    total: "12.01",
+  });
+
+  const acceptance = field(editor, "acceptance");
+  await expect(acceptance).toBeVisible();
+  await expect(acceptance).toHaveAttribute("required", "");
+  await expect(editor.getByTestId("appsheet-save-invoice")).toBeDisabled();
+  expect(await getJson(page, `orders/${encodeURIComponent(shellId)}`)).toMatchObject({
+    order: { commercialState: "preorder" },
+    reservations: [],
+    deliveries: [],
+  });
+  const acceptanceNote = "El cliente aceptó esta factura y el envío según los importes mostrados.";
+  await acceptance.fill(acceptanceNote);
+  await field(editor, "note").fill("Aclaración editada después de la aceptación.");
+  await expect(acceptance).toHaveValue("");
+  await expect(editor.getByTestId("appsheet-save-invoice")).toBeDisabled();
+  await acceptance.fill(acceptanceNote);
+  await expect(editor.getByTestId("appsheet-save-invoice")).toBeEnabled();
+
+  const updateRefresh = page.waitForResponse(response =>
+    response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/orders",
+  );
+  const updatedPromise = saveResponse(page, "InvoiceUpdated");
+  await editor.getByTestId("appsheet-save-invoice").click();
+  const updated = await updatedPromise;
+  const updatedStatus = updated.status();
+  const updatedText = updatedStatus === 200 ? "" : await updated.text();
+  expect(updatedStatus, updatedText).toBe(200);
+  const updatedBody = await updated.json();
+  const updatedEnvelope = updated.request().postDataJSON() as CommandEnvelope;
+  expect(updatedEnvelope.command).toBe("InvoiceUpdated");
+  expect(updatedEnvelope.targetId).toBe(shellId);
+  expect(updatedEnvelope.data).toMatchObject({
+    memberId: "ops-member",
+    invoiceDate,
+    preorder: false,
+    acceptance: { note: acceptanceNote },
+    lines: [{ skuId: "ops-sku-c", scale: "Precio_5_Gramos", quantity: "3", totalMinor: "1201" }],
+  });
+  expect(updatedBody.result).toMatchObject({ orderId: shellId, commercialState: "confirmed", quoteFrozen: true });
+
+  const refreshedOrders = await (await updateRefresh).json();
+  expect(refreshedOrders.items.filter((item: { id: string }) => item.id === shellId)).toHaveLength(1);
+  await expect(editor).toHaveCount(0);
+  const confirmed = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
+  expect(confirmed.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "confirmed", totalMinor: null, capturedBaseMinor: "1201", quote: { acceptance: { note: acceptanceNote } } });
+  expect(confirmed.order.quote.lines).toHaveLength(1);
+  expect(confirmed.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201" });
+  expect(confirmed.reservations).toHaveLength(1);
+  expect(confirmed.reservations[0]).toMatchObject({ quantity: "3" });
+  expect(confirmed.deliveries).toHaveLength(0);
+  expect(await financeSnapshot(page)).toEqual(financeBefore);
+});
+
+function mockedCataloguePage(prefix: string, count: number, nextCursor: string | null) {
+  const items = Array.from({ length: count }, (_, index) => {
+    const suffix = String(index + 1).padStart(3, "0");
+    const id = `${prefix}-${suffix}`;
+    return {
+      id,
+      code: id,
+      name: id,
+      variety: `Variedad ${id}`,
+      category: "Variedad sintética",
+      unit: "g",
+      active: true,
+      appSheet: { availability: "Sí", segment: null, price5Grams: null },
+    };
+  });
+  return {
+    items,
+    versions: Object.fromEntries(items.map(item => [item.id, 1])),
+    hasMore: Boolean(nextCursor),
+    nextCursor,
+  };
+}

@@ -420,12 +420,24 @@ export function AppSheetInvoiceForm(props: Props) {
     if (mode === "invoice" && !draft.lines.length) { setError("Agregá al menos un producto antes de guardar la factura."); return; }
     if (replacementProfile && !uncertain) {
       const missingSku = draft.lines.find(line =>
-        !isRetainedHistoricalLine(line) && !catalog.some(item => String(item.id) === line.skuId && invoiceSkuSelectable(item, true)),
+        !catalog.some(item => String(item.id) === line.skuId && invoiceSkuSelectable(item, true)),
       );
       if (missingSku) {
+        const missingFromLoadedPages = !catalog.some(item => String(item.id) === missingSku.skuId);
+        if (isRetainedHistoricalLine(missingSku)) {
+          const recovery = catalogError
+            ? "Reintentá la carga del catálogo"
+            : catalogLoading
+              ? "Esperá a que termine la verificación del catálogo"
+              : hasMoreCatalog && missingFromLoadedPages
+                ? "Cargá más variedades para verificarla"
+                : "Verificá el catálogo o elegí una variedad disponible";
+          setError(`La variedad se conserva desde la preventa original, pero requiere disponibilidad actual en el catálogo para confirmar. ${recovery}; conservamos el borrador.`);
+          return;
+        }
         setError(catalogError
           ? "No se pudo verificar el catálogo. Reintentá la carga antes de guardar; conservamos las líneas del borrador."
-          : catalogLoading || hasMoreCatalog && !catalog.some(item => String(item.id) === missingSku.skuId)
+          : catalogLoading || hasMoreCatalog && missingFromLoadedPages
             ? "La variedad no aparece entre las páginas cargadas. Cargá más variedades para verificarla; conservamos la línea del borrador."
             : "La variedad seleccionada dejó de estar disponible. Conservamos la línea del borrador; elegí una variedad disponible o quitá esa línea antes de guardar.");
         return;
@@ -502,10 +514,10 @@ export function AppSheetInvoiceForm(props: Props) {
   const isRetainedHistoricalLine = (line: InvoiceLineDraft) =>
     replacementProfile && mode === "edit-preorder" && initial.lines.some(original => original.id === line.id && original.skuId === line.skuId);
   const lineSkuNeedsAttention = (line: InvoiceLineDraft) =>
-    replacementProfile && !catalog.some(item => String(item.id) === line.skuId && invoiceSkuSelectable(item, true)) && !isRetainedHistoricalLine(line);
+    replacementProfile && !catalog.some(item => String(item.id) === line.skuId && invoiceSkuSelectable(item, true));
   const lineSkuAttentionMessage = (line: InvoiceLineDraft) => {
     const item = catalog.find(candidate => String(candidate.id) === line.skuId);
-    if (isRetainedHistoricalLine(line)) return "Variedad guardada en la preventa original; se conserva aunque no esté habilitada para nuevas líneas.";
+    if (isRetainedHistoricalLine(line)) return "Variedad conservada desde la preventa original; requiere disponibilidad actual en el catálogo para confirmar. Verificá el catálogo o elegí una variedad disponible.";
     if (catalogError) return "No se pudo verificar esta variedad. Reintentá la carga; conservamos la línea.";
     if (!item && hasMoreCatalog) return "No aparece en las páginas cargadas. Cargá más variedades para verificarla; conservamos la línea.";
     return "Esta variedad ya no está disponible. Conservamos la línea; elegí otra variedad o quitá esta antes de guardar.";
@@ -590,7 +602,7 @@ export function AppSheetInvoiceForm(props: Props) {
               const product = catalog.find(item => String(item.id) === line.skuId);
               const skuNeedsAttention = replacementProfile && !saleProducts.some(item => String(item.id) === line.skuId);
               return <li className="appsheet-dialog-line" key={line.id} data-testid={`appsheet-product-row-${line.id}`}>
-                <div><strong>{stringValue(product?.name, line.skuId || "Producto")}</strong><span>{line.date} · {line.scale || "Escala sin dato"} · {line.quantity} g · {formatMinor((() => { try { return amountFormToMinor(line.total); } catch { return "0"; } })(), draft.currency)}</span>{skuNeedsAttention && <small className={isRetainedHistoricalLine(line) ? "appsheet-footnote" : "appsheet-subtle-error"} role={isRetainedHistoricalLine(line) ? "status" : "alert"}>{lineSkuAttentionMessage(line)}</small>}</div>
+                <div><strong>{stringValue(product?.name, line.skuId || "Producto")}</strong><span>{line.date} · {line.scale || "Escala sin dato"} · {line.quantity} g · {formatMinor((() => { try { return amountFormToMinor(line.total); } catch { return "0"; } })(), draft.currency)}</span>{skuNeedsAttention && <small className="appsheet-subtle-error" role="alert">{lineSkuAttentionMessage(line)}</small>}</div>
                 <div className="appsheet-line-actions"><button type="button" className="ops-button ops-button-quiet ops-button-small" data-testid={`appsheet-edit-product-${line.id}`} onClick={() => openProduct(index)} disabled={busy || uncertain}>Editar producto</button><button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={() => removeProduct(index)} disabled={busy || uncertain}>Quitar</button></div>
               </li>;
             })}</ul> : <p className="appsheet-footnote">Todavía no agregaste productos.</p>}

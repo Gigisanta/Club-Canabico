@@ -77,7 +77,7 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
       dataUnresolvedFormulaCount: 0,
     } });
     await db.operationAuthority.create({
-      data: { id: "operations", mode: "active", cutoverProfile: "appsheet-replacement", captureManifestId: captureId, epoch: 2 },
+      data: { id: "operations", mode: "suspended", cutoverProfile: "legacy", captureManifestId: captureId, epoch: 1 },
     });
 
     const importedId = "appsheet-member-eligibility-imported";
@@ -86,11 +86,27 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
         sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM, sourceId: "source-17", legacyCustomerId: "source-17" },
     });
     await db.operationObject.create({ data: { id: importedId, kind: "member", version: 0, createdBy: ownerId } });
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires" }).format(now);
+    const validUntil = `${Number(today.slice(0, 4)) + 1}${today.slice(4)}`;
+    await db.memberPermission.create({
+      data: { memberId: importedId, kind: "operations", status: "verified", validFrom: today, validUntil },
+    });
     const legacyId = "appsheet-member-eligibility-legacy";
     await db.operationMember.create({
       data: { id: legacyId, name: "Old import", address: {}, preferences: {}, sourceSystem: "legacy-archive", sourceId: "archive-8", legacyCustomerId: "archive-8" },
     });
     await db.operationObject.create({ data: { id: legacyId, kind: "member", version: 0, createdBy: ownerId } });
+
+    const skuId = "appsheet-member-eligibility-sku";
+    const locationId = "appsheet-member-eligibility-location";
+    const lotId = "appsheet-member-eligibility-lot";
+    const balanceId = "appsheet-member-eligibility-balance";
+    await db.catalogSku.create({ data: { id: skuId, code: skuId, name: "Synthetic order product", variety: "Fixture", category: "Fixture", unit: "g" } });
+    await db.location.create({ data: { id: locationId, key: locationId, name: "Synthetic order location" } });
+    await db.inventoryLot.create({
+      data: { id: lotId, skuId, label: "Synthetic order lot", unit: "g", unitCost: "1", costCurrency: "ARS", receivedAt: now },
+    });
+    await db.stockBalance.create({ data: { id: balanceId, lotId, locationId, custodianId: ownerId, unit: "g", quantity: "100", reserved: "0" } });
 
     const { app } = await import("../server/app.js");
     server = app.listen(0, "127.0.0.1");
@@ -126,10 +142,117 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
       expectedVersion: 0,
       occurredAt: new Date().toISOString(),
     });
+
+    const quoteData = (lineId: string) => ({
+      items: [{ id: lineId, skuId, quantity: "1", manualUnitPrice: "1", manualReason: "Synthetic eligibility boundary" }],
+      packs: [], currency: "ARS", paymentMethod: "cash", deliveryMinor: "0", bonusDiscountMinor: "0",
+      promotionEligibilityEvidence: {}, deliveryPolicyEvidence: {},
+    });
+    async function successfulCommand(targetId: string, command: string, data: Record<string, unknown>, expectedVersion = 0) {
+      const request = { ...envelope(targetId, command, data), expectedVersion };
+      const result = await call("/operations/commands", request);
+      assert.equal(result.response.status, 200, `${command}: ${JSON.stringify(result.body)}`);
+      return { request, ...result };
+    }
+    async function createAndQuote(targetId: string, channel: "local" | "delivery", lineId: string) {
+      await successfulCommand(targetId, "OrderCreated", { memberId: importedId, channel, currency: "ARS", address: {}, preorder: false });
+      await successfulCommand(targetId, "OrderQuoted", quoteData(lineId), 1);
+    }
+
+    // Build real persisted drafts under the legacy profile. They represent work
+    // already in progress when the replacement authority is activated below.
+    const staleQuoteId = `appsheet-member-eligibility-stale-quote-${randomUUID()}`;
+    await successfulCommand(staleQuoteId, "OrderCreated", { memberId: importedId, channel: "local", currency: "ARS", address: {}, preorder: false });
+    const staleConfirmId = `appsheet-member-eligibility-stale-confirm-${randomUUID()}`;
+    await createAndQuote(staleConfirmId, "delivery", `stale-confirm-line-${randomUUID()}`);
+    const staleRevisionId = `appsheet-member-eligibility-stale-revision-${randomUUID()}`;
+    await createAndQuote(staleRevisionId, "delivery", `stale-revision-line-${randomUUID()}`);
+    await successfulCommand(staleRevisionId, "OrderConfirmed", {
+      quoteVersion: 1, acceptance: { note: "Synthetic accepted quote before cutover" },
+    }, 2);
+    await db.operationAuthority.update({
+      where: { id: "operations" },
+      data: { mode: "active", cutoverProfile: "appsheet-replacement", captureManifestId: captureId, epoch: 2 },
+    });
+
+    const deniedEffects = async (request: CommandEnvelope, targetId: string, expectedVersion: number | null) => {
+      const denied = await call("/operations/commands", request);
+      assert.equal(denied.response.status, 423, `${request.command}: ${JSON.stringify(denied.body)}`);
+      assert.equal(denied.body.error?.code, "APPSHEET_MEMBER_NOT_ELIGIBLE");
+      assert.equal(await db.operationObject.findUnique({ where: { id: targetId } }).then(row => row?.version ?? null), expectedVersion);
+      assert.equal(await db.commandReceipt.count({ where: { requestId: request.requestId } }), 0);
+      assert.equal(await db.operationOutbox.count({ where: { requestId: request.requestId } }), 0);
+      assert.equal(await db.operationAudit.count({ where: { requestId: request.requestId } }), 0);
+      return denied;
+    };
+
+    const importedOrderId = `appsheet-member-eligibility-imported-order-${randomUUID()}`;
+    const importedOrder = envelope(importedOrderId, "OrderCreated", {
+      memberId: importedId, channel: "delivery", currency: "ARS", address: {}, preorder: false,
+    });
+    await deniedEffects(importedOrder, importedOrderId, null);
+    assert.equal(await db.operationOrder.findUnique({ where: { id: importedOrderId } }), null);
+
+    const staleQuoteBefore = await db.operationOrder.findUniqueOrThrow({ where: { id: staleQuoteId } });
+    const staleQuoteVersionBefore = (await db.operationObject.findUniqueOrThrow({ where: { id: staleQuoteId } })).version;
+    const staleQuoteRequest = envelope(staleQuoteId, "OrderQuoted", quoteData(`denied-quote-line-${randomUUID()}`));
+    staleQuoteRequest.expectedVersion = staleQuoteVersionBefore;
+    await deniedEffects(staleQuoteRequest, staleQuoteId, staleQuoteVersionBefore);
+    assert.deepEqual(await db.operationOrder.findUniqueOrThrow({ where: { id: staleQuoteId } }), staleQuoteBefore);
+    assert.equal(await db.operationOrderLine.count({ where: { orderId: staleQuoteId } }), 0);
+
+    const staleConfirmBefore = await db.operationOrder.findUniqueOrThrow({ where: { id: staleConfirmId } });
+    const staleConfirmLineBefore = await db.operationOrderLine.findMany({ where: { orderId: staleConfirmId } });
+    const staleConfirmObjectVersion = (await db.operationObject.findUniqueOrThrow({ where: { id: staleConfirmId } })).version;
+    const staleConfirmStockBefore = {
+      reservations: await db.stockReservation.count({ where: { orderId: staleConfirmId } }),
+      reserved: (await db.stockBalance.findUniqueOrThrow({ where: { id: balanceId } })).reserved.toString(),
+      deliveries: await db.deliveryAssignment.count({ where: { orderId: staleConfirmId } }),
+    };
+    const staleConfirmRequest = envelope(staleConfirmId, "OrderConfirmed", {
+      quoteVersion: 1, acceptance: { note: "Synthetic stale draft confirmation" },
+    });
+    staleConfirmRequest.expectedVersion = staleConfirmObjectVersion;
+    await deniedEffects(staleConfirmRequest, staleConfirmId, staleConfirmObjectVersion);
+    assert.deepEqual(await db.operationOrder.findUniqueOrThrow({ where: { id: staleConfirmId } }), staleConfirmBefore);
+    assert.deepEqual(await db.operationOrderLine.findMany({ where: { orderId: staleConfirmId } }), staleConfirmLineBefore);
+    assert.deepEqual({
+      reservations: await db.stockReservation.count({ where: { orderId: staleConfirmId } }),
+      reserved: (await db.stockBalance.findUniqueOrThrow({ where: { id: balanceId } })).reserved.toString(),
+      deliveries: await db.deliveryAssignment.count({ where: { orderId: staleConfirmId } }),
+    }, staleConfirmStockBefore);
+
+    const staleRevisionBefore = await db.operationOrder.findUniqueOrThrow({ where: { id: staleRevisionId } });
+    const staleRevisionLineBefore = await db.operationOrderLine.findMany({ where: { orderId: staleRevisionId } });
+    const staleRevisionObjectVersion = (await db.operationObject.findUniqueOrThrow({ where: { id: staleRevisionId } })).version;
+    const staleRevisionStockBefore = {
+      reservations: await db.stockReservation.count({ where: { orderId: staleRevisionId } }),
+      reserved: (await db.stockBalance.findUniqueOrThrow({ where: { id: balanceId } })).reserved.toString(),
+      deliveries: await db.deliveryAssignment.count({ where: { orderId: staleRevisionId } }),
+    };
+    const staleRevisionRequest = envelope(staleRevisionId, "OrderQuoteRevisionAccepted", {
+      quote: quoteData(`denied-revision-line-${randomUUID()}`),
+      acceptance: { note: "Synthetic stale revision acceptance" }, reason: "Synthetic eligibility boundary",
+    });
+    staleRevisionRequest.expectedVersion = staleRevisionObjectVersion;
+    await deniedEffects(staleRevisionRequest, staleRevisionId, staleRevisionObjectVersion);
+    assert.deepEqual(await db.operationOrder.findUniqueOrThrow({ where: { id: staleRevisionId } }), staleRevisionBefore);
+    assert.deepEqual(await db.operationOrderLine.findMany({ where: { orderId: staleRevisionId } }), staleRevisionLineBefore);
+    assert.deepEqual({
+      reservations: await db.stockReservation.count({ where: { orderId: staleRevisionId } }),
+      reserved: (await db.stockBalance.findUniqueOrThrow({ where: { id: balanceId } })).reserved.toString(),
+      deliveries: await db.deliveryAssignment.count({ where: { orderId: staleRevisionId } }),
+    }, staleRevisionStockBefore);
+
     const nativeId = "appsheet-member-eligibility-native";
     const native = envelope(nativeId, "MemberCreated", { name: "Native after cutover", address: {}, preferences: {} });
     const nativeCreated = await call("/operations/commands", native);
     assert.equal(nativeCreated.response.status, 200, JSON.stringify(nativeCreated.body));
+    const nativeOrderId = `appsheet-member-eligibility-native-order-${randomUUID()}`;
+    const nativeOrder = await call("/operations/commands", envelope(nativeOrderId, "OrderCreated", {
+      memberId: nativeId, channel: "local", currency: "ARS", address: {}, preorder: false,
+    }));
+    assert.equal(nativeOrder.response.status, 200, JSON.stringify(nativeOrder.body));
     const secondNativeId = "appsheet-member-eligibility-native-page-two";
     const secondNative = envelope(secondNativeId, "MemberCreated", { name: "Native page two", address: {}, preferences: {} });
     const secondNativeCreated = await call("/operations/commands", secondNative);
