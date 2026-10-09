@@ -184,7 +184,8 @@ test("sources UI searches archived rows, pages exceptions, and preserves a confl
       return response.request().method() === "GET"
         && url.pathname === `/api/legacy-imports/source-control/${snapshotId}/records/${recordId}/exceptions`;
     });
-    await page.getByRole("button", { name: "Excepciones siguientes", exact: true }).click();
+    await page.getByLabel("Paginación de excepciones", { exact: true })
+      .getByRole("button", { name: "Excepciones siguientes", exact: true }).click();
     expect((await firstExceptions).status()).toBe(200);
     await expect(page.getByText("1 de 51 excepciones", { exact: true })).toBeVisible();
 
