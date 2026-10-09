@@ -87,6 +87,13 @@ test("cutover keeps legacy reviews compatible, rejects an unproven AppSheet gate
   }
   const priorApproval = process.env.CLUB_OPERATIONS_APPROVED;
   try {
+    assert.throws(() => finalDeltaProofForCapture(capture, {
+      ...finalDeltaInput, manualPauseEndedAt: new Date(cutoffAt.getTime() + 1_000).toISOString(),
+    }), (error: unknown) => {
+      assert.equal((error as { code?: unknown }).code, "APPSHEET_REPLACEMENT_NOT_READY");
+      assert.deepEqual((error as { details?: { blockers?: unknown } }).details?.blockers, ["final_delta_manual_pause_ended"]);
+      return true;
+    }, "a capture taken during a pause cannot authorize cutover after that pause ended");
     for (const id of ["cutover-owner", "cutover-author", "cutover-reviewer", "cutover-activator", "cutover-admin"]) await login(id);
 
     const firstGate = cutoverGateIds[0]!;

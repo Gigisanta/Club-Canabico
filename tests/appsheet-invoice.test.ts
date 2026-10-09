@@ -31,6 +31,8 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
   });
 
   const { db } = await import("../server/db.js");
+  const { AppSheetCanonicalError, stageAppSheetCanonicalMasters } = await import("../server/operations/appsheet-canonical.js");
+  const { project: syntheticCanonicalProject, technicalReview: syntheticCanonicalReview } = await import("./support/appsheet-canonical-fixture.js");
   let schemaCreated = false;
   let server: import("node:http").Server | undefined;
   try {
@@ -1345,6 +1347,20 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       assert.equal(await db.stockFact.count({ where: { requestId: movementRequest.requestId } }), 0);
       assert.equal(await db.operationObject.findUnique({ where: { id: movementLotId } }), null);
 
+      await db.operationAuthority.create({ data: { id: "operations", mode: "shadow", cutoverProfile: "legacy", captureManifestId: null } });
+      const canonicalBaselineProjection = syntheticCanonicalProject({
+        captureRevision: `before-authority-${randomUUID()}`,
+        memberKey: `member-before-authority-${randomUUID()}`,
+      });
+      const canonicalBaselineReview = syntheticCanonicalReview(canonicalBaselineProjection, "1".repeat(40));
+      const canonicalBaselineStage = await stageAppSheetCanonicalMasters(canonicalBaselineProjection, {
+        actorId: ownerId,
+        technicalReview: canonicalBaselineReview,
+        commitSha: "1".repeat(40),
+        target: "isolated-test",
+      }, db);
+      assert.equal(canonicalBaselineStage.replay, false, "a new synthetic canonical projection stages while authority is in shadow mode");
+
       await db.operationAuthority.upsert({
         where: { id: "operations" },
         create: { id: "operations", mode: "active", cutoverProfile: "appsheet-replacement", captureManifestId: captureId },
@@ -1382,6 +1398,82 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
         invoiceRecordCount: 1, numberedInvoiceCount: 1, unnumberedInvoiceCount: 0, duplicateInvoiceNumberCount: 0, duplicateHiddenIdCount: 0,
         seedEvidence: { fixture: "synthetic allocator test, not source certification" }, seededBy: ownerId, seededAt: captureNow,
       } });
+
+      const canonicalStageStateCounts = async () => ({
+        captures: await db.appSheetCaptureManifest.count(),
+        snapshots: await db.legacyImportSnapshot.count(),
+        sourceRecords: await db.legacySourceRecord.count(),
+        exceptions: await db.legacyException.count(),
+        members: await db.operationMember.count(),
+        skus: await db.catalogSku.count(),
+        identities: await db.legacyIdentity.count(),
+        objects: await db.operationObject.count(),
+        audits: await db.operationAudit.count(),
+        receipts: await db.commandReceipt.count(),
+        outbox: await db.operationOutbox.count(),
+        sequences: await db.appSheetInvoiceSequence.count(),
+        reservations: await db.appSheetInvoiceNumberReservation.count(),
+        orders: await db.operationOrder.count(),
+        orderLines: await db.operationOrderLine.count(),
+      });
+      const activeReplacementAuthority = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+      assert.equal(activeReplacementAuthority.mode, "active");
+      assert.equal(activeReplacementAuthority.cutoverProfile, "appsheet-replacement");
+      assert.equal(activeReplacementAuthority.captureManifestId, captureId);
+      assert.equal((await db.appSheetInvoiceSequence.findUniqueOrThrow({ where: { namespace: captureId } })).lastValue, 40n,
+        "the active replacement already has a stable, seeded invoice sequence");
+      const activeReplayBefore = await canonicalStageStateCounts();
+      const activeReplay = await stageAppSheetCanonicalMasters(canonicalBaselineProjection, {
+        actorId: ownerId,
+        technicalReview: canonicalBaselineReview,
+        commitSha: "1".repeat(40),
+        target: "isolated-test",
+      }, db);
+      assert.equal(activeReplay.replay, true, "active authority permits only an exact, already-validated no-op replay");
+      assert.deepEqual(await canonicalStageStateCounts(), activeReplayBefore, "the active replay changes no persisted state");
+
+      const canonicalAfterActivationProjection = syntheticCanonicalProject({
+        captureRevision: `after-authority-${randomUUID()}`,
+        memberKey: `member-after-authority-${randomUUID()}`,
+      });
+      const canonicalAfterActivationReview = syntheticCanonicalReview(canonicalAfterActivationProjection, "1".repeat(40));
+      const originalAuthority = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+      const setActiveAuthorityProfile = async (profile: "legacy" | "appsheet-replacement") => {
+        await db.operationAuthority.deleteMany({ where: { id: "operations" } });
+        await db.operationAuthority.create({ data: {
+          id: originalAuthority.id,
+          mode: "active",
+          cutoverProfile: profile,
+          captureManifestId: profile === "appsheet-replacement" ? captureId : null,
+          epoch: originalAuthority.epoch,
+          ...(originalAuthority.firstRealWriteAt ? { firstRealWriteAt: originalAuthority.firstRealWriteAt } : {}),
+          ...(originalAuthority.approvedBy ? { approvedBy: originalAuthority.approvedBy } : {}),
+          ...(originalAuthority.evidence === null ? {} : { evidence: originalAuthority.evidence as Prisma.InputJsonValue }),
+        } });
+      };
+      try {
+        for (const profile of ["legacy", "appsheet-replacement"] as const) {
+          if (profile !== (await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } })).cutoverProfile)
+            await setActiveAuthorityProfile(profile);
+          const beforeBlockedStage = await canonicalStageStateCounts();
+          await assert.rejects(stageAppSheetCanonicalMasters(canonicalAfterActivationProjection, {
+            actorId: ownerId,
+            technicalReview: canonicalAfterActivationReview,
+            commitSha: "1".repeat(40),
+            target: "isolated-test",
+          }, db), (error: unknown) => error instanceof AppSheetCanonicalError &&
+            error.code === "canonical_master_stage_requires_shadow_authority");
+          assert.deepEqual(await canonicalStageStateCounts(), beforeBlockedStage,
+            `active ${profile} authority rejects a new master projection without writing captures, snapshots, masters, identities, objects, or effects`);
+        }
+      } finally {
+        const currentAuthority = await db.operationAuthority.findUnique({ where: { id: "operations" } });
+        if (!currentAuthority || currentAuthority.mode !== originalAuthority.mode ||
+            currentAuthority.cutoverProfile !== originalAuthority.cutoverProfile ||
+            currentAuthority.captureManifestId !== originalAuthority.captureManifestId)
+          await setActiveAuthorityProfile("appsheet-replacement");
+      }
+
       const invoiceYear = Number(new Intl.DateTimeFormat("en", { timeZone: "America/Argentina/Buenos_Aires", year: "numeric" }).format(new Date()));
       const historicalCollision = formatAppSheetInvoiceNumberForYear(invoiceYear, 41n);
       await db.appSheetInvoiceNumberReservation.create({ data: {

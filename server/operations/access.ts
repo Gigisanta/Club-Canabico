@@ -97,10 +97,11 @@ const finalDeltaReviewInputSchema=z.strictObject({
 });
 type FinalDeltaReviewInput=z.infer<typeof finalDeltaReviewInputSchema>;
 export function finalDeltaProofForCapture(capture:AppSheetReplacementProof["capture"],input:FinalDeltaReviewInput){
+ if(input.manualPauseEndedAt!==null&&input.manualPauseEndedAt!==undefined)
+  throw appSheetReadinessError("final_delta_manual_pause_ended");
  const stability=asJsonObject(capture.stability),pauseStartedAt=Date.parse(input.manualPauseStartedAt);
  const firstReadAt=capture.firstReadAt.getTime(),verificationStartedAt=capture.verificationStartedAt.getTime();
  const verificationCompletedAt=capture.verificationCompletedAt.getTime(),cutoffAt=capture.cutoffAt.getTime();
- const pauseEndedAt=input.manualPauseEndedAt?Date.parse(input.manualPauseEndedAt):null;
  if(!stability||stability.stable!==true||stability.cutoverEligible!==true||stability.metadataStable!==true||stability.headersStable!==true||
     stability.pageHashesStable!==true||stability.scanComplete!==true||stability.changedPages!==0||stability.failedPages!==0||
     stability.unresolvedFormulaCount!==0||stability.sourceWriteDetected!==false||
@@ -108,13 +109,12 @@ export function finalDeltaProofForCapture(capture:AppSheetReplacementProof["capt
     pauseStartedAt>Date.now()+60_000||pauseStartedAt>firstReadAt||firstReadAt>verificationStartedAt||
     verificationStartedAt>verificationCompletedAt||verificationCompletedAt>cutoffAt||
     [firstReadAt,verificationStartedAt,verificationCompletedAt,cutoffAt].some(value=>value<pauseStartedAt)||
-    (pauseEndedAt!==null&&(!Number.isFinite(pauseEndedAt)||pauseEndedAt>Date.now()+60_000||pauseEndedAt<cutoffAt))||
     input.manualPauseEvidenceRef.trim().toLowerCase()===input.expectedHandoffChangesRef.trim().toLowerCase())
   throw appSheetReadinessError("final_delta_pause_or_fresh_capture_evidence_invalid");
  return {
   schemaVersion:1,
   manualPauseStartedAt:new Date(pauseStartedAt).toISOString(),
-  manualPauseEndedAt:pauseEndedAt===null?null:new Date(pauseEndedAt).toISOString(),
+  manualPauseEndedAt:null,
   manualPauseEvidenceRef:input.manualPauseEvidenceRef.trim(),
   capture:{captureId:capture.captureId,manifestHash:capture.manifestHash,dataHash:capture.dataHash,
    firstReadAt:capture.firstReadAt.toISOString(),verificationStartedAt:capture.verificationStartedAt.toISOString(),
