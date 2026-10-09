@@ -33,11 +33,42 @@ interface FixtureRow {
 function requireTestDatabase() {
   const raw = process.env.TEST_DATABASE_URL;
   assert.ok(raw, "TEST_DATABASE_URL is required for isolated financial source staging");
-  const url = new URL(raw);
-  assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(url.hostname), "TEST_DATABASE_URL must use loopback");
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    assert.fail("TEST_DATABASE_URL must be a valid PostgreSQL URL");
+  }
+  assert.ok(["postgres:", "postgresql:"].includes(url.protocol), "TEST_DATABASE_URL must be a PostgreSQL URL");
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  assert.ok(hostname === "localhost" || hostname === "::1" || hostname.startsWith("127."), "TEST_DATABASE_URL must use loopback");
   assert.match(url.pathname, /^\/bombo_ui_[a-z0-9_-]+$/i, "TEST_DATABASE_URL must name a dedicated bombo_ui_ database");
   assert.ok(process.env.PG_BIN, "PG_BIN must point to the PostgreSQL 18 client tools");
   return url;
+}
+
+function databaseTargetIdentity(url: URL) {
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const normalizedHost = hostname === "localhost" || hostname === "::1" || hostname.startsWith("127.")
+    ? "loopback"
+    : hostname;
+  return JSON.stringify([normalizedHost, url.port || "5432", decodeURIComponent(url.pathname.slice(1))]);
+}
+
+function assertSeparateDatabaseTargets(testDatabase: URL, applicationDatabaseUrl: string | undefined) {
+  if (!applicationDatabaseUrl) return;
+  let applicationDatabase: URL;
+  try {
+    applicationDatabase = new URL(applicationDatabaseUrl);
+  } catch {
+    assert.fail("DATABASE_URL must be a valid PostgreSQL URL when supplied");
+  }
+  assert.ok(["postgres:", "postgresql:"].includes(applicationDatabase.protocol), "DATABASE_URL must be a PostgreSQL URL when supplied");
+  assert.equal(
+    databaseTargetIdentity(testDatabase) === databaseTargetIdentity(applicationDatabase),
+    false,
+    "TEST_DATABASE_URL must target a different PostgreSQL database from DATABASE_URL",
+  );
 }
 
 function testProcessEnvironment(values: Record<string, string | undefined>) {
@@ -184,15 +215,25 @@ async function operationState(db: PrismaClient, snapshotId?: string) {
 test("financial source staging is scoped, digest checked, atomic, and idempotent", {
   skip: !process.env.TEST_DATABASE_URL,
 }, async () => {
-  assert.equal(process.env.DATABASE_URL, undefined, "the test runner must not inherit DATABASE_URL");
-  assert.equal(process.env.BACKUP_ENCRYPTION_KEY, undefined, "the test runner must not inherit a backup key");
-  assert.equal(process.env.OPERATIONS_BACKUP_RESTORE_E2E, undefined, "restore rehearsals are outside this test");
   const testDatabase = requireTestDatabase();
+  const originalDatabaseUrl = process.env.DATABASE_URL;
+  const originalBackupEncryptionKey = process.env.BACKUP_ENCRYPTION_KEY;
+  assertSeparateDatabaseTargets(testDatabase, originalDatabaseUrl);
+  assert.equal(originalBackupEncryptionKey === undefined, true, "the test runner must not inherit a backup key");
+  assert.equal(process.env.OPERATIONS_BACKUP_RESTORE_E2E === undefined, true, "restore rehearsals are outside this test");
+  const sameTargetWithDifferentCredentialsAndSchema = new URL(testDatabase);
+  sameTargetWithDifferentCredentialsAndSchema.hostname = "localhost";
+  sameTargetWithDifferentCredentialsAndSchema.username = "synthetic-app-user";
+  sameTargetWithDifferentCredentialsAndSchema.searchParams.set("schema", "synthetic-app-schema");
+  assert.throws(
+    () => assertSeparateDatabaseTargets(testDatabase, sameTargetWithDifferentCredentialsAndSchema.toString()),
+    /TEST_DATABASE_URL must target a different PostgreSQL database from DATABASE_URL/,
+    "different credentials, schema, or loopback aliases must not disguise the same database target",
+  );
   const schema = `financial_stage_${randomUUID().replaceAll("-", "")}`;
   const temporaryRoot = await mkdtemp(join(repositoryRoot, ".local/finance-qa/financial-source-stage-"));
   const backupDirectory = join(temporaryRoot, "verified-backup");
   const privateObjectRoot = join(temporaryRoot, "private-objects");
-  const originalDatabaseUrl = process.env.DATABASE_URL;
   let schemaCreated = false;
   let base: PrismaClient | undefined;
   let db: PrismaClient | undefined;
@@ -440,7 +481,8 @@ test("financial source staging is scoped, digest checked, atomic, and idempotent
   } finally {
     if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
     else process.env.DATABASE_URL = originalDatabaseUrl;
-    delete process.env.BACKUP_ENCRYPTION_KEY;
+    if (originalBackupEncryptionKey === undefined) delete process.env.BACKUP_ENCRYPTION_KEY;
+    else process.env.BACKUP_ENCRYPTION_KEY = originalBackupEncryptionKey;
     if (schemaCreated && base) {
       try { await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`); }
       finally { await base.$disconnect(); }
