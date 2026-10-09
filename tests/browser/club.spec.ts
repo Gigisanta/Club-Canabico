@@ -360,6 +360,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
     }
   }
   await page.goto("/app/finanzas");
+  await page.getByRole("button", { name: "Resumen local", exact: true }).click();
   await page.getByRole("button", { name: "Preparar saldos" }).click();
   await expect(page).toHaveURL(/\/app\/preparar\?view=cash/);
   await expect(page.getByRole("navigation", { name: "Áreas para preparar decisiones" }).getByRole("button", { name: "Caja" })).toHaveAttribute("aria-current", "page");
