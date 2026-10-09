@@ -2007,6 +2007,10 @@ function sameCanonical(left: unknown, right: unknown): boolean {
   return stableComparableJson(left) === stableComparableJson(right);
 }
 
+function compareHistoryRowId(left: { id: string }, right: { id: string }): number {
+  return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+}
+
 /** Compare persisted JSON structurally; exactJson is reserved for validated financial payloads. */
 function stableComparableJson(value: unknown): string {
   if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
@@ -2041,33 +2045,40 @@ async function existingHistorySnapshotMatches(
       !sameCanonical(snapshot.coverage, coverage)) fail("existing_history_snapshot_conflict");
 
   const [storedRecords, storedFacts, storedExceptions, object, audit] = await Promise.all([
-    tx.legacySourceRecord.findMany({ where: { snapshotId: snapshot.id }, orderBy: [{ sourceTable: "asc" }, { sourceRow: "asc" }] }),
-    tx.legacyHistoricalFact.findMany({ where: { snapshotId: snapshot.id }, orderBy: [{ sourceTable: "asc" }, { sourceRow: "asc" }] }),
-    tx.legacyException.findMany({ where: { snapshotId: snapshot.id }, orderBy: [{ sourceRecordId: "asc" }, { kind: "asc" }, { id: "asc" }] }),
+    tx.$queryRaw<Array<{
+      id: string; snapshotId: string; sourceTable: string; sourceKey: string; sourceRow: number; fileHash: string;
+      contentHash: string; importerVersion: string; originalText: string; normalizedText: string; treatment: string;
+    }>>(Prisma.sql`
+      SELECT "id", "snapshotId", "sourceTable", "sourceKey", "sourceRow", "fileHash", "contentHash", "importerVersion",
+        "original"::text AS "originalText", "normalized"::text AS "normalizedText", "treatment"
+      FROM "LegacySourceRecord"
+      WHERE "snapshotId" = ${snapshot.id}
+    `),
+    tx.legacyHistoricalFact.findMany({ where: { snapshotId: snapshot.id } }),
+    tx.legacyException.findMany({ where: { snapshotId: snapshot.id } }),
     tx.operationObject.findUnique({ where: { id: snapshot.id }, select: { id: true, kind: true, version: true, createdBy: true } }),
     tx.operationAudit.findFirst({ where: { objectId: snapshot.id, action: STAGE_ACTION }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] }),
   ]);
-  const expectedRecords = [...prepared.persistedRecords].sort((a, b) => a.sourceTable.localeCompare(b.sourceTable) || a.sourceRow - b.sourceRow);
-  const expectedFacts = [...prepared.persistedFacts].sort((a, b) => a.sourceTable.localeCompare(b.sourceTable) || a.sourceRow - b.sourceRow);
-  const expectedExceptions = [...prepared.exceptions].sort((a, b) =>
-    (a.sourceRecordId ?? "").localeCompare(b.sourceRecordId ?? "") || a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
+  const expectedRecords = [...prepared.persistedRecords].sort(compareHistoryRowId);
+  const expectedFacts = [...prepared.persistedFacts].sort(compareHistoryRowId);
+  const expectedExceptions = [...prepared.exceptions].sort(compareHistoryRowId);
   const actualRecords = storedRecords.map((record) => ({
     id: record.id, snapshotId: record.snapshotId, sourceTable: record.sourceTable, sourceKey: record.sourceKey,
     sourceRow: record.sourceRow, fileHash: record.fileHash, contentHash: record.contentHash, importerVersion: record.importerVersion,
-    original: record.original, normalized: record.normalized, treatment: record.treatment,
-  }));
+    original: JSON.parse(record.originalText), normalized: JSON.parse(record.normalizedText), treatment: record.treatment,
+  })).sort(compareHistoryRowId);
   const actualFacts = storedFacts.map((fact) => compactPersistedFact({
     id: fact.id, snapshotId: fact.snapshotId, sourceRecordId: fact.sourceRecordId, sourceTable: fact.sourceTable, sourceKey: fact.sourceKey,
     sourceRow: fact.sourceRow, sourceHash: fact.sourceHash, mappingId: fact.mappingId, kind: fact.kind, occurredOn: fact.occurredOn,
     dateState: fact.dateState, currency: fact.currency, currencyState: fact.currencyState, unit: fact.unit, unitState: fact.unitState,
     amountMinor: fact.amountMinor, amountState: fact.amountState, quantity: fact.quantity, quantityState: fact.quantityState,
     attributes: fact.attributes, createdBy: fact.createdBy,
-  }));
+  })).sort(compareHistoryRowId);
   const actualExceptions = storedExceptions.map((exception) => ({
     id: exception.id, sourceRecordId: exception.sourceRecordId, kind: exception.kind, severity: exception.severity,
     description: exception.description, resolution: exception.resolution, status: exception.status,
     resolvedBy: exception.resolvedBy, resolvedAt: exception.resolvedAt,
-  }));
+  })).sort(compareHistoryRowId);
   const expectedFactsCanonical = expectedFacts.map((fact) => compactPersistedFact(fact as unknown as Record<string, unknown>));
   const expectedExceptionsCanonical = expectedExceptions.map((exception) => ({ ...exception, status: "open", resolvedBy: null, resolvedAt: null }));
   const auditDetails = stageAuditDetails(prepared, options, review);
@@ -2109,8 +2120,23 @@ async function persistHistoryProjection(
     status: "staged", createdBy: actor.id, reviewedBy: null, reviewedAt: null, captureManifestId,
     controls: asInputJson(controls), coverage: asInputJson(coverage),
   } });
-  for (let start = 0; start < prepared.persistedRecords.length; start += 500)
-    await tx.legacySourceRecord.createMany({ data: prepared.persistedRecords.slice(start, start + 500) });
+  for (let start = 0; start < prepared.persistedRecords.length; start += 500) {
+    const batch = prepared.persistedRecords.slice(start, start + 500);
+    const inserted = await tx.$executeRaw(Prisma.sql`
+      INSERT INTO "LegacySourceRecord" (
+        "id", "snapshotId", "sourceTable", "sourceKey", "sourceRow", "fileHash", "contentHash", "importerVersion",
+        "original", "normalized", "treatment"
+      )
+      SELECT incoming."id", incoming."snapshotId", incoming."sourceTable", incoming."sourceKey", incoming."sourceRow",
+        incoming."fileHash", incoming."contentHash", incoming."importerVersion", incoming."original", incoming."normalized",
+        incoming."treatment"
+      FROM jsonb_to_recordset(${JSON.stringify(batch)}::jsonb) AS incoming(
+        "id" text, "snapshotId" text, "sourceTable" text, "sourceKey" text, "sourceRow" integer, "fileHash" text,
+        "contentHash" text, "importerVersion" text, "original" jsonb, "normalized" jsonb, "treatment" text
+      )
+    `);
+    if (inserted !== batch.length) fail("history_source_record_batch_count_mismatch");
+  }
   for (let start = 0; start < prepared.persistedFacts.length; start += 500)
     await tx.legacyHistoricalFact.createMany({ data: prepared.persistedFacts.slice(start, start + 500) });
   for (let start = 0; start < prepared.exceptions.length; start += 500) {

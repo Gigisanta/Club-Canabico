@@ -19,6 +19,8 @@ import { APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../shared/operations/appsheet-
 import { canonicalJson } from "../shared/operations/exact.js";
 
 const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+const preciseColorRedText = "0.12345678901234566";
+const preciseColorRed = Number(preciseColorRedText);
 function historyCapture(): LoadedAppSheetHistoryCapture {
   const manifestHash = sha256(`synthetic-history-capture:${randomUUID()}`);
   const captureId = `appsreal-${manifestHash.slice(0, 16)}`;
@@ -41,8 +43,14 @@ function historyCapture(): LoadedAppSheetHistoryCapture {
   ];
   const dataPages = sourceSheets.map((source) => {
     const columns = source.headers.map((header, index) => ({ columnIndex: index + 1, header, sensitive: false }));
-    const cells = source.values.map((value, index) => ({ columnIndex: index + 1, effectiveValue: typeof value === "number"
-      ? { numberValue: value } : typeof value === "boolean" ? { boolValue: value } : { stringValue: value } }));
+    const cells = source.values.map((value, index) => {
+      const cell = { columnIndex: index + 1, effectiveValue: typeof value === "number"
+        ? { numberValue: value } : typeof value === "boolean" ? { boolValue: value } : { stringValue: value } };
+      return source.title === "C_Cliente" && index === 0 ? {
+        ...cell,
+        userEnteredFormat: { backgroundColor: { red: preciseColorRed, green: Number("0.00000012345678901234567"), blue: 0.9999999999999999 } },
+      } : cell;
+    });
     const row = { sourceRow: 2, cells, unresolvedFormulaCells: [], rowHash: sha256(canonicalJson(cells)) };
     const counts = { rowsWithValues: 1, rowsSerialized: 1, formulaCellCount: 0, unresolvedFormulaCount: 0 };
     const pageHash = sha256(canonicalJson({ sheetId: source.sheetId, title: source.title, row }));
@@ -161,17 +169,29 @@ test("history writer persists its stable top-level coverage for invoice-sequence
     const definition = historyDefinition();
     const prepared = prepareAppSheetHistoryProjection(capture, definition);
     const commitSha = "a".repeat(40);
+    const reviewedAt = "2026-10-09T12:00:00.000Z";
+    const backupSnapshotAt = "2026-10-09T12:05:00.000Z";
     const technicalReview = {
       schemaVersion: 1, reviewKind: "independent-technical", captureId: capture.manifest.captureId,
       manifestHash: capture.manifest.manifestHash, definitionHash: definition.appliedDefinitionHash,
       projectionKind: "history", projectionHash: prepared.projectionHash, commitSha,
       importer: APPSHEET_HISTORY_IMPORTER_VERSION, reviewer: "synthetic-independent-reviewer", approved: true,
-      reviewedAt: new Date().toISOString(), findings: [],
+      reviewedAt, findings: [],
     };
-    const staged = await stageAppSheetHistoryProjection(prepared, {
-      actorId: stageActorId, technicalReview, commitSha, target: "isolated-test",
-      backupEvidence: { manifestHash: sha256("synthetic backup metadata fixture"), snapshotAt: new Date().toISOString() },
-    }, db);
+    const stageOptions = {
+      actorId: stageActorId, technicalReview, commitSha, target: "isolated-test" as const,
+      backupEvidence: { manifestHash: sha256("synthetic backup metadata fixture"), snapshotAt: backupSnapshotAt },
+    };
+    const moneyFact = prepared.persistedFacts.find((fact) => fact.amountMinor !== null);
+    const quantityFact = prepared.persistedFacts.find((fact) => fact.quantity !== null);
+    assert.ok(moneyFact && typeof moneyFact.amountMinor === "bigint", "la fixture cubre el importe exacto BigInt");
+    assert.ok(quantityFact?.quantity instanceof Prisma.Decimal, "la fixture cubre el roundtrip Decimal de cantidad");
+    const metadataRecord = prepared.persistedRecords.find((record) => record.sourceTable === "C_Cliente" && record.sourceRow === 2);
+    assert.ok(metadataRecord, "la fixture contiene la fila con metadato numérico de formato");
+    const expectedOriginal = metadataRecord.original as { columns: Array<{ value: { userEnteredFormat?: { backgroundColor?: { red?: number } } } }> };
+    assert.equal(expectedOriginal.columns[0]?.value.userEnteredFormat?.backgroundColor?.red, preciseColorRed);
+
+    const staged = await stageAppSheetHistoryProjection(prepared, stageOptions, db);
     assert.equal(staged.status, "staged");
     assert.equal(staged.replay, false);
     assert.equal(staged.metrics.recordCount, 5);
@@ -179,6 +199,33 @@ test("history writer persists its stable top-level coverage for invoice-sequence
     assert.equal(staged.metrics.exceptionCount, 0, "los registros sintéticos tienen los vínculos mínimos para no forzar una resolución ajena a esta prueba");
 
     const snapshotId = staged.snapshotId;
+    const rawOriginalRows = await db.$queryRaw<Array<{ originalText: string }>>(Prisma.sql`
+      SELECT "original"::text AS "originalText"
+      FROM "LegacySourceRecord"
+      WHERE "id" = ${metadataRecord.id}
+    `);
+    assert.equal(rawOriginalRows.length, 1);
+    assert.match(rawOriginalRows[0]!.originalText,
+      new RegExp(`"red"\\s*:\\s*${preciseColorRedText.replace(".", "\\.")}(?=[,}])`),
+      "PostgreSQL debe conservar el componente decimal del JSON original sin redondeo");
+
+    const countRows = async () => ({
+      records: await db.legacySourceRecord.count({ where: { snapshotId } }),
+      facts: await db.legacyHistoricalFact.count({ where: { snapshotId } }),
+      exceptions: await db.legacyException.count({ where: { snapshotId } }),
+    });
+    const countsBeforeReplay = await countRows();
+    assert.deepEqual(countsBeforeReplay, { records: 5, facts: 5, exceptions: 0 });
+    const snapshotBeforeReplay = await db.legacyImportSnapshot.findUniqueOrThrow({ where: { id: snapshotId } });
+    assert.equal(snapshotBeforeReplay.status, "staged");
+    assert.equal(snapshotBeforeReplay.reviewedBy, null);
+    const replayed = await stageAppSheetHistoryProjection(prepared, stageOptions, db);
+    assert.equal(replayed.replay, true);
+    assert.deepEqual(await countRows(), countsBeforeReplay, "el replay no duplica filas persistidas");
+    const snapshotAfterReplay = await db.legacyImportSnapshot.findUniqueOrThrow({ where: { id: snapshotId } });
+    assert.equal(snapshotAfterReplay.status, "staged");
+    assert.equal(snapshotAfterReplay.reviewedBy, null);
+
     const sourceCapture = await db.appSheetCaptureManifest.findUniqueOrThrow({ where: { captureId: capture.manifest.captureId } });
     const finalDeltaInput = {
       manualPauseStartedAt: new Date(sourceCapture.firstReadAt.getTime() - 60_000).toISOString(),

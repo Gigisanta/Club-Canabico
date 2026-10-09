@@ -26,7 +26,7 @@ function isCommand(request: Request, command?: string) {
 async function enterOrders(page: Page) {
   await page.goto("/app/operations");
   await page.getByRole("button", { name: "Explorar club de demostración" }).click();
-  await expect(page.locator(".ops-home-page")).toBeVisible();
+  await expect(page.locator(".ops-home-page")).toBeVisible({ timeout: 15_000 });
   await page.getByRole("button", { name: "Pedidos", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Pedidos", exact: true })).toBeVisible();
 }

@@ -1342,10 +1342,13 @@ async function persistProjection(
   const replay = await validateExistingSnapshot(tx, projection, actor.id, controls, coverage);
   if (replay) return { snapshotId, captureId: projection.capture.captureId, status: "staged", replay: true, counts: projection.summary };
 
-  // Canonical source staging may create operational masters and identities. Once
-  // authority is active, only an already-validated no-op replay is safe.
-  const authority = await tx.operationAuthority.findUnique({ where: { id: "operations" }, select: { mode: true } });
-  if (authority?.mode === "active") fail("canonical_master_stage_requires_shadow_authority");
+  // Canonical source staging may create operational masters and identities. Only
+  // a pristine shadow authority may stage new data; suspension does not erase the
+  // evidence that this authority was active. Exact validated replays returned above.
+  const authority = await tx.operationAuthority.findUnique({ where: { id: "operations" },
+    select: { mode: true, epoch: true, approvedBy: true, firstRealWriteAt: true } });
+  if (authority && (authority.mode !== "shadow" || authority.epoch !== 1 || authority.approvedBy !== null || authority.firstRealWriteAt !== null))
+    fail("canonical_master_stage_requires_shadow_authority");
 
   const captureId = projection.capture.stabilityMode === "stable"
     ? await ensureAppSheetCaptureManifest(tx, stableCaptureForDatabase(projection.capture))

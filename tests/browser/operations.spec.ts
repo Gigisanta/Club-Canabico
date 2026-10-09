@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { Page, Request } from "@playwright/test";
 import { test, expect } from "./isolated";
 
 async function login(page: Page) {
@@ -158,11 +158,54 @@ test("finance UI verifies courier custody and accepts a gross rendition without 
   const verified = await get(page, "accounts");
   expect(balance(verified, "ops-cash-ARS")).toBe(balance(before, "ops-cash-ARS"));
   expect(balance(verified, "ops-courier-ARS")).toBe(balance(before, "ops-courier-ARS") + 2500000n);
-  await page.getByRole("button", { name: "Rendiciones", exact: true }).click();
-  await page.locator(".ops-header-actions").getByRole("button", { name: "＋ Aceptar rendición", exact: true }).click();
+  let releaseAccountsRequest!: () => void;
+  let signalAccountsRequest!: () => void;
+  let signalAccountsRequestContinued!: () => void;
+  const releaseAccounts = new Promise<void>(resolve => { releaseAccountsRequest = resolve; });
+  const accountsRequestStarted = new Promise<void>(resolve => { signalAccountsRequest = resolve; });
+  const accountsRequestContinued = new Promise<void>(resolve => { signalAccountsRequestContinued = resolve; });
+  let accountsRequestIntercepted = false;
+  const holdAccountsRequest = async (route: import("@playwright/test").Route) => {
+    accountsRequestIntercepted = true;
+    signalAccountsRequest();
+    try {
+      await releaseAccounts;
+      await route.continue();
+    } finally {
+      signalAccountsRequestContinued();
+    }
+  };
+  const commandRequestsDuringHold: Request[] = [];
+  const observeRenditionCommands = (request: Request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/operations/commands") commandRequestsDuringHold.push(request);
+  };
+  await page.route("**/api/operations/accounts", holdAccountsRequest);
+  page.on("request", observeRenditionCommands);
+  try {
+    await page.getByRole("button", { name: "Rendiciones", exact: true }).click();
+    await accountsRequestStarted;
+    const acceptButton = page.locator(".ops-header-actions").getByRole("button", { name: "＋ Aceptar rendición", exact: true });
+    await expect(acceptButton).toBeVisible();
+    await expect(acceptButton).toBeDisabled();
+    await expect(page.getByRole("status").filter({ hasText: "Cargando cuentas y referencias para aceptar una rendición" })).toBeVisible();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(commandRequestsDuringHold).toHaveLength(0);
+  } finally {
+    releaseAccountsRequest();
+    if (accountsRequestIntercepted) await accountsRequestContinued;
+    await page.unroute("**/api/operations/accounts", holdAccountsRequest);
+    page.off("request", observeRenditionCommands);
+  }
+  const acceptButton = page.locator(".ops-header-actions").getByRole("button", { name: "＋ Aceptar rendición", exact: true });
+  await expect(acceptButton).toBeEnabled();
+  await acceptButton.click();
   const dialog = page.getByRole("dialog");
-  await dialog.getByLabel("Custodia de origen · moneda").selectOption("ops-courier-ARS");
-  await dialog.getByLabel("Cuenta del club de destino").selectOption("ops-cash-ARS");
+  const sourceAccount = dialog.getByLabel("Custodia de origen · moneda");
+  const destinationAccount = dialog.getByLabel("Cuenta del club de destino");
+  await expect(sourceAccount.locator('option[value="ops-courier-ARS"]')).toHaveCount(1);
+  await expect(destinationAccount.locator('option[value="ops-cash-ARS"]')).toHaveCount(1);
+  await sourceAccount.selectOption("ops-courier-ARS");
+  await destinationAccount.selectOption("ops-cash-ARS");
   await dialog.getByLabel("Dinero bruto por rendir").fill("25000");
   await dialog.getByLabel("Modalidad de rendición").selectOption("gross");
   await dialog.getByLabel("Turno asociado (opcional)").selectOption("ops-route");

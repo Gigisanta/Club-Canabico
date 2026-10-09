@@ -366,7 +366,11 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
         assert.equal(metadataFreeCashRejected.body.details?.snapshotId, metadataFreeSnapshotId);
 
         await db.legacyImportSnapshot.delete({ where: { id: metadataFreeSnapshotId } });
-        const supportedHistoryImporters = [APPSHEET_HISTORY_IMPORTER_VERSION, "bombo-appsheet-history/1.0.0"] as const;
+        const supportedHistoryImporters = [
+          APPSHEET_HISTORY_IMPORTER_VERSION,
+          "bombo-appsheet-history/1.1.0",
+          "bombo-appsheet-history/1.0.0",
+        ] as const;
         for (const importerVersion of supportedHistoryImporters) {
           const historyFileHash = digest(`synthetic-history-preliminary-${importerVersion}-${randomUUID()}`);
           const historyDataHash = digest(`synthetic-history-data-${randomUUID()}`);
@@ -1473,6 +1477,62 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
             currentAuthority.captureManifestId !== originalAuthority.captureManifestId)
           await setActiveAuthorityProfile("appsheet-replacement");
       }
+
+      const activeBeforeSuspension = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+      assert.equal(activeBeforeSuspension.mode, "active");
+      assert.equal(activeBeforeSuspension.cutoverProfile, "appsheet-replacement");
+      const authorityObject = await db.operationObject.findUnique({ where: { id: "operations" }, select: { version: true } });
+      try {
+        const suspension = await send(envelope("operations", "AuthoritySuspended",
+          { reason: "Synthetic lifecycle coverage for canonical staging" }, authorityObject?.version ?? 0));
+        assert.equal(suspension.response.status, 200, JSON.stringify(suspension.body));
+        const suspendedAuthority = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+        assert.equal(suspendedAuthority.mode, "shadow");
+        assert.equal(suspendedAuthority.epoch, activeBeforeSuspension.epoch + 1,
+          "the real suspension command advances the authority epoch");
+        assert.equal(suspendedAuthority.cutoverProfile, activeBeforeSuspension.cutoverProfile);
+        assert.equal(suspendedAuthority.captureManifestId, activeBeforeSuspension.captureManifestId);
+        assert.equal(suspendedAuthority.approvedBy, activeBeforeSuspension.approvedBy);
+        assert.deepEqual(suspendedAuthority.evidence, activeBeforeSuspension.evidence);
+        assert.equal(suspendedAuthority.firstRealWriteAt?.toISOString() ?? null,
+          activeBeforeSuspension.firstRealWriteAt?.toISOString() ?? null);
+
+        const suspendedReplayBefore = await canonicalStageStateCounts();
+        const suspendedReplay = await stageAppSheetCanonicalMasters(canonicalBaselineProjection, {
+          actorId: ownerId,
+          technicalReview: canonicalBaselineReview,
+          commitSha: "1".repeat(40),
+          target: "isolated-test",
+        }, db);
+        assert.equal(suspendedReplay.replay, true, "suspension still permits the exact validated no-op replay");
+        assert.deepEqual(await canonicalStageStateCounts(), suspendedReplayBefore,
+          "the suspended replay changes no persisted state");
+
+        const beforeSuspendedFreshStage = await canonicalStageStateCounts();
+        await assert.rejects(stageAppSheetCanonicalMasters(canonicalAfterActivationProjection, {
+          actorId: ownerId,
+          technicalReview: canonicalAfterActivationReview,
+          commitSha: "1".repeat(40),
+          target: "isolated-test",
+        }, db), (error: unknown) => error instanceof AppSheetCanonicalError &&
+          error.code === "canonical_master_stage_requires_shadow_authority");
+        assert.deepEqual(await canonicalStageStateCounts(), beforeSuspendedFreshStage,
+          "a fresh projection after real suspension writes no capture, snapshot, source row, master, identity, object, audit, receipt, outbox, or operation effect");
+      } finally {
+        const currentAuthority = await db.operationAuthority.findUnique({ where: { id: "operations" } });
+        if (currentAuthority?.mode === "shadow" && currentAuthority.epoch === activeBeforeSuspension.epoch + 1)
+          await db.operationAuthority.update({ where: { id: "operations" }, data: { mode: "active", epoch: { increment: 1 } } });
+      }
+      const activeAfterSuspensionCoverage = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+      assert.equal(activeAfterSuspensionCoverage.mode, "active");
+      assert.equal(activeAfterSuspensionCoverage.epoch, activeBeforeSuspension.epoch + 2,
+        "fixture restoration reactivates without rolling the authority epoch backward");
+      assert.equal(activeAfterSuspensionCoverage.cutoverProfile, activeBeforeSuspension.cutoverProfile);
+      assert.equal(activeAfterSuspensionCoverage.captureManifestId, activeBeforeSuspension.captureManifestId);
+      assert.equal(activeAfterSuspensionCoverage.approvedBy, activeBeforeSuspension.approvedBy);
+      assert.deepEqual(activeAfterSuspensionCoverage.evidence, activeBeforeSuspension.evidence);
+      assert.equal(activeAfterSuspensionCoverage.firstRealWriteAt?.toISOString() ?? null,
+        activeBeforeSuspension.firstRealWriteAt?.toISOString() ?? null);
 
       const invoiceYear = Number(new Intl.DateTimeFormat("en", { timeZone: "America/Argentina/Buenos_Aires", year: "numeric" }).format(new Date()));
       const historicalCollision = formatAppSheetInvoiceNumberForYear(invoiceYear, 41n);

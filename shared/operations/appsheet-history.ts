@@ -5,7 +5,7 @@
  * cash, delivery, payment, messaging, or document-operation events.
  */
 export const APPSHEET_HISTORY_SOURCE_SYSTEM = "appsheet-live-verified" as const;
-export const APPSHEET_HISTORY_IMPORTER_VERSION = "bombo-appsheet-history/1.1.0" as const;
+export const APPSHEET_HISTORY_IMPORTER_VERSION = "bombo-appsheet-history/1.2.0" as const;
 export const APPSHEET_HISTORY_MAPPING_ID = "appsheet-live-history-v2" as const;
 
 export type AppSheetHistoryKind =

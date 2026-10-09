@@ -5,7 +5,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import {
   analyzeAppSheetHistoryMovementMatches,
   appSheetHistoryProjectionReport,
@@ -20,7 +20,8 @@ import {
   type PreparedAppSheetHistoryProjection,
 } from "../server/operations/appsheet-history.js";
 import { APPSHEET_EXPECTED_LIVE_APP_ID } from "../server/operations/appsheet-canonical.js";
-import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MOVEMENT_OVERLAP_FIELDS, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
+import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_MOVEMENT_OVERLAP_FIELDS,
+  APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
 import { canonicalJson } from "../shared/operations/exact.js";
 import { pendingMappingFingerprintPayload, reconcileAppSheetPendingRows } from "../shared/operations/appsheet-pending.js";
 import { parseAppSheetHistoryCliArgs, privateAppSheetChildPath, runAppSheetHistoryCli } from "../scripts/appsheet-history.js";
@@ -341,6 +342,137 @@ function stageReview() {
   };
 }
 
+function populatedStageFixture(): PreparedAppSheetHistoryProjection {
+  const fixture = stageFixture();
+  const records = [
+    {
+      id: "00000000-0000-5000-8000-000000000011", snapshotId: fixture.snapshotId,
+      sourceTable: "A_Table", sourceKey: "key-a", sourceRow: 2, fileHash: "a".repeat(64), contentHash: "b".repeat(64),
+      importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION,
+      original: { columns: [{ coordinate: "A2", header: "metadata", value: { effectiveValue: { stringValue: "A" } } }] },
+      normalized: { columns: [{ coordinate: "A2", header: "metadata", value: "A" }] }, treatment: "archive_only",
+    },
+    {
+      id: "00000000-0000-5000-8000-000000000012", snapshotId: fixture.snapshotId,
+      sourceTable: "B_Table", sourceKey: "key-b", sourceRow: 3, fileHash: "a".repeat(64), contentHash: "c".repeat(64),
+      importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION,
+      original: { columns: [{ coordinate: "A3", header: "metadata", value: { effectiveValue: { stringValue: "B" } } }] },
+      normalized: { columns: [{ coordinate: "A3", header: "metadata", value: "B" }] }, treatment: "archive_only",
+    },
+  ];
+  const facts = records.map((record, index) => ({
+    id: `00000000-0000-5000-8000-00000000002${index + 1}`, snapshotId: fixture.snapshotId,
+    sourceRecordId: record.id, sourceTable: record.sourceTable, sourceKey: record.sourceKey, sourceRow: record.sourceRow,
+    sourceHash: record.contentHash, mappingId: APPSHEET_HISTORY_MAPPING_ID, kind: "archive", occurredOn: null,
+    dateState: "not-applicable", currency: null, currencyState: "not-applicable", unit: null, unitState: "not-applicable",
+    amountMinor: BigInt(12_345 + index), amountState: "known", quantity: new Prisma.Decimal(index === 0 ? "1.230000000001" : "2.500000000000"),
+    quantityState: "known", attributes: { ordered: ["first", "second"], nested: { exact: "1.230000000001" } },
+    createdBy: "codex:appsheet-history-stage",
+  }));
+  const exceptions = [
+    {
+      id: "00000000-0000-5000-8000-000000000033", sourceRecordId: null, kind: "global_review", severity: "review",
+      description: "synthetic global exception", resolution: { evidence: ["captured", "stable"] },
+    },
+    {
+      id: "00000000-0000-5000-8000-000000000031", sourceRecordId: records[0]!.id, kind: "source_review", severity: "review",
+      description: "synthetic unresolved exception", resolution: null,
+    },
+    {
+      id: "00000000-0000-5000-8000-000000000032", sourceRecordId: records[1]!.id, kind: "source_review", severity: "review",
+      description: "synthetic resolved-evidence exception", resolution: { reference: "fixture" },
+    },
+  ];
+  return { ...fixture, persistedRecords: records, persistedFacts: facts, exceptions } as unknown as PreparedAppSheetHistoryProjection;
+}
+
+type MemoryHistoryRows = {
+  sourceRecords: Array<Record<string, unknown>>;
+  facts: Array<Record<string, unknown>>;
+  exceptions: Array<Record<string, unknown>>;
+};
+
+function copyJsonValue(value: unknown): unknown {
+  if (value === Prisma.DbNull) return null;
+  return value === null || value === undefined ? value : structuredClone(value);
+}
+
+function copyStoredSourceRecord(row: Record<string, unknown>): Record<string, unknown> {
+  return { ...row, original: copyJsonValue(row.original), normalized: copyJsonValue(row.normalized) };
+}
+
+function copyStoredFact(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...row,
+    quantity: row.quantity === null || row.quantity === undefined ? row.quantity : new Prisma.Decimal(String(row.quantity)),
+    attributes: copyJsonValue(row.attributes),
+  };
+}
+
+function copyStoredException(row: Record<string, unknown>): Record<string, unknown> {
+  return { ...row, resolution: copyJsonValue(row.resolution) };
+}
+
+function memoryHistoryClient() {
+  const rows: MemoryHistoryRows = { sourceRecords: [], facts: [], exceptions: [] };
+  let snapshot: Record<string, unknown> | null = null;
+  let operationObject: Record<string, unknown> | null = null;
+  let audit: Record<string, unknown> | null = null;
+  let writes = 0;
+  const tx = {
+    user: { findUnique: async () => ({ id: "authorized-user", role: "admin", active: true }) },
+    operationAccess: { findUnique: async () => ({ enabled: true, capabilities: ["imports.write"] }) },
+    legacyImportSnapshot: {
+      findUnique: async () => snapshot,
+      create: async ({ data }: { data: Record<string, unknown> }) => { snapshot = data; writes++; },
+    },
+    $executeRaw: async (query: { values: unknown[] }) => {
+      const batch = JSON.parse(String(query.values[0])) as Array<Record<string, unknown>>;
+      rows.sourceRecords.push(...batch.map(copyStoredSourceRecord));
+      writes += batch.length;
+      return batch.length;
+    },
+    $queryRaw: async () => rows.sourceRecords.slice().reverse().map(({ original, normalized, ...record }) => ({
+      ...record, originalText: JSON.stringify(original), normalizedText: JSON.stringify(normalized),
+    })),
+    legacySourceRecord: {
+      createMany: async ({ data }: { data: Array<Record<string, unknown>> }) => {
+        rows.sourceRecords.push(...data.map(copyStoredSourceRecord));
+        writes += data.length;
+        return { count: data.length };
+      },
+      findMany: async () => rows.sourceRecords.slice().reverse().map(copyStoredSourceRecord),
+    },
+    legacyHistoricalFact: {
+      createMany: async ({ data }: { data: Array<Record<string, unknown>> }) => {
+        rows.facts.push(...data.map(copyStoredFact)); writes += data.length; return { count: data.length };
+      },
+      findMany: async () => rows.facts.slice().reverse().map(copyStoredFact),
+    },
+    legacyException: {
+      createMany: async ({ data }: { data: Array<Record<string, unknown>> }) => {
+        rows.exceptions.push(...data.map((exception) => copyStoredException({ ...exception,
+          status: "open", resolvedBy: null, resolvedAt: null }))); writes += data.length; return { count: data.length };
+      },
+      findMany: async () => rows.exceptions.slice().reverse().map(copyStoredException),
+    },
+    operationObject: {
+      create: async ({ data }: { data: Record<string, unknown> }) => { operationObject = data; writes++; },
+      findUnique: async () => operationObject,
+    },
+    operationAudit: {
+      create: async ({ data }: { data: Record<string, unknown> }) => { audit = data; writes++; },
+      findFirst: async () => audit,
+    },
+  };
+  const client = {
+    $transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback(tx),
+  } as unknown as PrismaClient;
+  return {
+    client, rows, get snapshot() { return snapshot; }, get writes() { return writes; },
+  };
+}
+
 test("invalid review is rejected before opening a write transaction", async () => {
   let transactionCount = 0;
   const client = { $transaction: async () => { transactionCount++; throw new Error("must_not_start"); } } as unknown as PrismaClient;
@@ -363,7 +495,16 @@ test("failed staged write is rolled back by the serializable transaction boundar
       findUnique: async () => null,
       create: async () => { rows.push("snapshot"); },
     },
-    legacySourceRecord: { createMany: async () => { rows.push("source-records"); } },
+    $executeRaw: async (query: { values: unknown[] }) => {
+      rows.push("source-records");
+      return (JSON.parse(String(query.values[0])) as unknown[]).length;
+    },
+    legacySourceRecord: {
+      createMany: async ({ data }: { data: unknown[] }) => {
+        rows.push("source-records");
+        return { count: data.length };
+      },
+    },
     legacyHistoricalFact: { createMany: async () => { rows.push("historical-facts"); } },
     legacyException: { createMany: async () => { rows.push("exceptions"); } },
     operationObject: { create: async () => { rows.push("operation-object"); } },
@@ -382,7 +523,7 @@ test("failed staged write is rolled back by the serializable transaction boundar
       }
     },
   } as unknown as PrismaClient;
-  await assert.rejects(stageAppSheetHistoryProjection(stageFixture(), {
+  await assert.rejects(stageAppSheetHistoryProjection(populatedStageFixture(), {
     actorId: "authorized-user", technicalReview: stageReview(), commitSha: "e".repeat(40),
     allowStagedDelta: true, target: "isolated-test",
     backupEvidence: { manifestHash: "9".repeat(64), snapshotAt: "2026-10-09T12:00:00.000Z" },
@@ -392,56 +533,77 @@ test("failed staged write is rolled back by the serializable transaction boundar
   assert.deepEqual(rows, []);
 });
 
-test("replaying a staged history snapshot compares boolean and count metadata without exact-money coercion", async () => {
-  let snapshot: Record<string, unknown> | null = null;
-  let operationObject: Record<string, unknown> | null = null;
-  let audit: Record<string, unknown> | null = null;
-  let writes = 0;
-  const tx = {
-    user: { findUnique: async () => ({ id: "authorized-user", role: "admin", active: true }) },
-    operationAccess: { findUnique: async () => ({ enabled: true, capabilities: ["imports.write"] }) },
-    legacyImportSnapshot: {
-      findUnique: async ({ where }: { where: Record<string, unknown> }) =>
-        "id" in where ? snapshot : snapshot,
-      create: async ({ data }: { data: Record<string, unknown> }) => { snapshot = data; writes++; },
-    },
-    legacySourceRecord: { createMany: async () => { writes++; } },
-    legacyHistoricalFact: { createMany: async () => { writes++; } },
-    legacyException: { createMany: async () => { writes++; } },
-    operationObject: {
-      create: async ({ data }: { data: Record<string, unknown> }) => { operationObject = data; writes++; },
-      findUnique: async () => operationObject,
-    },
-    operationAudit: {
-      create: async ({ data }: { data: Record<string, unknown> }) => { audit = data; writes++; },
-      findFirst: async () => audit,
-    },
-    legacySourceRecordFind: async () => [],
-  };
-  Object.assign(tx, {
-    legacySourceRecord: { createMany: async () => { writes++; }, findMany: async () => [] },
-    legacyHistoricalFact: { createMany: async () => { writes++; }, findMany: async () => [] },
-    legacyException: { createMany: async () => { writes++; }, findMany: async () => [] },
-  });
-  const client = {
-    $transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback(tx),
-  } as unknown as PrismaClient;
+test("replaying populated history compares persisted rows independent of query order", async () => {
+  const prepared = populatedStageFixture();
+  const memory = memoryHistoryClient();
   const options = {
     actorId: "authorized-user", technicalReview: stageReview(), commitSha: "e".repeat(40),
     allowStagedDelta: true, target: "isolated-test" as const,
     backupEvidence: { manifestHash: "9".repeat(64), snapshotAt: "2026-10-09T12:00:00.000Z" },
   };
 
-  const first = await stageAppSheetHistoryProjection(stageFixture(), options, client);
+  const first = await stageAppSheetHistoryProjection(prepared, options, memory.client);
   assert.equal(first.replay, false);
-  const writesAfterStage = writes;
+  const writesAfterStage = memory.writes;
   assert.ok(writesAfterStage > 0);
-  assert.equal((snapshot?.status), "staged");
-  assert.equal((snapshot?.reviewedBy), null);
+  assert.equal(memory.rows.sourceRecords.length, 2);
+  assert.equal(memory.rows.facts.length, 2);
+  assert.equal(memory.rows.exceptions.length, 3);
+  assert.equal(memory.snapshot?.status, "staged");
+  assert.equal(memory.snapshot?.reviewedBy, null);
+  assert.equal(memory.rows.exceptions.find((exception) => exception.sourceRecordId === null)?.resolution !== null, true);
+  assert.equal(memory.rows.exceptions.some((exception) => exception.sourceRecordId !== null && exception.resolution === null), true);
 
-  const replay = await stageAppSheetHistoryProjection(stageFixture(), options, client);
+  const replay = await stageAppSheetHistoryProjection(prepared, options, memory.client);
   assert.equal(replay.replay, true);
-  assert.equal(writes, writesAfterStage);
+  assert.equal(memory.writes, writesAfterStage);
+  assert.equal(memory.snapshot?.status, "staged");
+  assert.equal(memory.snapshot?.reviewedBy, null);
+});
+
+test("replaying same-ID history content tampering is rejected without writes", async () => {
+  const tamperCases = [
+    {
+      name: "original JSON",
+      apply(rows: MemoryHistoryRows) {
+        const record = rows.sourceRecords[0]!;
+        const original = record.original as { columns: Array<Record<string, unknown>> };
+        original.columns[0]!.value = { effectiveValue: { stringValue: "tampered" } };
+      },
+    },
+    {
+      name: "exact fact amount",
+      apply(rows: MemoryHistoryRows) { rows.facts[0]!.amountMinor = 99_999n; },
+    },
+    {
+      name: "JSON array order",
+      apply(rows: MemoryHistoryRows) {
+        const attributes = rows.facts[0]!.attributes as { ordered: string[] };
+        attributes.ordered.reverse();
+      },
+    },
+    {
+      name: "exception description",
+      apply(rows: MemoryHistoryRows) { rows.exceptions[0]!.description = "tampered"; },
+    },
+  ];
+  for (const tamper of tamperCases) {
+    const prepared = populatedStageFixture();
+    const memory = memoryHistoryClient();
+    const options = {
+      actorId: "authorized-user", technicalReview: stageReview(), commitSha: "e".repeat(40),
+      allowStagedDelta: true, target: "isolated-test" as const,
+      backupEvidence: { manifestHash: "9".repeat(64), snapshotAt: "2026-10-09T12:00:00.000Z" },
+    };
+    const first = await stageAppSheetHistoryProjection(prepared, options, memory.client);
+    assert.equal(first.replay, false, `${tamper.name}: primer stage`);
+    tamper.apply(memory.rows);
+    const writesBeforeReplay = memory.writes;
+    await assert.rejects(stageAppSheetHistoryProjection(prepared, options, memory.client), (error) =>
+      error instanceof AppSheetHistoryStageError && error.code === "existing_history_snapshot_incomplete_or_changed",
+      `${tamper.name}: replay de contenido cambiado debe rechazarse`);
+    assert.equal(memory.writes, writesBeforeReplay, `${tamper.name}: el rechazo no escribe estado`);
+  }
 });
 
 test("CLI apply refuses a dirty checkout before reading the source or opening a database", async () => {

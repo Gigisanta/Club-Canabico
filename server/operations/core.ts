@@ -41,7 +41,11 @@ export const decimal = z.string().regex(/^(0|[1-9]\d{0,25})(\.\d{1,12})?$/);
 export const currency = z.enum(["ARS", "USD"]);
 export const objectId = z.string().min(1).max(100);
 export const evidence = z.record(z.string(), z.unknown()).refine(v => Object.keys(v).length > 0, "Se requiere evidencia");
-const guardedAppSheetHistoryImporterVersions = [APPSHEET_HISTORY_IMPORTER_VERSION, "bombo-appsheet-history/1.0.0"] as const;
+const guardedAppSheetHistoryImporterVersions = [
+  APPSHEET_HISTORY_IMPORTER_VERSION,
+  "bombo-appsheet-history/1.1.0",
+  "bombo-appsheet-history/1.0.0",
+] as const;
 export function json(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value, (_k, v) => typeof v === "bigint" ? v.toString() : v)) as Prisma.InputJsonValue;
 }

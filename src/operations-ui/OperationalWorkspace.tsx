@@ -1063,6 +1063,54 @@ export function OperationalWorkspace(props: Props) {
   const driverRows = deliveryPeople;
   const settlementRouteRows = rowsOf(settlementRoutes.data);
   const settlementPayableRows = rowsOf(settlementPayables.data).filter(payable => payable.kind === "courier_fee" && payable.verified === true);
+  const settlementSourceAccounts = accountRows.filter(account => account.kind === "custody"
+    && idOf(account) && typeof account.custodianId === "string" && account.custodianId.trim()
+    && typeof account.openingApprovedBy === "string" && account.openingApprovedBy.trim()
+    && typeof account.currency === "string" && account.currency.trim());
+  const settlementDestinationAccounts = accountRows.filter(account => account.kind !== "custody"
+    && idOf(account) && typeof account.openingApprovedBy === "string" && account.openingApprovedBy.trim()
+    && typeof account.currency === "string" && account.currency.trim());
+  const settlementSourceOptions = settlementSourceAccounts.map(account => ({ value: idOf(account), label: `${labelOf(account)} · ${textValue(account.currency)} · saldo ${formatMinor(account.balanceMinor, account.currency)}` }));
+  const settlementDestinationOptions = settlementDestinationAccounts.map(account => ({ value: idOf(account), label: `${labelOf(account)} · ${textValue(account.currency)}` }));
+  const settlementRouteOptions = settlementRouteRows.flatMap(route => {
+    const id = idOf(route), driverId = textValue(route.driverId, ""), shiftDate = textValue(route.shiftDate, "");
+    return id && driverId && shiftDate ? [{ value: id, label: `${shiftDate} · ${driverId}` }] : [];
+  });
+  const settlementPayableOptions = settlementPayableRows.flatMap(payable => {
+    const id = idOf(payable), beneficiaryId = textValue(payable.beneficiaryId, "");
+    return id && beneficiaryId && typeof payable.currency === "string" && typeof payable.dueDate === "string"
+      ? [{ value: id, label: `${beneficiaryId} · ${formatMinor(payable.amountMinor, payable.currency)} · ${payable.dueDate}` }]
+      : [];
+  });
+  const canReadSettlementAccounts = hasCapability(context, "finance.read");
+  const needsSettlementRoutes = hasCapability(context, "logistics.write");
+  const needsSettlementPayables = hasCapability(context, "payables.write");
+  const settlementReferenceQueriesReady = canReadSettlementAccounts
+    && Boolean(accounts.data) && !accounts.loading && !accounts.error
+    && (!needsSettlementRoutes || Boolean(settlementRoutes.data) && !settlementRoutes.loading && !settlementRoutes.error)
+    && (!needsSettlementPayables || Boolean(settlementPayables.data) && !settlementPayables.loading && !settlementPayables.error);
+  const settlementHasCompatibleAccountPair = settlementSourceAccounts.some(source => settlementDestinationAccounts.some(destination => source.currency === destination.currency));
+  const renditionReferenceErrors = [
+    accounts.error ? `cuentas: ${accounts.error}` : "",
+    needsSettlementRoutes && settlementRoutes.error ? `turnos: ${settlementRoutes.error}` : "",
+    needsSettlementPayables && settlementPayables.error ? `obligaciones: ${settlementPayables.error}` : "",
+  ].filter(Boolean);
+  const renditionReferencesLoading = canReadSettlementAccounts && (accounts.loading || !accounts.data)
+    || needsSettlementRoutes && (settlementRoutes.loading || !settlementRoutes.data)
+    || needsSettlementPayables && (settlementPayables.loading || !settlementPayables.data);
+  const renditionReferenceError = !canReadSettlementAccounts
+    ? "Tu perfil no puede consultar las cuentas necesarias para aceptar una rendición."
+    : renditionReferenceErrors.length
+      ? `No se pudieron cargar referencias actuales para aceptar la rendición. ${renditionReferenceErrors.join(" · ")}`
+      : !settlementReferenceQueriesReady && !renditionReferencesLoading
+        ? "No hay respuestas actuales de todas las referencias necesarias para aceptar la rendición."
+        : null;
+  const needsRenditionReferences = pageId === "settlements" && hasCommand(context, "RenditionAccepted");
+  const canAcceptRendition = settlementReferenceQueriesReady && settlementHasCompatibleAccountPair;
+  const renditionReferenceBlocker = renditionReferenceError
+    ?? (renditionReferencesLoading ? "Cargando cuentas y referencias para aceptar una rendición…"
+      : !settlementHasCompatibleAccountPair ? "No hay una custodia y una cuenta del club con apertura aprobada en una misma moneda. Actualizá las referencias antes de aceptar una rendición."
+        : null);
   const tariffChoices = approvedPolicies.flatMap(policy => {
     const tiers = recordValue(policy.definition, "tiers");
     return Array.isArray(tiers) ? tiers.filter((tier): tier is Row => Boolean(tier) && typeof tier === "object").map((tier, index) => ({ id: `${idOf(policy)}:${index}`, policy, tier })) : [];
@@ -1090,6 +1138,28 @@ export function OperationalWorkspace(props: Props) {
       return;
     }
     openAction(action(command, title, fieldsIn, build, row ? idOf(row) : options.targetId, expectedVersion, options.requestIdIsTarget ?? create, actionHint ?? description));
+  };
+  const acceptRendition = () => {
+    if (!canAcceptRendition) {
+      onNotice(renditionReferenceBlocker ?? "Las cuentas y referencias de la rendición todavía no están listas.");
+      return;
+    }
+    runAction("RenditionAccepted", "Aceptar rendición del repartidor", fields(
+      select("fromAccountId", "Custodia de origen · moneda", settlementSourceOptions),
+      select("toAccountId", "Cuenta del club de destino", settlementDestinationOptions),
+      field("gross", "Dinero bruto por rendir", "amount", { required: true }),
+      { ...select("mode", "Modalidad de rendición", [{ value: "gross", label: "Bruta · entrega todo al club" }, { value: "net", label: "Neta · descuenta remuneración aprobada" }]), defaultValue: "gross" },
+      field("delivered", "Dinero entregado al club (si es neta)", "amount"), field("fee", "Remuneración descontada (si es neta)", "amount"),
+      select("feePayableId", "Obligación de remuneración aprobada (si es neta)", settlementPayableOptions, false),
+      select("routeId", "Turno asociado (opcional)", settlementRouteOptions, false), evidenceField("Evidencia de la rendición"),
+    ), v => {
+      const from = accountRows.find(account => account.id === str(v, "fromAccountId")), to = accountRows.find(account => account.id === str(v, "toAccountId"));
+      if (!from || !to || from.currency !== to.currency || !from.custodianId) throw new Error("Elegí custodia y destino en la misma moneda.");
+      const grossMinor = amountFormToMinor(str(v, "gross")), net = str(v, "mode") === "net";
+      const route = settlementRouteRows.find(route => route.id === str(v, "routeId"));
+      if (route && route.driverId !== from.custodianId) throw new Error("El turno corresponde a otro repartidor.");
+      return { driverId: from.custodianId, fromAccountId: idOf(from), toAccountId: idOf(to), grossMinor, deliveredMinor: net ? amountFormToMinor(str(v, "delivered")) : grossMinor, feeMinor: net ? amountFormToMinor(str(v, "fee") || "0") : "0", mode: str(v, "mode"), ...(net && str(v, "feePayableId") ? { feePayableId: str(v, "feePayableId") } : {}), ...(route ? { routeId: idOf(route) } : {}), evidence: note(v) };
+    }, undefined, "La rendición mueve dinero verificado desde custodia al club. Conserva por separado la remuneración; no vuelve a reconocer la venta ni el cobro.", true);
   };
   const activateAuthority = () => runAction(
     "AuthorityActivated",
@@ -1180,7 +1250,7 @@ export function OperationalWorkspace(props: Props) {
   };
 
   const createButtons = () => {
-    const buttons: Array<{ label: string; onClick: () => void }> = [];
+    const buttons: Array<{ label: string; onClick: () => void; disabled?: boolean }> = [];
     if (pageId === "members" && hasCommand(context, "MemberCreated")) buttons.push({ label: "＋ Nuevo socio", onClick: () => runAction("MemberCreated", "Crear socio", fields(field("name", "Nombre completo", "text", { required: true }), field("email", "Correo electrónico", "email"), field("phone", "Teléfono", "tel")), v => ({ name: str(v, "name"), email: str(v, "email"), phone: str(v, "phone"), address: {}, preferences: {} }), undefined, "", true) });
     if (pageId === "orders" && hasCommand(context, "OrderCreated")) buttons.push({ label: "＋ Pedido avanzado", onClick: () => runAction("OrderCreated", "Iniciar pedido", fields({ ...select("memberId", "Socio", optionsOf(memberRows), true), lookupPath: "/api/operations/members" }, select("channel", "Modalidad", [{ value: "local", label: "Retiro" }, { value: "delivery", label: "Reparto" }]), currencyField(), field("address", "Domicilio de reparto (opcional)", "textarea"), field("preorder", "Crear como preventa", "checkbox")), v => ({ memberId: str(v, "memberId"), channel: str(v, "channel"), currency: str(v, "currency"), address: str(v, "address") ? { address: str(v, "address") } : {}, preorder: v.preorder === true }), undefined, "", true) });
     const purchaseSupplierOptions = rowsOf(manualReferenceData.data, "suppliers").flatMap(row => row.active === true && idOf(row) && typeof row.name === "string" && row.name.trim() ? [{ value: idOf(row), label: row.name }] : []);
@@ -1224,22 +1294,11 @@ export function OperationalWorkspace(props: Props) {
       select("method", "Medio recibido", [{ value: "cash", label: "Efectivo" }, { value: "transfer", label: "Transferencia" }, { value: "mercado_pago", label: "Mercado Pago" }, { value: "card", label: "Tarjeta" }]), currencyField(), field("amount", "Importe recibido", "amount", { required: true }),
       select("custodianId", "Custodia del efectivo (opcional)", accountRows.filter(account => account.kind === "custody" && account.custodianId).map(account => ({ value: String(account.custodianId), label: `${labelOf(account)} · ${textValue(account.currency)}` })), false, "Vacío significa recepción directa por el club. La verificación determina la cuenta real."), evidenceField("Nota del reporte"),
     ), v => ({ orderId: str(v, "orderId"), method: str(v, "method"), currency: str(v, "currency"), amountMinor: amountFormToMinor(str(v, "amount")), ...(str(v, "custodianId") ? { custodianId: str(v, "custodianId") } : {}), evidence: note(v) }), undefined, "", true, "El reporte conserva un aviso; la deuda y las cuentas cambian sólo con la verificación.") });
-    if (pageId === "settlements" && hasCommand(context, "RenditionAccepted")) buttons.push({ label: "＋ Aceptar rendición", onClick: () => runAction("RenditionAccepted", "Aceptar rendición del repartidor", fields(
-      select("fromAccountId", "Custodia de origen · moneda", accountRows.filter(account => account.kind === "custody" && account.custodianId && account.openingApprovedBy).map(account => ({ value: idOf(account), label: `${labelOf(account)} · ${textValue(account.currency)} · saldo ${formatMinor(account.balanceMinor, account.currency)}` }))),
-      select("toAccountId", "Cuenta del club de destino", accountRows.filter(account => account.kind !== "custody" && account.openingApprovedBy).map(account => ({ value: idOf(account), label: `${labelOf(account)} · ${textValue(account.currency)}` }))),
-      field("gross", "Dinero bruto por rendir", "amount", { required: true }),
-      { ...select("mode", "Modalidad de rendición", [{ value: "gross", label: "Bruta · entrega todo al club" }, { value: "net", label: "Neta · descuenta remuneración aprobada" }]), defaultValue: "gross" },
-      field("delivered", "Dinero entregado al club (si es neta)", "amount"), field("fee", "Remuneración descontada (si es neta)", "amount"),
-      select("feePayableId", "Obligación de remuneración aprobada (si es neta)", settlementPayableRows.map(payable => ({ value: idOf(payable), label: `${textValue(payable.beneficiaryId)} · ${formatMinor(payable.amountMinor, payable.currency)} · ${textValue(payable.dueDate)}` })), false),
-      select("routeId", "Turno asociado (opcional)", settlementRouteRows.map(route => ({ value: idOf(route), label: `${textValue(route.shiftDate)} · ${textValue(route.driverId)}` })), false), evidenceField("Evidencia de la rendición"),
-    ), v => {
-      const from = accountRows.find(account => account.id === str(v, "fromAccountId")), to = accountRows.find(account => account.id === str(v, "toAccountId"));
-      if (!from || !to || from.currency !== to.currency || !from.custodianId) throw new Error("Elegí custodia y destino en la misma moneda.");
-      const grossMinor = amountFormToMinor(str(v, "gross")), net = str(v, "mode") === "net";
-      const route = settlementRouteRows.find(route => route.id === str(v, "routeId"));
-      if (route && route.driverId !== from.custodianId) throw new Error("El turno corresponde a otro repartidor.");
-      return { driverId: from.custodianId, fromAccountId: idOf(from), toAccountId: idOf(to), grossMinor, deliveredMinor: net ? amountFormToMinor(str(v, "delivered")) : grossMinor, feeMinor: net ? amountFormToMinor(str(v, "fee") || "0") : "0", mode: str(v, "mode"), ...(net && str(v, "feePayableId") ? { feePayableId: str(v, "feePayableId") } : {}), ...(route ? { routeId: idOf(route) } : {}), evidence: note(v) };
-    }, undefined, "La rendición mueve dinero verificado desde custodia al club. Conserva por separado la remuneración; no vuelve a reconocer la venta ni el cobro.", true) });
+    if (pageId === "settlements" && hasCommand(context, "RenditionAccepted")) buttons.push({
+      label: "＋ Aceptar rendición",
+      disabled: !canAcceptRendition || query.loading || Boolean(query.error),
+      onClick: acceptRendition,
+    });
     if (pageId === "payables" && hasCommand(context, "PayableCreated")) {
       const accrualField = () => field("accrualPeriod", "Período de devengamiento · YYYY-MM", "month", { required: true, help: "Mes al que corresponde la obligación; no es la fecha de pago." });
       buttons.push({ label: "＋ Gasto operativo", onClick: () => runAction("PayableCreated", "Registrar gasto operativo", fields(
@@ -1741,7 +1800,7 @@ export function OperationalWorkspace(props: Props) {
       <button type="button" className="ops-button ops-button-primary" data-testid="appsheet-invoice-open" onClick={() => setInvoiceEditor({ mode: "invoice" })}>＋ Nueva factura</button>
       <button type="button" className="ops-button ops-button-quiet" data-testid="appsheet-preorder-open" onClick={() => setInvoiceEditor({ mode: "preorder" })}>＋ Nueva preventa</button>
     </>}
-    {create.map(button => <button type="button" className="ops-button ops-button-primary" key={button.label} onClick={button.onClick}>{button.label}</button>)}
+    {create.map(button => <button type="button" className="ops-button ops-button-primary" key={button.label} disabled={button.disabled} onClick={button.onClick}>{button.label}</button>)}
   </div>;
   const emptyMessages: Record<string, [string, string]> = {
     orders: ["Todavía no hay pedidos", "Los pedidos disponibles para tu cuenta van a aparecer acá."],
@@ -1753,6 +1812,13 @@ export function OperationalWorkspace(props: Props) {
 
   return <div className="ops-page-body">
     <SectionHeading title={title} detail={pageId === "orders" ? "Productos, cobros y entregas de cada pedido." : pageId === "accounts" ? "Cuentas por moneda. El saldo requiere una apertura conciliada." : undefined} action={headerActions} />
+    {needsRenditionReferences && !renditionReferenceError && renditionReferencesLoading && <p className="ops-inline-status" role="status">Cargando cuentas y referencias para aceptar una rendición…</p>}
+    {needsRenditionReferences && renditionReferenceError && <ErrorState message={renditionReferenceError} retry={canReadSettlementAccounts ? () => {
+      accounts.retry();
+      if (needsSettlementRoutes) settlementRoutes.retry();
+      if (needsSettlementPayables) settlementPayables.retry();
+    } : undefined} />}
+    {needsRenditionReferences && !renditionReferencesLoading && !renditionReferenceError && !settlementHasCompatibleAccountPair && <p className="ops-inline-status" role="status">No hay una custodia y una cuenta del club con apertura aprobada en una misma moneda. Actualizá las referencias antes de aceptar una rendición.</p>}
     {["catalog", "purchases"].includes(pageId) && !context.rehearsal && context.authority.mode !== "active" && <InfoBand tone="warning" title={context.authority.mode === "shadow" ? "Circuito en sombra · habilitación pendiente" : "Autoridad del circuito por confirmar"}><p>El contexto no confirma autoridad activa. El servidor puede rechazar altas y cambios de catálogo, compras, recepciones y otros registros hasta la habilitación correspondiente. Esta pantalla no activa esa autoridad. La apertura inicial usa una regla administrativa separada y todavía requiere producto y ubicación activos, costo y una persona preparadora distinta de quien aprueba.</p></InfoBand>}
     {pageId === "catalog" && <InfoBand title="Stock disponible"><p>El stock disponible descuenta las reservas. Al preparar un pedido, elegí el lote y registrá el peso real.</p></InfoBand>}
     {pageId === "catalog" && <AppSheetCatalogue context={context} refreshKey={refreshKey} runCommand={runCommand} onRefresh={onRefresh} onNotice={onNotice} />}
