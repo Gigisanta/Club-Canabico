@@ -65,7 +65,7 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-function sameStableHistoryPages(coveragePages: unknown, capturePageManifest: Prisma.JsonValue): boolean {
+function sameStableHistoryPages(coveragePages: unknown, capturePageManifest: unknown): boolean {
   if (!Array.isArray(coveragePages) || !Array.isArray(capturePageManifest) || coveragePages.length !== capturePageManifest.length) return false;
   const fields = ["sheetId", "title", "pageIndex", "startRow", "endRow", "pageHash", "verifiedPageHash", "stable"] as const;
   return coveragePages.every((value, index) => {
