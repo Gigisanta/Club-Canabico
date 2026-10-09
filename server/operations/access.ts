@@ -340,12 +340,11 @@ async function prepareCanonicalIdentityReview(ctx:CommandContext,input:Canonical
 }
 
 const canonicalMemberMutationCommands=["MemberUpdated","PermissionVerified","ClinicalRecordReviewed"] as const;
-function isServerDateAtOrAfter(value:Date,floor:Date){return value instanceof Date&&Number.isFinite(value.getTime())&&value>=floor;}
-/** DateTime defaults to PostgreSQL's transaction-start time; server result timestamps may be later within that transaction. */
-function responseDateAtOrAfterTransactionStart(value:unknown,reviewedAt:Date,transactionStartedAt:Date){
+function isServerDate(value:Date){return value instanceof Date&&Number.isFinite(value.getTime());}
+function responseDateAtOrAfterBaseline(value:unknown,reviewedAt:Date){
  if(typeof value!=="string")return false;
  const date=new Date(value);
- return Number.isFinite(date.getTime())&&date>=reviewedAt&&date>=transactionStartedAt;
+ return Number.isFinite(date.getTime())&&date>=reviewedAt;
 }
 
 type CanonicalMemberMutationCandidate={member:{id:string;legacyCustomerId:string|null;sourceSystem:string|null;sourceId:string|null;
@@ -374,14 +373,17 @@ async function canonicalMemberMutationChainIds(tx:Tx,candidates:CanonicalMemberM
   if(!rows.length){if(currentHash===baselineHash)eligible.add(member.id);continue;}
   let expectedVersion=baselineVersion+1,latestMemberHash=baselineHash,valid=true;
   for(const receipt of rows){
+   // Identity review revalidated the destination at baselineVersion; a contiguous
+   // post-baseline server receipt chain proves causality. The DB timestamps below
+   // use transaction start, so compare server result dates only with the review.
    if(receipt.resultingVersion!==expectedVersion++||receipt.resultingVersion>currentVersion||
       !canonicalMemberMutationCommands.includes(receipt.command as typeof canonicalMemberMutationCommands[number])||
-      receipt.targetId!==member.id||!isServerDateAtOrAfter(receipt.committedAt,reviewedAt)){valid=false;break;}
+      receipt.targetId!==member.id||!isServerDate(receipt.committedAt)){valid=false;break;}
    const matchingAudits=auditsByRequest.get(`${member.id}\0${receipt.requestId}\0${receipt.command}`)??[];
    if(matchingAudits.length!==1){valid=false;break;}
    const auditRow=matchingAudits[0]!,details=asJsonObject(auditRow.details),response=asJsonObject(receipt.response);
    if(auditRow.actorId!==receipt.actorId||auditRow.objectId!==member.id||auditRow.requestId!==receipt.requestId||
-      !isServerDateAtOrAfter(auditRow.createdAt,reviewedAt)||!details||details.version!==receipt.resultingVersion||!response||
+      !isServerDate(auditRow.createdAt)||!details||details.version!==receipt.resultingVersion||!response||
       response.requestId!==receipt.requestId||response.targetId!==member.id||response.version!==receipt.resultingVersion){valid=false;break;}
    const result=asJsonObject(response.result);
    if(!result){valid=false;break;}
@@ -395,11 +397,11 @@ async function canonicalMemberMutationChainIds(tx:Tx,candidates:CanonicalMemberM
    }else if(receipt.command==="PermissionVerified"){
     const permission=asJsonObject(result.permission);
     if(!permission||permission.memberId!==member.id||permission.status!=="verified"||permission.reviewerId!==receipt.actorId||
-       !responseDateAtOrAfterTransactionStart(permission.reviewedAt,reviewedAt,receipt.committedAt)){valid=false;break;}
+       !responseDateAtOrAfterBaseline(permission.reviewedAt,reviewedAt)){valid=false;break;}
    }else{
     const clinical=asJsonObject(result.clinical);
     if(!clinical||clinical.memberId!==member.id||!["verified","rejected","needs_information"].includes(String(clinical.verification))||
-       clinical.reviewedBy!==receipt.actorId||!responseDateAtOrAfterTransactionStart(clinical.reviewedAt,reviewedAt,receipt.committedAt)){valid=false;break;}
+       clinical.reviewedBy!==receipt.actorId||!responseDateAtOrAfterBaseline(clinical.reviewedAt,reviewedAt)){valid=false;break;}
    }
   }
   if(valid&&expectedVersion===currentVersion+1&&currentHash===latestMemberHash)eligible.add(member.id);

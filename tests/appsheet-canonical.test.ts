@@ -697,9 +697,11 @@ test("capture-bound member review survives a later capture review and follows on
       "un permiso legítimo conserva elegibilidad aunque reviewedAt sea posterior a committedAt de inicio de transacción");
     assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, secondCapture.captureId), new Set([member.id]));
 
-    permissionResult.reviewedAt = new Date(transactionStartedAt.getTime() - 1).toISOString();
-    assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, firstCapture.captureId), new Set(),
-      "el resultado semántico anterior al inicio de transacción se rechaza");
+    permissionResult.reviewedAt = new Date(secondReviewedAt.getTime() - 1).toISOString();
+    assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, firstCapture.captureId), new Set([member.id]),
+      "el mismo resultado posterior al baseline de A sigue siendo causal para A");
+    assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, secondCapture.captureId), new Set(),
+      "el resultado semántico anterior al baseline de B no habilita B");
     permissionResult.reviewedAt = permissionReviewedAt.toISOString();
     currentObjectVersion = 2;
     assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, firstCapture.captureId), new Set(),
