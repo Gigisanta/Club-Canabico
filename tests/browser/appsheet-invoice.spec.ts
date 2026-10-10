@@ -760,6 +760,11 @@ test("a synthetic replacement-profile preview calculates product and moto transf
       authority: { ...context.authority, cutoverProfile: "appsheet-replacement" },
     } });
   });
+  // This client-only replacement profile is a synthetic preview, not real authority or source-lot proof.
+  await page.route("**/api/operations/catalog**", route => fulfillCatalogAvailability(route, skuId => {
+    if (skuId === "ops-sku-c") return "Sí";
+    return "NO";
+  }));
   const commandPosts: Request[] = [];
   page.on("request", request => { if (isCommand(request)) commandPosts.push(request); });
   await enterOrders(page);
