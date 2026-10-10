@@ -10,6 +10,7 @@ import { ActionButton, DataTable, EmptyState, ErrorState, InfoBand, LoadingState
 import { HomeWorkspace, MissingRoute } from "./HomeWorkspace";
 import { CommercialMarginPreview } from "./CommercialMarginPreview";
 import { LegacyHistoryWorkflow } from "./LegacyHistoryWorkflow";
+import { AppSheetMigrationReviewPanel } from "./AppSheetMigrationReviewPanel";
 import { RemoteSelect } from "./RemoteSelect";
 import { ProductInspector } from "./ProductInspector";
 import { CanonicalExportPanel } from "./CanonicalExportPanel";
@@ -728,6 +729,7 @@ function DocImportPanels({ pageId, context, refreshKey, runCommand, onRefresh, o
     </>} />
     }
     {pageId === "imports" && <LegacyHistoryWorkflow context={context} refreshKey={refreshKey} runCommand={runCommand} onRefresh={onRefresh} onNotice={onNotice} />}
+    {pageId === "imports" && <AppSheetMigrationReviewPanel context={context} runCommand={runCommand} onRefresh={onRefresh} onNotice={onNotice} />}
     <PeriodCoveragePanel context={context} runCommand={runCommand} onRefresh={onRefresh} onNotice={onNotice} />
     {hasCapability(context, "imports.write") && !canReviewImports && <InfoBand tone="warning" title="La revisión requiere otro perfil"><p>Este perfil puede consultar el progreso de su carga, pero la revisión de un lote finalizado corresponde a otra persona con permiso imports.review.</p></InfoBand>}
   </div>;
@@ -975,6 +977,7 @@ export function OperationalWorkspace(props: Props) {
           ? invoiceTotalState === "defined" ? "Definido por regla" : invoiceTotalState === "staff_confirmed" ? "Confirmado por el personal" : "Pendiente de definición"
           : "—",
         capturedBaseLabel: appSheetInvoice ? formatMinor(recordValue(orderQuote, "capturedBaseMinor"), invoiceCurrency) : "—",
+        legacyFinancialLabel: legacyFinancialProjectionLabel(row, invoiceCurrency),
       } : {}),
       ...(row.driverId ? { driverIdLabel: textValue(driver?.name, "Persona asignada") } : {}),
       ...(row.reporterId ? { reporterIdLabel: textValue(reporter?.name, "Persona reportante") } : {}),
@@ -1416,7 +1419,7 @@ export function OperationalWorkspace(props: Props) {
   const columnsByPage: Record<string, Array<[string, string]>> = {
     members: [["name", "Socio"], ["email", "Correo"], ["phone", "Teléfono"], ["active", "Activo"]],
     catalog: [["name", "Producto"], ["category", "Categoría"], ["unit", "Unidad"], ["active", "Activo"]],
-    orders: [["invoiceOrOrderLabel", "Factura / pedido"], ["invoiceMemberLabel", "Cliente"], ["lines", "Productos"], ["commercialState", "Estado comercial"], ["fulfillmentState", "Preparación"], ["financialState", "Cobro"], ["invoiceTotalLabel", "Total facturado"], ["invoiceTotalBreakdownLabel", "Desglose confirmado"], ["invoiceTotalSourceLabel", "Origen del total"], ["capturedBaseLabel", "Importe capturado"]],
+    orders: [["invoiceOrOrderLabel", "Factura / pedido"], ["invoiceMemberLabel", "Cliente"], ["lines", "Productos"], ["commercialState", "Estado comercial"], ["fulfillmentState", "Preparación"], ["financialState", "Cobro"], ["legacyFinancialLabel", "Saldo y pago histórico"], ["invoiceTotalLabel", "Total facturado"], ["invoiceTotalBreakdownLabel", "Desglose confirmado"], ["invoiceTotalSourceLabel", "Origen del total"], ["capturedBaseLabel", "Importe capturado"]],
     purchases: [["id", "Compra"], ["supplierId", "Proveedor"], ["agreementDate", "Acuerdo"], ["expectedDate", "Prevista"], ["items", "Artículos"], ["totalMinor", "Total"], ["currency", "Moneda"], ["status", "Estado"]],
     routes: [["shiftDate", "Turno"], ["driverId", "Repartidor"], ["status", "Estado"], ["closedWithPending", "Cierre con pendientes"]],
     tasks: [["title", "Tarea"], ["dueDate", "Vence"], ["status", "Estado"], ["responsibleId", "Responsable"]],
@@ -2124,6 +2127,13 @@ function legacyBasisLabel(fact: Row) {
   return `Base: ${textValue(fact.amountBasis, "no identificada")} · ${factAmountLabel(fact)}`;
 }
 
+function legacyFinancialProjectionLabel(row: Row, currency: unknown) {
+  if (row.legacyFinancialProjectionState !== "reviewed") return "Saldo no disponible · requiere revisión";
+  const balance = formatMinor(row.outstandingMinor, currency);
+  const legacyPaid = typeof row.legacyPaidMinor === "string" && /^\d+$/.test(row.legacyPaidMinor) ? BigInt(row.legacyPaidMinor) : 0n;
+  return legacyPaid > 0n ? `Saldo ${balance} · pago histórico revisado ${formatMinor(row.legacyPaidMinor, currency)}` : `Saldo ${balance}`;
+}
+
 function MemberInspector({ memberId, refreshKey, documents, catalog, onClose }: { memberId: string; refreshKey: number; documents: Row[]; catalog: Row[]; onClose: () => void }) {
   const [member, setMember] = useState<Row | null>(null);
   const [permissions, setPermissions] = useState<Row[]>([]);
@@ -2242,7 +2252,7 @@ function MemberInspector({ memberId, refreshKey, documents, catalog, onClose }: 
     {documents.length > 0 && <ListTable title="Documentos operativos disponibles" rows={documents} columns={[["kind", "Tipo"], ["state", "Estado"], ["validUntil", "Vigencia"]]} />}
     {error && <InfoBand tone="warning" title="No se pudo completar la actualización; se conservan los datos anteriores">{error}<button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={retry} disabled={loading || busy !== ""}>Reintentar actualización</button>{historicalChanged && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={() => void loadHistorical(true)} disabled={busy === "history" || loading}>Volver a consultar historia</button>}</InfoBand>}
     <div className="ops-member-history-grid">
-      <section><h3>Pedidos de Bombo</h3>{orderRows.length ? <ListTable title="Pedidos actuales" rows={orderRows.map(row => ({ ...row, amountLabel: row.totalCalculationState === "pending_definition" ? "Pendiente de definición" : typeof row.currency === "string" ? formatMinor(row.totalMinor, row.currency) : "Importe no disponible" }))} columns={[["createdAt", "Fecha"], ["channel", "Modalidad"], ["fulfillmentState", "Preparación"], ["financialState", "Cobro"], ["amountLabel", "Total"]]} /> : <p className="ops-muted-copy">No hay pedidos actuales en el alcance.</p>}{orderHasMore && <button type="button" className="ops-button ops-button-quiet" onClick={() => void loadOrders()} disabled={busy !== "" || loading || Boolean(error)}>{busy === "orders" ? "Cargando…" : "Cargar más pedidos"}</button>}</section>
+      <section><h3>Pedidos de Bombo</h3>{orderRows.length ? <ListTable title="Pedidos actuales" rows={orderRows.map(row => ({ ...row, amountLabel: row.totalCalculationState === "pending_definition" ? "Pendiente de definición" : typeof row.currency === "string" ? formatMinor(row.totalMinor, row.currency) : "Importe no disponible", legacyFinancialLabel: legacyFinancialProjectionLabel(row, row.currency) }))} columns={[["createdAt", "Fecha"], ["channel", "Modalidad"], ["fulfillmentState", "Preparación"], ["financialState", "Cobro"], ["legacyFinancialLabel", "Saldo y pago histórico"], ["amountLabel", "Total"]]} /> : <p className="ops-muted-copy">No hay pedidos actuales en el alcance.</p>}{orderHasMore && <button type="button" className="ops-button ops-button-quiet" onClick={() => void loadOrders()} disabled={busy !== "" || loading || Boolean(error)}>{busy === "orders" ? "Cargando…" : "Cargar más pedidos"}</button>}</section>
       <section><h3>Historia legado aprobada</h3>{coverage && <p className="ops-muted-copy">{textValue(coverage.historical, "Cobertura pendiente")}{typeof coverage.fingerprint === "string" ? ` · revisión ${coverage.fingerprint.slice(0, 12)}` : ""}. La historia no crea saldos ni acredita pagos.</p>}{historicalRows.length ? <ul className="ops-fact-list">{historicalRows.map((fact, index) => <li key={textValue(fact.id, String(index))}><strong>{factDateLabel(fact)} · {legacyBasisLabel(fact)}</strong><span>{textValue(fact.reference, "Factura histórica")} · moneda {fact.currencyState === "known" && (fact.currency === "ARS" || fact.currency === "USD") ? String(fact.currency) : "no identificada"}{fact.correctionOf ? " · versión corregida" : ""}</span></li>)}</ul> : <p className="ops-muted-copy">No hay facturas publicadas para mostrar en esta página.</p>}{historicalHasMore && <button type="button" className="ops-button ops-button-quiet" onClick={() => void loadHistorical()} disabled={busy !== "" || loading || Boolean(error)}>{busy === "history" ? "Cargando…" : "Cargar más historia"}</button>}</section>
     </div>
   </section>;

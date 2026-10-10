@@ -13,7 +13,7 @@ import { appSheetPendingImportReviewSchema } from "../shared/operations/appsheet
 const PRIVATE_DIR = ".local/appsheet-real-20261009";
 const MAX_INPUT_BYTES = 1_000_000;
 
-export type AppSheetPendingImportAction = "preview" | "map-order" | "resolve-delivery" | "review-plan" | "stage" | "review-destination";
+export type AppSheetPendingImportAction = "preview" | "map-order" | "resolve-delivery" | "review-source" | "review-plan" | "stage" | "review-destination";
 export interface AppSheetPendingImportCliOptions {
   action: AppSheetPendingImportAction;
   snapshotId: string;
@@ -29,10 +29,12 @@ export interface AppSheetPendingImportCliOptions {
 
 export function appSheetPendingImportCliUsage(): string {
   return [
-    "Uso: tsx scripts/appsheet-pending-import.ts --snapshot <snapshot-id|batch-id> [--action preview|map-order|resolve-delivery|review-plan|stage|review-destination]",
+    "Uso: tsx scripts/appsheet-pending-import.ts --snapshot <snapshot-id|batch-id> [--action preview|map-order|resolve-delivery|review-source|review-plan|stage|review-destination]",
     "Preview es el modo predeterminado y sólo consulta el destino indicado.",
     "Toda escritura exige --actor-id, --request-id UUID, --backup-reference verificado y un checkout Git limpio con commit.",
-    "map-order/resolve-delivery y review-plan/review-destination requieren JSON privado directo dentro de .local/appsheet-real-20261009/.",
+    "Las revisiones humanas (map-order, resolve-delivery, review-source, review-plan, review-destination) se ejecutan por API autenticada en producción; la CLI las rechaza antes de leer la base.",
+    "En destino isolated, esas revisiones sintéticas requieren JSON privado directo dentro de .local/appsheet-real-20261009/.",
+    "review-source sintético registra la revisión de historial antes de preparar el plan de importación.",
     "stage consume --plan-review-request-id, un recibo de revisión previo emitido por una persona con imports.review.",
     "El destino y el respaldo se comprueban contra la captura estable; no se imprimen URLs, filas ni valores privados.",
   ].join("\n");
@@ -57,7 +59,7 @@ export function parseAppSheetPendingImportCliArgs(args: string[]): AppSheetPendi
     values.set(argument, value);
   }
   const action = values.get("--action") ?? "preview";
-  if (!["preview", "map-order", "resolve-delivery", "review-plan", "stage", "review-destination"].includes(action))
+  if (!["preview", "map-order", "resolve-delivery", "review-source", "review-plan", "stage", "review-destination"].includes(action))
     throw new AppSheetPendingImportCliError("action_invalid");
   options.action = action as AppSheetPendingImportAction;
   options.snapshotId = values.get("--snapshot") ?? "";
@@ -65,6 +67,9 @@ export function parseAppSheetPendingImportCliArgs(args: string[]): AppSheetPendi
   const target = values.get("--target") ?? "isolated";
   if (target !== "isolated" && target !== "production") throw new AppSheetPendingImportCliError("target_invalid");
   options.target = target;
+  if (target === "production" && ["map-order", "resolve-delivery", "review-source", "review-plan", "review-destination"]
+    .includes(options.action))
+    throw new AppSheetPendingImportCliError("human_review_requires_authenticated_api");
   options.actorId = values.get("--actor-id") ?? null;
   options.requestId = values.get("--request-id") ?? null;
   options.reviewPath = values.get("--review") ?? null;
@@ -82,12 +87,13 @@ export function parseAppSheetPendingImportCliArgs(args: string[]): AppSheetPendi
   if (options.action === "resolve-delivery" && !options.mappingPath) throw new AppSheetPendingImportCliError("delivery_mapping_file_required");
   if (options.action === "review-plan" && (!options.reviewPath || !options.importerId)) throw new AppSheetPendingImportCliError("plan_review_file_and_importer_required");
   if (options.action === "stage" && !options.planReviewRequestId) throw new AppSheetPendingImportCliError("plan_review_receipt_required");
+  if (options.action === "review-source" && !options.reviewPath) throw new AppSheetPendingImportCliError("source_review_file_required");
   if (options.action === "review-destination" && !options.reviewPath) throw new AppSheetPendingImportCliError("destination_review_file_required");
   if (!(["map-order", "resolve-delivery"].includes(options.action)) && options.mappingPath)
     throw new AppSheetPendingImportCliError("mapping_file_action_mismatch");
   if (options.action !== "stage" && options.planReviewRequestId) throw new AppSheetPendingImportCliError("plan_review_receipt_action_mismatch");
   if (options.action !== "review-plan" && options.importerId) throw new AppSheetPendingImportCliError("importer_id_action_mismatch");
-  if (!["review-plan", "review-destination"].includes(options.action) && options.reviewPath)
+  if (!["review-source", "review-plan", "review-destination"].includes(options.action) && options.reviewPath)
     throw new AppSheetPendingImportCliError("review_file_action_mismatch");
   return options;
 }
@@ -111,8 +117,34 @@ async function readPrivateJson(pathValue: string, privateDirectory: string, work
   catch { throw new AppSheetPendingImportCliError("private_input_json_invalid"); }
 }
 
-function randomEnvelope(targetId: string, expectedVersion: number, command: string, data: Record<string, unknown>, requestId: string) {
-  return { schemaVersion: 1, requestId, targetId, expectedVersion, occurredAt: new Date().toISOString(), command, data };
+export interface AppSheetPendingImportCommandReceipt {
+  actorId: string;
+  targetId: string;
+  command: string;
+  occurredAt: Date;
+  resultingVersion: number;
+}
+
+export function appSheetPendingImportCommandEnvelope(input: {
+  actorId: string;
+  targetId: string;
+  expectedVersion: number;
+  command: string;
+  data: Record<string, unknown>;
+  requestId: string;
+  priorReceipt?: AppSheetPendingImportCommandReceipt | null;
+}) {
+  const prior = input.priorReceipt;
+  const sameCommand = prior?.actorId === input.actorId && prior.targetId === input.targetId && prior.command === input.command;
+  return {
+    schemaVersion: 1,
+    requestId: input.requestId,
+    targetId: input.targetId,
+    expectedVersion: sameCommand ? prior.resultingVersion - 1 : input.expectedVersion,
+    occurredAt: sameCommand ? prior.occurredAt.toISOString() : new Date().toISOString(),
+    command: input.command,
+    data: input.data,
+  };
 }
 
 function safeFailureCode(error: unknown): string {
@@ -139,7 +171,7 @@ export async function runAppSheetPendingImportCli(args: string[], workingDirecto
     const destinationIdentity = appSheetHistoryPreviewDestinationIdentity(options.target, databaseUrl);
     process.env.DATABASE_URL = databaseUrl.toString();
     await import("../server/operations/routes.js"); // Registers commands; internal HTTP still rejects them.
-    const [{ db }, { executeCommand }, { prepareAppSheetPendingImportPlan }, { verifyBackupReference }] = await Promise.all([
+    const [{ db }, { executeCommand, commandSpecs }, { prepareAppSheetPendingImportPlan }, { verifyBackupReference }] = await Promise.all([
       import("../server/db.js"), import("../server/operations/core.js"), import("../server/operations/appsheet-pending-import.js"),
       import("../server/operations/financial-source-stage.js"),
     ]);
@@ -149,9 +181,9 @@ export async function runAppSheetPendingImportCli(args: string[], workingDirecto
     if (options.action === "review-destination" && !destinationBatch)
       throw new AppSheetPendingImportCliError("pending_batch_not_found");
     const planSnapshotId = destinationBatch?.snapshotId ?? options.snapshotId;
-    let plan = await prepareAppSheetPendingImportPlan(db, { snapshotId: planSnapshotId });
-    const targetMatches = plan.target === target && plan.destinationIdentity === destinationIdentity;
     if (options.action === "preview") {
+      const plan = await prepareAppSheetPendingImportPlan(db, { snapshotId: planSnapshotId });
+      const targetMatches = plan.target === target && plan.destinationIdentity === destinationIdentity;
       const counts = Object.fromEntries(["blocked", "closed", "not_applicable", "materialized"].map(state =>
         [state, plan.dispositions.filter(row => row.state === state).length]));
       return { code: 0, output: JSON.stringify({ status: "preview", snapshotId: options.snapshotId,
@@ -177,7 +209,35 @@ export async function runAppSheetPendingImportCli(args: string[], workingDirecto
       throw new AppSheetPendingImportCliError("write_commit_state_changed");
     const backupBinding = { target, destinationIdentity, commitSha: finalGit.commitSha,
       backupManifestHash: backupEvidence.manifestHash, backupSnapshotAt: new Date(backupEvidence.snapshotAt) };
-    plan = await prepareAppSheetPendingImportPlan(db, { snapshotId: options.snapshotId, binding: backupBinding });
+
+    if (options.action === "review-source") {
+      const rawReview = await readPrivateJson(options.reviewPath!, privateDirectory, workingDirectory);
+      const spec = commandSpecs.get("AppSheetHistorySourceReviewed");
+      if (!spec) throw new AppSheetPendingImportCliError("history_source_review_command_unavailable");
+      let data: Record<string, unknown>;
+      try {
+        const parsed = spec.schema.parse(rawReview);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("source_review_payload_invalid");
+        data = parsed as Record<string, unknown>;
+      } catch { throw new AppSheetPendingImportCliError("source_review_payload_invalid"); }
+      const snapshotObject = await db.operationObject.findUnique({ where: { id: options.snapshotId }, select: { kind: true, version: true } });
+      if (snapshotObject && snapshotObject.kind !== "legacyImport")
+        throw new AppSheetPendingImportCliError("snapshot_object_not_found");
+      const priorReceipt = await db.commandReceipt.findUnique({ where: { requestId: options.requestId! }, select: {
+        actorId: true, targetId: true, command: true, occurredAt: true, resultingVersion: true,
+      } });
+      const command = "AppSheetHistorySourceReviewed";
+      const targetId = options.snapshotId;
+      const expectedVersion = snapshotObject?.version ?? 0;
+      const response = await executeCommand(actor, appSheetPendingImportCommandEnvelope({
+        actorId: actor.id, targetId, expectedVersion, command, data, requestId: options.requestId!, priorReceipt,
+      }));
+      return { code: 0, output: JSON.stringify({ status: "completed", action: options.action, command,
+        requestId: options.requestId, targetId, version: response.version, result: response.result }) };
+    }
+
+    let plan = await prepareAppSheetPendingImportPlan(db, { snapshotId: planSnapshotId, binding: backupBinding });
+    const targetMatches = plan.target === target && plan.destinationIdentity === destinationIdentity;
     if (!targetMatches || plan.target !== target || plan.destinationIdentity !== destinationIdentity)
       throw new AppSheetPendingImportCliError("target_does_not_match_reviewed_history_binding");
     const requestId = options.requestId!;
@@ -209,7 +269,7 @@ export async function runAppSheetPendingImportCli(args: string[], workingDirecto
       data = { snapshotId: options.snapshotId, ...backupBinding, planReviewRequestId: options.planReviewRequestId };
     } else {
       const batch = destinationBatch!;
-      plan = await prepareAppSheetPendingImportPlan(db, { snapshotId: batch.snapshotId, binding: backupBinding });
+      plan = await prepareAppSheetPendingImportPlan(db, { snapshotId: planSnapshotId, binding: backupBinding });
       const object = await db.operationObject.findUnique({ where: { id: batch.id }, select: { kind: true, version: true } });
       if (!object || object.kind !== "legacyImport") throw new AppSheetPendingImportCliError("pending_batch_object_not_found");
       command = "AppSheetPendingImportDestinationReviewed";
@@ -218,7 +278,12 @@ export async function runAppSheetPendingImportCli(args: string[], workingDirecto
       const rawReview = await readPrivateJson(options.reviewPath!, privateDirectory, workingDirectory);
       data = { review: appSheetPendingImportReviewSchema.parse(rawReview) };
     }
-    const response = await executeCommand(actor, randomEnvelope(targetId, expectedVersion, command, data, requestId));
+    const priorReceipt = await db.commandReceipt.findUnique({ where: { requestId }, select: {
+      actorId: true, targetId: true, command: true, occurredAt: true, resultingVersion: true,
+    } });
+    const response = await executeCommand(actor, appSheetPendingImportCommandEnvelope({
+      actorId: actor.id, targetId, expectedVersion, command, data, requestId, priorReceipt,
+    }));
     return { code: 0, output: JSON.stringify({ status: "completed", action: options.action, command,
       requestId, targetId, version: response.version, result: response.result }) };
   } catch (error) {

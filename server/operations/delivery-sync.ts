@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { Prisma } from "@prisma/client";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { db } from "../db.js";
@@ -6,6 +7,7 @@ import { executeCommand, envelopeSchema, commandSpecs, OperationError, requireCa
 import { canonicalCommandBodyHash } from "./canonical.js";
 import { canonicalJson } from "../../shared/operations/exact.js";
 import { isAppSheetInvoiceTotalPending } from "../../shared/operations/appsheet.js";
+import { appSheetLegacyFinancialSummariesForOrders } from "./appsheet-legacy-financial-projection.js";
 export const deliverySyncRoutes=Router();
 const allowed=new Set(["DeliveryRecorded","DeliveryIncident","CollectionReported"]);
 const eventSchema=envelopeSchema.extend({sequence:z.number().int().min(1).optional(),dependsOn:z.uuid().nullable().optional()});
@@ -50,13 +52,20 @@ deliverySyncRoutes.get("/manifests/current",async(req,res)=>{
  const device=await db.operationDevice.findUnique({where:{id:deviceId}});
  if(!device||device.userId!==req.user.id||device.revokedAt)throw new OperationError(403,"DEVICE_SCOPE","Dispositivo no autorizado");
  if(!device.storageCertified||!device.storageCertifiedAt)throw new OperationError(423,"DEVICE_NOT_CERTIFIED","El dispositivo requiere prueba de almacenamiento y reinicio");
- const foundAssignments=await db.deliveryAssignment.findMany({where:{driverId:req.user.id,status:{in:["assigned","dispatched","partially_delivered"]}},orderBy:[{routeId:"asc"},{stopSequence:"asc"}]});
- const now=new Date(),orderIds=[...new Set(foundAssignments.map(a=>a.orderId))];
- const foundOrders=await db.operationOrder.findMany({where:{id:{in:orderIds}},include:{lines:true}});
- if(foundOrders.length!==orderIds.length)throw new OperationError(409,"DELIVERY_ORDER_PENDING","Una entrega asignada no tiene un pedido disponible");
- const pendingTotalIds=new Set(foundOrders.filter(order=>isAppSheetInvoiceTotalPending(order.quote)).map(order=>order.id));
- const assignments=foundAssignments.filter(assignment=>!pendingTotalIds.has(assignment.orderId));
- const orders=foundOrders.filter(order=>!pendingTotalIds.has(order.id));
+ const now=new Date();
+ // One snapshot must govern assignment membership, invoice-total eligibility, the order
+ // financial basis, and the reviewed historical-payment proof included in the manifest.
+ const {assignments,orders,legacyFinancial}=await db.$transaction(async tx=>{
+  const foundAssignments=await tx.deliveryAssignment.findMany({where:{driverId:req.user.id,status:{in:["assigned","dispatched","partially_delivered"]}},orderBy:[{routeId:"asc"},{stopSequence:"asc"}]});
+  const orderIds=[...new Set(foundAssignments.map(a=>a.orderId))];
+  const foundOrders=await tx.operationOrder.findMany({where:{id:{in:orderIds}},include:{lines:true}});
+  if(foundOrders.length!==orderIds.length)throw new OperationError(409,"DELIVERY_ORDER_PENDING","Una entrega asignada no tiene un pedido disponible");
+  const pendingTotalIds=new Set(foundOrders.filter(order=>isAppSheetInvoiceTotalPending(order.quote)).map(order=>order.id));
+  const eligibleAssignments=foundAssignments.filter(assignment=>!pendingTotalIds.has(assignment.orderId));
+  const eligibleOrders=foundOrders.filter(order=>!pendingTotalIds.has(order.id));
+  const summaries=await appSheetLegacyFinancialSummariesForOrders(tx,eligibleOrders);
+  return {assignments:eligibleAssignments,orders:eligibleOrders,legacyFinancial:summaries};
+ },{isolationLevel:Prisma.TransactionIsolationLevel.RepeatableRead});
  const ids=assignments.map(a=>a.id),routeIds=[...new Set(assignments.flatMap(a=>a.routeId?[a.routeId]:[]))];
  const orderById=new Map(orders.map(order=>[order.id,order]));
  const memberIds=[...new Set(orders.map(order=>order.memberId))];
@@ -117,7 +126,7 @@ deliverySyncRoutes.get("/manifests/current",async(req,res)=>{
   const order=orderById.get(a.orderId)!;const member=memberById.get(order.memberId)!;
   const route=a.routeId?routeById.get(a.routeId):undefined;
   const lines=order.lines.map(line=>{const name=skuNameById.get(line.skuId);if(!name)throw new OperationError(409,"DELIVERY_CATALOG_PENDING","Un pedido asignado contiene un artículo sin nombre de catálogo");const remaining=line.prepared.sub(line.delivered);return {id:line.id,skuId:line.skuId,name,unit:line.unit,requested:line.requested.toString(),prepared:line.prepared.toString(),delivered:line.delivered.toString(),remaining:remaining.gt(0)?remaining.toString():"0",actualQuantity:line.prepared.toString()};});
-  return {id:a.id,orderId:order.id,version:versionById.get(a.id)??0,customerName:member.name,contact:member.phone,address:a.address,window:[a.windowStart,a.windowEnd].filter(Boolean).join(" – "),...(route?{route:{date:route.shiftDate,stop:a.stopSequence+1,...(a.eta?{eta:a.eta}:{}),etaIsEstimate:a.etaIsEstimate}}:{}),lines,documents:docsByAssignment.get(a.id)??[],totalMinor:order.totalMinor.toString(),verifiedMinor:order.verifiedMinor.toString(),currency:order.currency};
+  return {id:a.id,orderId:order.id,version:versionById.get(a.id)??0,customerName:member.name,contact:member.phone,address:a.address,window:[a.windowStart,a.windowEnd].filter(Boolean).join(" – "),...(route?{route:{date:route.shiftDate,stop:a.stopSequence+1,...(a.eta?{eta:a.eta}:{}),etaIsEstimate:a.etaIsEstimate}}:{}),lines,documents:docsByAssignment.get(a.id)??[],totalMinor:order.totalMinor.toString(),currency:order.currency,...legacyFinancial.get(order.id)!};
  });
  const authority=await db.operationAuthority.findUnique({where:{id:"operations"}});
  const lease=await db.offlineLease.create({data:{userId:req.user.id,deviceId,sessionId:req.sessionId,authorizationEpoch:req.user.authorizationEpoch,authorityEpoch:authority?.epoch??1,assignments:json(ids),expiresAt}});

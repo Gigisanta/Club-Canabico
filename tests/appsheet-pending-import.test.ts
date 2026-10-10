@@ -3,9 +3,13 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import "../server/operations/finance.js";
 import { appSheetLegacyFinancialBasisHash, appSheetPendingOrderCommercialBasisHash } from "../server/operations/appsheet-pending-import.js";
+import { appSheetLegacyFinancialSummariesForOrders, projectAppSheetLegacyFinancialSummary } from "../server/operations/appsheet-legacy-financial-projection.js";
 import { commandSpecs, OperationError, type CommandContext, type Tx } from "../server/operations/core.js";
+import { assertManifest, type DeliveryManifestV1 } from "../src/offline/contracts.js";
 import { APPSHEET_PENDING_MAPPING_ID, APPSHEET_PENDING_SCHEMA_VERSION } from "../shared/operations/appsheet-pending.js";
-import { APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
+import { appSheetDatabaseDestinationIdentity } from "../server/operations/appsheet-database-target.js";
+import { APP_SHEET_HISTORY_REVIEW_TEST_DATABASE_URL, createAppSheetHistoryReviewFixture,
+  withAppSheetHistoryReviewTestEnvironment } from "./support/appsheet-history-review-fixture.js";
 import { appSheetDeliveryInvoiceReferenceMatches, appSheetLegacyAdjustedFinancialState, appSheetLegacyAdjustedOutstanding,
   appSheetPendingDeliveryCardinalityAmbiguities, appSheetPendingDeliveryInvoiceCardinalityAmbiguities,
   sha256Canonical } from "../shared/operations/appsheet-pending-import.js";
@@ -116,12 +120,13 @@ function reviewedSettlementFixture(order = commercialOrder(), capturedOrder = co
     operationOrderTotalMinor: capturedOrder.totalMinor.toString(), dueMinor: "10000", legacyPaidMinor: "4000",
     remainingMinor: "6000", paymentRowsHash, paymentReferences: [] });
   const settlementId = "legacy-settlement-1", dispositionId = "disposition-1";
-  const reviewedAt = new Date("2026-10-08T12:00:00.000Z");
+  const reviewedAt = new Date("2026-10-10T00:00:00.000Z");
+  const destinationIdentity = appSheetDatabaseDestinationIdentity("isolated-test", new URL(APP_SHEET_HISTORY_REVIEW_TEST_DATABASE_URL));
   const reviewBinding = {
     captureId, manifestHash, dataHash, mappingHash, sourceSpecHash: hash("source-spec"),
     sourceCoverageHash: hash("source-coverage"), dispositionHash: hash("disposition-hash"),
     destinationHash: hash("batch-destination"), destinationVersion: 1, projectionHash: hash("projection"),
-    target: "isolated-test", destinationIdentity: `appsheet-db-v1:${hash("destination-identity")}`,
+    target: "isolated-test", destinationIdentity,
     commitSha: "a".repeat(40), backupManifestHash: hash("backup"), backupSnapshotAt: "2026-10-08T10:00:00.000Z",
   };
   const review = (reviewKind: string, reviewer: string) => ({ schemaVersion: "appsheet-pending-import-review/v1",
@@ -136,6 +141,10 @@ function reviewedSettlementFixture(order = commercialOrder(), capturedOrder = co
     createdBy: "importer", status: "reviewed", reviewedBy: "destination-reviewer", reviewedAt,
     reviewedObjectVersion: 1, reviewEvidence: review("independent-pending-import-destination", "destination-reviewer"),
     stageReview: review("independent-pending-import-plan", "stage-reviewer") };
+  const history = createAppSheetHistoryReviewFixture({ snapshotId: batch.snapshotId, captureId, manifestHash, dataHash,
+    projectionHash: reviewBinding.projectionHash, destinationIdentity, snapshotCreatedBy: "snapshot-creator",
+    stageActorUserId: "history-stage-actor", technicalReviewer: "history-technical-reviewer",
+    sourceReviewer: "snapshot-reviewer", reviewedAt });
   const settlement = { id: settlementId, batchId: batch.id, dispositionId, sourceRecordId, sourceRecordHash,
     reconciliationHash, mappingHash, captureId, sourceKeyHash, operationOrderId: order.id,
     operationOrderMemberId: order.memberId, financialBasisHash, operationOrderVersion, operationOrderHash,
@@ -148,12 +157,13 @@ function reviewedSettlementFixture(order = commercialOrder(), capturedOrder = co
   const resolution = { status: "mapped-to-existing-order", destinationType: "order", destinationId: order.id,
     approvedBy: mappingReviewerId, evidence: mappingEvidence, evidenceHash: mappingEvidenceHash,
     sourceRecordHash, reconciliationHash, mappingHash, operationOrderVersion, operationOrderHash };
-  const source = { sourceTable: "C_Facturacion", sourceKey, contentHash: sourceRecordHash,
+  const source = { snapshotId: batch.snapshotId, sourceTable: "C_Facturacion", sourceKey, contentHash: sourceRecordHash,
     normalized: { pendingReconciliation: reconciliation }, resolution };
-  const snapshot = { status: "reviewed", createdBy: "snapshot-creator", reviewedBy: "snapshot-reviewer" };
-  const capture = { captureId, sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, manifestHash, dataHash, stability: { stable: true } };
+  const snapshot = history.snapshot;
+  const capture = history.capture;
   const users = ["importer", "destination-reviewer", "stage-reviewer", mappingReviewerId,
-    snapshot.createdBy, snapshot.reviewedBy].map(id => ({ id, active: true, role: "owner", authorizationEpoch: 1 }));
+    snapshot.createdBy, snapshot.reviewedBy, "history-stage-actor", "history-technical-reviewer"]
+    .map(id => ({ id, active: true, role: "owner", authorizationEpoch: 1 }));
   const writes: string[] = [];
   const orderState = { verifiedMinor: order.verifiedMinor, financialState: order.financialState };
   const orderUpdates: Array<{ verifiedMinor: bigint; financialState: string }> = [];
@@ -177,6 +187,8 @@ function reviewedSettlementFixture(order = commercialOrder(), capturedOrder = co
       },
     },
     operationOrder: {
+      findMany: async ({ where }: { where: { id: { in: string[] } } }) =>
+        where.id.in.includes(order.id) ? [{ ...order, ...orderState }] : [],
       findUniqueOrThrow: async () => ({ ...order, ...orderState }),
       findUnique: async () => ({ ...order, ...orderState }),
       update: async ({ data }: { data: { verifiedMinor: bigint; financialState: string } }) => {
@@ -188,8 +200,12 @@ function reviewedSettlementFixture(order = commercialOrder(), capturedOrder = co
       findUnique: async () => account,
     },
     operationAccess: { findUnique: async () => null },
-    appSheetLegacySettlement: { findUnique: async () => settlement },
-    appSheetCaptureManifest: { findUnique: async () => capture },
+    appSheetLegacySettlement: {
+      findUnique: async () => settlement,
+      findMany: async ({ where }: { where: { operationOrderId: { in: string[] } } }) =>
+        where.operationOrderId.in.includes(order.id) ? [{ operationOrderId: order.id }] : [],
+    },
+    appSheetCaptureManifest: history.tx.appSheetCaptureManifest,
     appSheetPendingImportBatch: { findUnique: async () => batch },
     appSheetPendingImportDisposition: { findUnique: async () => disposition },
     operationObject: {
@@ -197,11 +213,15 @@ function reviewedSettlementFixture(order = commercialOrder(), capturedOrder = co
       update: async () => { writes.push("object.update"); },
       create: async () => { writes.push("object.create"); },
     },
-    legacyImportSnapshot: { findUnique: async () => snapshot },
-    legacySourceRecord: { findUnique: async () => source },
+    legacyImportSnapshot: history.tx.legacyImportSnapshot,
+    legacySourceRecord: { ...history.tx.legacySourceRecord, findUnique: async () => source },
+    legacyHistoricalFact: history.tx.legacyHistoricalFact,
+    legacyException: history.tx.legacyException,
+    operationAudit: history.tx.operationAudit,
     legacyIdentity: { findUnique: async () => ({ destinationId: order.id, approvedBy: mappingReviewerId }) },
     user: {
-      findMany: async () => users,
+      findMany: async ({ where }: { where: { id: { in: string[] } } }) =>
+        users.filter(user => where.id.in.includes(user.id)),
       findUnique: async ({ where }: { where: { id: string } }) => users.find(user => user.id === where.id) ?? null,
     },
     ledgerEvent: { create: async ({ data }: { data: { metadata: { appliedMinor: string } } }) => {
@@ -214,7 +234,7 @@ function reviewedSettlementFixture(order = commercialOrder(), capturedOrder = co
       update: async () => { writes.push("credit.update"); },
     },
   } as unknown as Tx;
-  return { tx, writes, order, settlement, capture, orderState, orderUpdates, collectionReports };
+  return { tx, writes, order, settlement, capture, source, snapshot, history, orderState, orderUpdates, collectionReports };
 }
 
 function commandContext(tx: Tx, command: string, options: { targetId?: string; appliedMinor?: string } = {}): CommandContext {
@@ -232,7 +252,7 @@ test("CollectionVerified applies legacy balance only against the unchanged revie
   const fixture = reviewedSettlementFixture();
   const spec = commandSpecs.get("CollectionVerified");
   assert.ok(spec);
-  const result = await spec.execute(commandContext(fixture.tx, "CollectionVerified"));
+  const result = await withAppSheetHistoryReviewTestEnvironment(() => spec.execute(commandContext(fixture.tx, "CollectionVerified")));
   assert.equal(result.appliedMinor, 6_000n);
   assert.equal(result.excessMinor, 2_000n);
   assert.equal(fixture.writes.includes("ledger.create"), true);
@@ -247,9 +267,9 @@ test("repeated CollectionVerified reports consume a reviewed legacy settlement o
   const fixture = reviewedSettlementFixture();
   const spec = commandSpecs.get("CollectionVerified");
   assert.ok(spec);
-  const first = await spec.execute(commandContext(fixture.tx, "CollectionVerified", { appliedMinor: "4000" }));
-  const second = await spec.execute(commandContext(fixture.tx, "CollectionVerified", { targetId: "collection-2", appliedMinor: "3000" }));
-  const third = await spec.execute(commandContext(fixture.tx, "CollectionVerified", { targetId: "collection-3", appliedMinor: "2000" }));
+  const first = await withAppSheetHistoryReviewTestEnvironment(() => spec.execute(commandContext(fixture.tx, "CollectionVerified", { appliedMinor: "4000" })));
+  const second = await withAppSheetHistoryReviewTestEnvironment(() => spec.execute(commandContext(fixture.tx, "CollectionVerified", { targetId: "collection-2", appliedMinor: "3000" })));
+  const third = await withAppSheetHistoryReviewTestEnvironment(() => spec.execute(commandContext(fixture.tx, "CollectionVerified", { targetId: "collection-3", appliedMinor: "2000" })));
 
   assert.deepEqual([first.appliedMinor, second.appliedMinor, third.appliedMinor], [4_000n, 2_000n, 0n]);
   assert.deepEqual([first.excessMinor, second.excessMinor, third.excessMinor], [4_000n, 1_000n, 2_000n]);
@@ -263,7 +283,7 @@ test("MemberCreditApplied uses a reviewed legacy settlement when calculating the
   const fixture = reviewedSettlementFixture();
   const spec = commandSpecs.get("MemberCreditApplied");
   assert.ok(spec);
-  const result = await spec.execute(commandContext(fixture.tx, "MemberCreditApplied"));
+  const result = await withAppSheetHistoryReviewTestEnvironment(() => spec.execute(commandContext(fixture.tx, "MemberCreditApplied")));
 
   assert.equal(result.appliedMinor, 5_000n);
   assert.equal(fixture.orderState.verifiedMinor, 5_000n);
@@ -284,7 +304,7 @@ test("same-gross quote revision rejects collection and member-credit writes agai
     const fixture = reviewedSettlementFixture(revisedOrder);
     const spec = commandSpecs.get(command);
     assert.ok(spec);
-    await assert.rejects(spec.execute(commandContext(fixture.tx, command)), error => error instanceof OperationError &&
+    await assert.rejects(withAppSheetHistoryReviewTestEnvironment(() => spec.execute(commandContext(fixture.tx, command))), error => error instanceof OperationError &&
       error.code === "APPSHEET_LEGACY_SETTLEMENT_TARGET_CHANGED");
     assert.deepEqual(fixture.writes, [], `${command} must reject before ledger, credit, receipt, or order writes`);
   }
@@ -296,10 +316,20 @@ test("a changed capture invalidates legacy receipts before any collection or cre
     fixture.capture.dataHash = "f".repeat(64);
     const spec = commandSpecs.get(command);
     assert.ok(spec);
-    await assert.rejects(spec.execute(commandContext(fixture.tx, command)), error => error instanceof OperationError &&
+    await assert.rejects(withAppSheetHistoryReviewTestEnvironment(() => spec.execute(commandContext(fixture.tx, command))), error => error instanceof OperationError &&
       error.code === "APPSHEET_LEGACY_SETTLEMENT_SOURCE_INVALID");
     assert.deepEqual(fixture.writes, []);
   }
+});
+
+test("a legacy source row bound to another history snapshot rejects financial writes", async () => {
+  const fixture = reviewedSettlementFixture();
+  fixture.source.snapshotId = "different-snapshot";
+  const spec = commandSpecs.get("CollectionVerified");
+  assert.ok(spec);
+  await assert.rejects(withAppSheetHistoryReviewTestEnvironment(() => spec.execute(commandContext(fixture.tx, "CollectionVerified"))),
+    error => error instanceof OperationError && error.code === "APPSHEET_LEGACY_SETTLEMENT_SOURCE_INVALID");
+  assert.deepEqual(fixture.writes, [], "snapshot mismatch must reject before ledger, receipt, credit, or order writes");
 });
 
 test("reviewed AppSheet receipts reduce collectible debt without changing Bombo receipts", () => {
@@ -318,6 +348,103 @@ test("visible order financial state includes legacy receipts and keeps refunds t
   assert.throws(() => appSheetLegacyAdjustedFinancialState({ totalMinor: 10n, bomboVerifiedMinor: 2n, legacyPaidMinor: 0n, refundedMinor: 3n }),
     error => error instanceof Error && error.message === "receivable_amount_invalid");
 });
+
+test("read projection uses the real reviewed-settlement guard and performs no writes", async () => {
+  const fixture = reviewedSettlementFixture();
+  const summaries = await withAppSheetHistoryReviewTestEnvironment(() => appSheetLegacyFinancialSummariesForOrders(fixture.tx, [fixture.order]));
+
+  assert.equal(summaries.get(fixture.order.id)?.legacyPaidMinor, "4000");
+  assert.equal(summaries.get(fixture.order.id)?.outstandingMinor, "6000");
+  assert.equal(summaries.get(fixture.order.id)?.financialState, "partially_paid");
+  assert.equal(fixture.orderState.verifiedMinor, 0n);
+  assert.deepEqual(fixture.writes, [], "the read projection does not write a cash or order record");
+});
+
+test("read projection fails closed without a current reviewed-settlement receipt", async () => {
+  const fixture = reviewedSettlementFixture();
+  fixture.settlement.status = "staged";
+  const summaries = await withAppSheetHistoryReviewTestEnvironment(() => appSheetLegacyFinancialSummariesForOrders(fixture.tx, [fixture.order]));
+  const summary = summaries.get(fixture.order.id);
+
+  assert.equal(summary?.legacyFinancialProjectionState, "unknown");
+  assert.equal(summary?.legacyPaidMinor, null);
+  assert.equal(summary?.outstandingMinor, null);
+  assert.equal(summary?.financialState, null);
+  assert.equal(summary?.legacyFinancialProjectionReason, "historical_payment_review_blocked");
+  assert.equal(fixture.orderState.verifiedMinor, 0n);
+  assert.deepEqual(fixture.writes, []);
+});
+
+test("read projection reloads current Bombo receipts inside its financial snapshot", async () => {
+  const fixture = reviewedSettlementFixture();
+  fixture.orderState.verifiedMinor = 2_000n;
+  fixture.orderState.financialState = "partially_paid";
+
+  const summaries = await withAppSheetHistoryReviewTestEnvironment(() => appSheetLegacyFinancialSummariesForOrders(fixture.tx, [fixture.order]));
+
+  assert.equal(summaries.get(fixture.order.id)?.legacyPaidMinor, "4000");
+  assert.equal(summaries.get(fixture.order.id)?.outstandingMinor, "4000",
+    "the result must use the current 2,000 Bombo receipt, not the stale order object passed by the caller");
+  assert.equal(summaries.get(fixture.order.id)?.verifiedMinor, "2000");
+  assert.equal(summaries.get(fixture.order.id)?.refundedMinor, "0");
+  assert.equal(summaries.get(fixture.order.id)?.financialState, "partially_paid");
+  assert.deepEqual(fixture.writes, []);
+});
+
+test("read projection shows reviewed historical payment and only the remaining balance", () => {
+  const order = { id: "order-1", memberId: "member-1", currency: "ARS", totalMinor: 10_000n,
+    verifiedMinor: 2_000n, refundedMinor: 0n, commercialState: "confirmed", financialState: "partially_paid",
+    quote: { source: "appsheet-invoice", totalCalculationState: "defined" } };
+  const summary = projectAppSheetLegacyFinancialSummary(order, 4_000n);
+
+  assert.deepEqual(summary, { financialState: "partially_paid", legacyFinancialProjectionState: "reviewed",
+    verifiedMinor: "2000", refundedMinor: "0", legacyPaidMinor: "4000", outstandingMinor: "4000", legacyFinancialProjectionReason: null });
+  assert.equal(order.verifiedMinor, 2_000n, "historical receipts stay outside OperationOrder.verifiedMinor");
+});
+
+test("read projection hides amounts when review, invoice total, or financial basis is unresolved", () => {
+  const order = { id: "order-1", memberId: "member-1", currency: "ARS", totalMinor: 10_000n,
+    verifiedMinor: 2_000n, refundedMinor: 0n, commercialState: "confirmed", financialState: "partially_paid",
+    quote: { source: "appsheet-invoice", totalCalculationState: "defined" } };
+  const blockedReview = projectAppSheetLegacyFinancialSummary(order, null);
+  assert.equal(blockedReview.financialState, null);
+  assert.equal(blockedReview.legacyFinancialProjectionState, "unknown");
+  assert.equal(blockedReview.legacyPaidMinor, null);
+  assert.equal(blockedReview.outstandingMinor, null);
+  assert.equal(blockedReview.legacyFinancialProjectionReason, "historical_payment_review_blocked");
+
+  const pendingInvoice = projectAppSheetLegacyFinancialSummary({ ...order,
+    quote: { source: "appsheet-invoice", totalCalculationState: "pending" } }, 4_000n);
+  assert.equal(pendingInvoice.outstandingMinor, null);
+  assert.equal(pendingInvoice.legacyFinancialProjectionReason, "invoice_total_pending");
+
+  const invalidRefund = projectAppSheetLegacyFinancialSummary({ ...order, refundedMinor: 3_000n }, 4_000n);
+  assert.equal(invalidRefund.financialState, null);
+  assert.equal(invalidRefund.legacyPaidMinor, null);
+  assert.equal(invalidRefund.outstandingMinor, null);
+  assert.equal(invalidRefund.legacyFinancialProjectionReason, "financial_basis_invalid");
+});
+
+test("offline manifest accepts known reviewed balances and rejects amounts on an unknown projection", () => {
+  const manifest: DeliveryManifestV1 = { version: 1, userId: "driver-1", deviceId: "device-1", leaseId: "lease-1",
+    authorizationEpoch: 1, expiresAt: "2026-10-10T12:00:00.000Z",
+    storageCertification: { persistent: true, storageCertifiedAt: "2026-10-10T11:00:00.000Z" },
+    assignments: [{ id: "delivery-1", orderId: "order-1", version: 1, customerName: "Socio de prueba",
+      address: "Domicilio de prueba", window: "", lines: [], documents: [], totalMinor: "10000", verifiedMinor: "2000", refundedMinor: "0",
+      currency: "ARS", financialState: "partially_paid", legacyFinancialProjectionState: "reviewed",
+      legacyFinancialProjectionReason: null, legacyPaidMinor: "4000", outstandingMinor: "4000" }] };
+  assert.doesNotThrow(() => assertManifest(manifest));
+
+  manifest.assignments[0]!.legacyFinancialProjectionState = "unknown";
+  manifest.assignments[0]!.legacyFinancialProjectionReason = "historical_payment_review_blocked";
+  manifest.assignments[0]!.financialState = null;
+  manifest.assignments[0]!.legacyPaidMinor = null;
+  manifest.assignments[0]!.outstandingMinor = null;
+  assert.doesNotThrow(() => assertManifest(manifest));
+  manifest.assignments[0]!.legacyPaidMinor = "4000";
+  assert.throws(() => assertManifest(manifest), /proyección financiera desconocida/);
+});
+
 
 test("CollectionVerified rejects a staged legacy settlement before any financial write", async () => {
   const writes: string[] = [];

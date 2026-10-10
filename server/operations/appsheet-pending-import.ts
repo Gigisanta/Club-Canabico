@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { canonicalJson } from "../../shared/operations/exact.js";
+import { requireBoundAppSheetHistoryStage } from "./appsheet-history-review.js";
 import {
   APPSHEET_PENDING_MAPPING_ID,
   APPSHEET_PENDING_SCHEMA_VERSION,
@@ -141,6 +142,54 @@ function fail(code: string): never { throw new AppSheetPendingImportStageError(c
 
 function validHash(value: unknown): value is string { return typeof value === "string" && /^[a-f0-9]{64}$/.test(value); }
 
+/** Hash source bindings as typed metadata so field names never become money-field keys. */
+function sourceSpecMetadata(value: unknown): unknown[] {
+  if (value === null) return ["null"];
+  if (typeof value === "string") return ["string", value];
+  if (typeof value === "boolean") return ["boolean", value];
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) fail("pending_source_spec_metadata_invalid");
+    return ["number", value];
+  }
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype || Object.getOwnPropertySymbols(value).length > 0) {
+      fail("pending_source_spec_metadata_invalid");
+    }
+    const names = Object.getOwnPropertyNames(value);
+    if (names.length !== value.length + 1 || names.some(name => name !== "length" && !/^(?:0|[1-9]\d*)$/.test(name))) {
+      fail("pending_source_spec_metadata_invalid");
+    }
+    const items: unknown[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !("value" in descriptor)) fail("pending_source_spec_metadata_invalid");
+      items.push(sourceSpecMetadata(descriptor.value));
+    }
+    return ["array", items];
+  }
+  if (typeof value === "object") {
+    const prototype = Object.getPrototypeOf(value);
+    if ((prototype !== Object.prototype && prototype !== null) || Object.getOwnPropertySymbols(value).length > 0) {
+      fail("pending_source_spec_metadata_invalid");
+    }
+    const names = Object.getOwnPropertyNames(value);
+    const keys = Object.keys(value);
+    if (names.length !== keys.length) fail("pending_source_spec_metadata_invalid");
+    keys.sort();
+    const entries = keys.map(key => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor)) fail("pending_source_spec_metadata_invalid");
+      return ["entry", ["string", key], sourceSpecMetadata(descriptor.value)];
+    });
+    return ["object", entries];
+  }
+  return fail("pending_source_spec_metadata_invalid");
+}
+
+function appSheetPendingImportSourceSpecHash(): string {
+  return sha256Canonical(sourceSpecMetadata(APPSHEET_PENDING_IMPORT_SOURCE_SPEC), sha256);
+}
+
 function operationOrderHash(order: {
   id: string; currency: string; totalMinor: bigint; verifiedMinor: bigint; refundedMinor: bigint;
   commercialState: string; financialState: string; version: number;
@@ -225,48 +274,6 @@ function reviewedSourceCell(
   return value ? value : null;
 }
 
-function validateReviewedHistory(snapshot: {
-  id: string; sourceSystem: string; fileHash: string; importerVersion: string; status: string; createdBy: string;
-  reviewedBy: string | null; reviewedAt: Date | null; captureManifestId: string | null; controls: unknown; coverage: unknown;
-}, capture: { captureId: string; manifestHash: string; dataHash: string; stability: unknown }) {
-  if (snapshot.sourceSystem !== APPSHEET_HISTORY_SOURCE_SYSTEM || snapshot.captureManifestId !== capture.captureId ||
-      snapshot.fileHash !== capture.manifestHash || snapshot.status !== "reviewed" || !snapshot.reviewedBy ||
-      snapshot.createdBy === snapshot.reviewedBy || !snapshot.reviewedAt)
-    fail("reviewed_stable_history_snapshot_required");
-  const controls = asObject(snapshot.controls);
-  const stage = asObject(controls?.appSheetHistoryStage);
-  const coverage = asObject(snapshot.coverage);
-  const coverageStability = asObject(coverage?.stability);
-  const captureStability = asObject(capture.stability);
-  const technicalReview = asObject(stage?.technicalReview);
-  const effects = asObject(stage?.effects);
-  if (!stage || !coverage || !coverageStability || !captureStability || !technicalReview || !effects ||
-      coverage.schemaVersion !== "appsheet-history-coverage/v1" || coverage.mode !== "stable" ||
-      coverage.captureId !== capture.captureId || coverage.manifestHash !== capture.manifestHash ||
-      coverage.dataHash !== capture.dataHash || coverageStability.stable !== true || captureStability.stable !== true ||
-      stage.status !== "reviewed" && stage.status !== "staged" || stage.mode !== "stable" ||
-      stage.captureId !== capture.captureId || stage.manifestHash !== capture.manifestHash || stage.dataHash !== capture.dataHash ||
-      technicalReview.approved !== true || technicalReview.findingsCount !== 0 ||
-      technicalReview.reviewer === snapshot.createdBy || !validHash(technicalReview.projectionHash) ||
-      effects.stock !== false || effects.cashLedger !== false || effects.payments !== false || effects.deliveries !== false ||
-      effects.messages !== false || effects.documents !== false || effects.numbering !== "not-generated")
-    fail("history_capture_review_binding_invalid");
-  if (technicalReview.reviewer === snapshot.reviewedBy) fail("pending_source_and_destination_reviewers_must_be_independent");
-  const destination = asObject(stage.destination);
-  const target = destination?.target;
-  const identity = destination?.identity;
-  const backupManifestHash = stage.backupManifestHash;
-  const backupSnapshotAt = stage.backupSnapshotAt;
-  const commitSha = technicalReview.commitSha;
-  if ((target !== "isolated-test" && target !== "production") ||
-      typeof identity !== "string" || !/^appsheet-db-v1:[a-f0-9]{64}$/.test(identity) ||
-      typeof backupManifestHash !== "string" || !validHash(backupManifestHash) ||
-      typeof backupSnapshotAt !== "string" || !Number.isFinite(Date.parse(backupSnapshotAt)) ||
-      typeof commitSha !== "string" || !/^[a-f0-9]{40}$/.test(commitSha))
-    fail("history_target_backup_or_commit_binding_invalid");
-  return { target, destinationIdentity: identity, commitSha, backupManifestHash, backupSnapshotAt: new Date(backupSnapshotAt) } as const;
-}
-
 /** Build a deterministic complete four-dimension disposition set from one reviewed history snapshot. */
 export interface AppSheetPendingImportBinding {
   target: "isolated-test" | "production";
@@ -280,26 +287,32 @@ export async function prepareAppSheetPendingImportPlan(
   tx: Tx,
   input: { snapshotId: string; binding?: AppSheetPendingImportBinding },
 ): Promise<AppSheetPendingImportPlan> {
-  const snapshot = await tx.legacyImportSnapshot.findUnique({ where: { id: input.snapshotId }, select: {
-    id: true, sourceSystem: true, fileHash: true, importerVersion: true, status: true, createdBy: true,
-    reviewedBy: true, reviewedAt: true, captureManifestId: true, controls: true, coverage: true,
-  } });
-  if (!snapshot?.captureManifestId) fail("stable_history_snapshot_required");
-  const capture = await tx.appSheetCaptureManifest.findUnique({ where: { captureId: snapshot.captureManifestId }, select: {
-    captureId: true, sourceSystem: true, manifestHash: true, dataHash: true, stability: true,
-  } });
-  if (!capture || capture.sourceSystem !== APPSHEET_HISTORY_SOURCE_SYSTEM || capture.manifestHash !== snapshot.fileHash)
-    fail("capture_manifest_missing_or_mismatched");
-  const sourceStage = validateReviewedHistory(snapshot, capture);
+  const historyProof = await requireBoundAppSheetHistoryStage(tx, input.snapshotId, {
+    target: input.binding?.target, destinationIdentity: input.binding?.destinationIdentity, requireReviewed: true,
+  });
+  const { snapshot, capture, stage, target } = historyProof;
+  const technicalReview = asObject(stage.technicalReview)!;
+  const sourceStage = { target, destinationIdentity: historyProof.destinationIdentity,
+    commitSha: String(technicalReview.commitSha), backupManifestHash: String(stage.backupManifestHash),
+    backupSnapshotAt: new Date(String(stage.backupSnapshotAt)) };
   const binding = input.binding ?? sourceStage;
   if (binding.target !== sourceStage.target || binding.destinationIdentity !== sourceStage.destinationIdentity ||
       !/^[a-f0-9]{40}$/.test(binding.commitSha) || !validHash(binding.backupManifestHash) ||
       !Number.isFinite(binding.backupSnapshotAt.getTime()) || binding.backupSnapshotAt.getTime() < sourceStage.backupSnapshotAt.getTime())
     fail("pending_stage_target_backup_or_commit_invalid");
   const mappingHash = sha256(pendingMappingFingerprintPayload());
-  const sourceSpecHash = sha256Canonical(APPSHEET_PENDING_IMPORT_SOURCE_SPEC, sha256);
+  const sourceSpecHash = appSheetPendingImportSourceSpecHash();
   const records = await tx.legacySourceRecord.findMany({ where: { snapshotId: snapshot.id }, orderBy: [{ sourceTable: "asc" }, { sourceRow: "asc" }],
-    select: { id: true, sourceTable: true, sourceKey: true, sourceRow: true, contentHash: true, original: true, normalized: true, resolution: true } });
+    select: { id: true, snapshotId: true, sourceTable: true, sourceKey: true, sourceRow: true, fileHash: true, contentHash: true, importerVersion: true, treatment: true, original: true, normalized: true, resolution: true } });
+  // The writer seals records in capture sheet/row order. Mapping resolutions are
+  // separate review data; they cannot alter the original/normalized source projection.
+  const sheetOrder = new Map((asObject(snapshot.coverage)?.sheets as Array<{ sourceTable: string }>)
+    .map((sheet, index) => [sheet.sourceTable, index]));
+  const sealedRecords = [...records].sort((left, right) =>
+    (sheetOrder.get(left.sourceTable)! - sheetOrder.get(right.sourceTable)!) || left.sourceRow - right.sourceRow)
+    .map(({ resolution: _resolution, ...record }) => record);
+  if (sha256Canonical(sealedRecords, sha256) !== stage.recordsHash)
+    fail("history_source_projection_content_changed");
   const normalizedRecords = records.flatMap(record => {
     const candidate = asObject(record.normalized)?.pendingReconciliation;
     const parsed = appSheetPendingReconciliationSchema.safeParse(candidate);
@@ -352,7 +365,7 @@ export async function prepareAppSheetPendingImportPlan(
     }, select: { id: true, destinationId: true, approvedBy: true } });
     if (identities.length !== 1 || !identities[0]?.approvedBy) continue;
     const reviewer = await tx.user.findFirst({ where: { id: identities[0].approvedBy, active: true }, select: { id: true } });
-    if (!reviewer || reviewer.id === snapshot.createdBy || reviewer.id === snapshot.reviewedBy) continue;
+    if (!reviewer || reviewer.id === snapshot.createdBy) continue;
     const resolution = asObject(row.resolution);
     if (resolution?.status !== "mapped-to-existing-order" || resolution.destinationType !== "order" ||
         resolution.destinationId !== identities[0].destinationId || resolution.approvedBy !== reviewer.id ||
@@ -470,9 +483,8 @@ export async function prepareAppSheetPendingImportPlan(
       continue;
     const orderMappingReviewer = await tx.user.findFirst({ where: { id: identityRows[0].approvedBy, active: true }, select: { id: true } });
     const resolutionReviewer = await tx.user.findFirst({ where: { id: resolution.approvedBy, active: true }, select: { id: true } });
-    if (!orderMappingReviewer || !resolutionReviewer || orderMappingReviewer.id === resolutionReviewer.id ||
-        resolutionReviewer.id !== resolution.approvedBy || resolutionReviewer.id === snapshot.createdBy || resolutionReviewer.id === snapshot.reviewedBy ||
-        orderMappingReviewer.id === snapshot.createdBy || orderMappingReviewer.id === snapshot.reviewedBy) continue;
+    if (!orderMappingReviewer || !resolutionReviewer || resolutionReviewer.id !== resolution.approvedBy ||
+        resolutionReviewer.id === snapshot.createdBy || orderMappingReviewer.id === snapshot.createdBy) continue;
     const order = await tx.operationOrder.findUnique({ where: { id: resolution.operationOrderId }, select: {
       id: true, memberId: true, channel: true, currency: true, totalMinor: true, commercialState: true,
     } });
@@ -690,7 +702,7 @@ async function persistAppSheetPendingImportPlan(
   if (existing) fail("pending_import_batch_exists_replay_same_command_receipt");
   const snapshot = await tx.legacyImportSnapshot.findUniqueOrThrow({ where: { id: plan.historySnapshotId }, select: { id: true, createdBy: true, reviewedBy: true, status: true } });
   if (snapshot.status !== "reviewed") fail("reviewed_history_snapshot_required");
-  if (snapshot.createdBy === actorId || snapshot.reviewedBy === actorId) fail("pending_import_author_must_differ_from_history_author");
+  if (snapshot.reviewedBy === actorId) fail("pending_import_author_must_differ_from_history_reviewer");
   if (plan.materializedSettlements.some(settlement => settlement.orderMappingReviewerId === actorId) ||
       plan.materializedDeliveries.some(delivery => [delivery.orderMappingReviewerId, delivery.resolutionReviewerId].includes(actorId)))
     fail("pending_import_author_must_differ_from_order_mapping_reviewer");
@@ -752,7 +764,7 @@ const orderIdentityReviewSchema = z.strictObject({
 });
 
 registerCommand("AppSheetPendingOrderIdentityReviewed", {
-  kind: "legacyImport", capability: "imports.review", administrative: true, internal: true, transactionTimeoutMs: 30_000,
+  kind: "legacyImport", capability: "imports.review", administrative: true, internal: false, transactionTimeoutMs: 30_000,
   schema: orderIdentityReviewSchema,
   execute: async ctx => {
     const value = ctx.envelope.data as z.infer<typeof orderIdentityReviewSchema>;
@@ -781,7 +793,7 @@ registerCommand("AppSheetPendingOrderIdentityReviewed", {
       fail("pending_order_mapping_target_changed");
     const snapshot = await ctx.tx.legacyImportSnapshot.findUniqueOrThrow({ where: { id: ctx.envelope.targetId },
       select: { status: true, createdBy: true, reviewedBy: true } });
-    if (snapshot.status !== "reviewed" || !snapshot.reviewedBy || snapshot.createdBy === ctx.actor.id || snapshot.reviewedBy === ctx.actor.id)
+    if (snapshot.status !== "reviewed" || !snapshot.reviewedBy || snapshot.createdBy === ctx.actor.id)
       fail("pending_order_mapping_reviewer_not_independent");
     const existing = await ctx.tx.legacyIdentity.findUnique({ where: { sourceSystem_sourceTable_sourceKey_destinationType: {
       sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, sourceTable: "C_Facturacion", sourceKey: source.sourceKey, destinationType: "order",
@@ -825,7 +837,7 @@ registerCommand("AppSheetPendingOrderIdentityReviewed", {
 
 const pendingDeliveryResolutionInputSchema = appSheetPendingDeliveryResolutionSchema.omit({ requestId: true, approvedBy: true, evidenceHash: true });
 registerCommand("AppSheetPendingDeliveryResolved", {
-  kind: "legacyImport", capability: "imports.review", administrative: true, internal: true, transactionTimeoutMs: 30_000,
+  kind: "legacyImport", capability: "imports.review", administrative: true, internal: false, transactionTimeoutMs: 30_000,
   schema: pendingDeliveryResolutionInputSchema,
   execute: async ctx => {
     const value = ctx.envelope.data as z.infer<typeof pendingDeliveryResolutionInputSchema>;
@@ -856,16 +868,15 @@ registerCommand("AppSheetPendingDeliveryResolved", {
     const identities = await ctx.tx.legacyIdentity.findMany({ where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
       sourceTable: "C_Facturacion", sourceKey: invoice.sourceKey, destinationType: "order", approvedBy: { not: null } },
       select: { destinationId: true, approvedBy: true } });
-    if (identities.length !== 1 || !identities[0]?.approvedBy || identities[0].destinationId !== value.operationOrderId ||
-        identities[0].approvedBy === ctx.actor.id)
+    if (identities.length !== 1 || !identities[0]?.approvedBy || identities[0].destinationId !== value.operationOrderId)
       fail("pending_delivery_invoice_identity_not_unique_or_independent");
     const orderReviewer = await ctx.tx.user.findFirst({ where: { id: identities[0].approvedBy, active: true }, select: { id: true } });
     if (!orderReviewer) fail("pending_delivery_invoice_identity_reviewer_inactive");
     const snapshot = await ctx.tx.legacyImportSnapshot.findUniqueOrThrow({ where: { id: snapshotId }, select: {
       status: true, createdBy: true, reviewedBy: true,
     } });
-    if (snapshot.status !== "reviewed" || !snapshot.reviewedBy || [snapshot.createdBy, snapshot.reviewedBy].includes(ctx.actor.id) ||
-        [snapshot.createdBy, snapshot.reviewedBy].includes(orderReviewer.id))
+    if (snapshot.status !== "reviewed" || !snapshot.reviewedBy || snapshot.createdBy === ctx.actor.id ||
+        snapshot.createdBy === orderReviewer.id)
       fail("pending_delivery_resolution_reviewer_not_independent");
     const order = await ctx.tx.operationOrder.findUnique({ where: { id: value.operationOrderId }, select: {
       id: true, channel: true, currency: true, totalMinor: true, verifiedMinor: true, refundedMinor: true,
@@ -908,7 +919,7 @@ const planReviewCommandSchema = z.strictObject({
 });
 
 registerCommand("AppSheetPendingImportPlanReviewed", {
-  kind: "legacyImport", capability: "imports.review", create: true, administrative: true, internal: true, transactionTimeoutMs: 60_000,
+  kind: "legacyImport", capability: "imports.review", create: true, administrative: true, internal: false, transactionTimeoutMs: 60_000,
   schema: planReviewCommandSchema,
   execute: async ctx => {
     const value = ctx.envelope.data as z.infer<typeof planReviewCommandSchema>;
@@ -1008,7 +1019,7 @@ export async function reviewAppSheetPendingImport(ctx: CommandContext): Promise<
   assertStoredPlanMatches(batch, plan);
   const planReview = assertAppSheetPendingImportReview({ review: batch.stageReview, reviewKind: "independent-pending-import-plan",
     expected: expectedReviewBinding(plan), importerId: batch.createdBy });
-  if (planReview.reviewer === ctx.actor.id || planReview.reviewer === batch.snapshot.createdBy ||
+  if (planReview.reviewer === batch.snapshot.createdBy ||
       planReview.reviewer === batch.snapshot.reviewedBy || plan.materializedSettlements.some(row => row.orderMappingReviewerId === ctx.actor.id) ||
       plan.materializedDeliveries.some(row => [row.orderMappingReviewerId, row.resolutionReviewerId].includes(ctx.actor.id)))
     fail("pending_destination_reviewer_not_independent");
@@ -1019,7 +1030,7 @@ export async function reviewAppSheetPendingImport(ctx: CommandContext): Promise<
   const reviewer = await ctx.tx.user.findUnique({ where: { id: ctx.actor.id } });
   if (!reviewer?.active) fail("pending_destination_reviewer_inactive");
   await requireCapability(ctx.tx, reviewer, "imports.review");
-  const sourceReviewers = new Set([batch.snapshot.createdBy, batch.snapshot.reviewedBy, planReview.reviewer,
+  const sourceReviewers = new Set([batch.snapshot.createdBy, batch.snapshot.reviewedBy,
     ...plan.materializedSettlements.map(row => row.orderMappingReviewerId),
     ...plan.materializedDeliveries.flatMap(row => [row.orderMappingReviewerId, row.resolutionReviewerId])]
     .filter((value): value is string => Boolean(value)));
@@ -1042,9 +1053,57 @@ export async function reviewAppSheetPendingImport(ctx: CommandContext): Promise<
   return { batchId: batch.id, status: "reviewed", destinationVersion: nextVersion };
 }
 
+export async function previewAppSheetPendingImportDestinationReview(tx: Tx, batchId: string): Promise<{
+  batchId: string;
+  status: "staged";
+  expectedVersion: number;
+  captureId: string;
+  manifestHash: string;
+  dataHash: string;
+  projectionHash: string;
+  dispositionHash: string;
+  destinationHash: string;
+  dispositionCount: number;
+  legacySettlementCount: number;
+  pendingDeliveryAssignmentCount: number;
+}> {
+  const batch = await tx.appSheetPendingImportBatch.findUnique({ where: { id: batchId }, include: {
+    dispositions: true, settlements: true, snapshot: { select: { sourceSystem: true, status: true } },
+  } });
+  if (!batch || batch.snapshot.sourceSystem !== APPSHEET_HISTORY_SOURCE_SYSTEM)
+    throw new OperationError(404, "APPSHEET_PENDING_IMPORT_NOT_FOUND", "No se encontró este lote pendiente de AppSheet.");
+  if (batch.snapshot.status !== "reviewed") fail("reviewed_history_snapshot_required");
+  if (batch.status !== "staged" || !batch.stageReview) fail("pending_import_plan_review_missing_or_already_reviewed");
+  const object = await tx.operationObject.findUnique({ where: { id: batch.id }, select: { kind: true, version: true } });
+  if (!object || object.kind !== "legacyImport" || batch.destinationVersion !== 1)
+    fail("pending_destination_version_conflict");
+  const plan = await prepareAppSheetPendingImportPlan(tx, { snapshotId: batch.snapshotId, binding: {
+    target: batch.target as AppSheetPendingImportBinding["target"], destinationIdentity: batch.destinationIdentity,
+    commitSha: batch.commitSha, backupManifestHash: batch.backupManifestHash, backupSnapshotAt: batch.backupSnapshotAt,
+  } });
+  assertStoredPlanMatches(batch, plan);
+  requireUnambiguousPendingDeliveryOrders(plan);
+  assertAppSheetPendingImportReview({ review: batch.stageReview, reviewKind: "independent-pending-import-plan",
+    expected: expectedReviewBinding(plan), importerId: batch.createdBy });
+  return {
+    batchId: batch.id,
+    status: "staged",
+    expectedVersion: object.version,
+    captureId: plan.captureId,
+    manifestHash: plan.manifestHash,
+    dataHash: plan.dataHash,
+    projectionHash: plan.projectionHash,
+    dispositionHash: plan.dispositionHash,
+    destinationHash: plan.destinationHash,
+    dispositionCount: plan.dispositions.length,
+    legacySettlementCount: plan.materializedSettlements.length,
+    pendingDeliveryAssignmentCount: plan.materializedDeliveries.length,
+  };
+}
+
 const destinationReviewCommandSchema = z.strictObject({ review: appSheetPendingImportReviewSchema });
 registerCommand("AppSheetPendingImportDestinationReviewed", {
-  kind: "legacyImport", capability: "imports.review", administrative: true, internal: true, transactionTimeoutMs: 60_000,
+  kind: "legacyImport", capability: "imports.review", administrative: true, internal: false, transactionTimeoutMs: 60_000,
   schema: destinationReviewCommandSchema,
   execute: reviewAppSheetPendingImport,
 });
@@ -1085,7 +1144,7 @@ export async function requireReviewedAppSheetPendingImport(tx: Tx, captureId: st
   await assertPendingDeliveryDestinations(tx, plan);
   const stageReview = assertAppSheetPendingImportReview({ review: batch.stageReview, reviewKind: "independent-pending-import-plan",
     expected: expectedReviewBinding(plan), importerId: batch.createdBy });
-  if (stageReview.reviewer === review.reviewer || stageReview.reviewer === batch.snapshot.createdBy ||
+  if (stageReview.reviewer === batch.snapshot.createdBy ||
       stageReview.reviewer === batch.snapshot.reviewedBy || batch.snapshot.createdBy === review.reviewer ||
       batch.snapshot.reviewedBy === review.reviewer || plan.materializedSettlements.some(row => row.orderMappingReviewerId === review.reviewer) ||
       plan.materializedDeliveries.some(row => [row.orderMappingReviewerId, row.resolutionReviewerId].includes(review.reviewer)))
@@ -1208,15 +1267,21 @@ export async function reviewedAppSheetLegacyPaidForOrder(tx: Tx, order: {
       projectionHash: batch.projectionHash, target: batch.target as AppSheetPendingImportBinding["target"],
       destinationIdentity: batch.destinationIdentity, commitSha: batch.commitSha, backupManifestHash: batch.backupManifestHash,
       backupSnapshotAt: batch.backupSnapshotAt.toISOString() } });
-  const snapshot = await tx.legacyImportSnapshot.findUnique({ where: { id: batch.snapshotId }, select: {
-    status: true, createdBy: true, reviewedBy: true,
-  } });
+  if (batch.target !== "production" && batch.target !== "isolated-test")
+    throw new OperationError(423, "APPSHEET_LEGACY_SETTLEMENT_SOURCE_INVALID", "El destino del cobro histórico no conserva una identidad válida.");
+  const historyProof = await requireBoundAppSheetHistoryStage(tx, batch.snapshotId, {
+    target: batch.target, destinationIdentity: batch.destinationIdentity, requireReviewed: true,
+  });
+  const { snapshot } = historyProof;
+  if (historyProof.capture.captureId !== batch.captureId || historyProof.capture.manifestHash !== batch.manifestHash ||
+      historyProof.capture.dataHash !== batch.dataHash)
+    throw new OperationError(423, "APPSHEET_LEGACY_SETTLEMENT_SOURCE_INVALID", "La revisión de historia pertenece a otra captura.");
   const requiredUserIds = [...new Set([batch.createdBy, review.reviewer, stageReview.reviewer, settlement.orderMappingReviewerId,
     ...(snapshot?.createdBy ? [snapshot.createdBy] : []), ...(snapshot?.reviewedBy ? [snapshot.reviewedBy] : [])])];
   const reviewUsers = await tx.user.findMany({ where: { id: { in: requiredUserIds } } });
   if (!snapshot || snapshot.status !== "reviewed" || reviewUsers.length !== requiredUserIds.length ||
       reviewUsers.some(user => !user.active) || [batch.createdBy, snapshot.createdBy, snapshot.reviewedBy,
-        settlement.orderMappingReviewerId, stageReview.reviewer].includes(review.reviewer))
+        settlement.orderMappingReviewerId].includes(review.reviewer))
     throw new OperationError(423, "APPSHEET_LEGACY_SETTLEMENT_REVIEW_INVALID", "La revisión del cobro histórico perdió vigencia o independencia.");
   const destinationReviewer = reviewUsers.find(user => user.id === review.reviewer);
   if (!destinationReviewer) throw new OperationError(423, "APPSHEET_LEGACY_SETTLEMENT_REVIEW_INVALID", "No se pudo comprobar la persona revisora del cobro histórico.");
@@ -1230,14 +1295,14 @@ export async function reviewedAppSheetLegacyPaidForOrder(tx: Tx, order: {
   if (!importer) throw new OperationError(423, "APPSHEET_LEGACY_SETTLEMENT_REVIEW_INVALID", "No se pudo comprobar quién preparó el lote histórico.");
   await requireCapability(tx, importer, "imports.write");
   const source = await tx.legacySourceRecord.findUnique({ where: { id: settlement.sourceRecordId }, select: {
-    sourceTable: true, sourceKey: true, contentHash: true, normalized: true, resolution: true,
+    snapshotId: true, sourceTable: true, sourceKey: true, contentHash: true, normalized: true, resolution: true,
   } });
   const identity = source?.sourceKey ? await tx.legacyIdentity.findUnique({ where: {
     sourceSystem_sourceTable_sourceKey_destinationType: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
       sourceTable: "C_Facturacion", sourceKey: source.sourceKey, destinationType: "order" },
   } }) : null;
   const resolution = asObject(source?.resolution);
-  if (!source || source.sourceTable !== "C_Facturacion" || source.contentHash !== settlement.sourceRecordHash ||
+  if (!source || source.snapshotId !== batch.snapshotId || source.sourceTable !== "C_Facturacion" || source.contentHash !== settlement.sourceRecordHash ||
       !identity || identity.destinationId !== order.id || identity.approvedBy !== settlement.orderMappingReviewerId ||
       !resolution || resolution.status !== "mapped-to-existing-order" || resolution.destinationId !== order.id ||
       resolution.approvedBy !== settlement.orderMappingReviewerId || resolution.sourceRecordHash !== settlement.sourceRecordHash ||

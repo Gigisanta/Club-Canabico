@@ -2,16 +2,18 @@ import { Router } from "express";
 import { Prisma, type AccountReconciliation } from "@prisma/client";
 import { z } from "zod";
 import { db } from "../db.js";
-import { capabilities, requireCapability, executeCommand, commandSpecs, envelopeSchema, wire, OperationError, requireMemberScope, requireAccountScope, objectScope } from "./core.js";
+import { capabilities, requireCapability, executeCommand, commandSpecs, envelopeSchema, wire, OperationError, requireMemberScope, requireAccountScope, requireFullLegacySourceScope, objectScope } from "./core.js";
 import { appSheetReplacementCanonicalMemberIds, eligibleAppSheetCanonicalSkuIds, requireEligibleAppSheetReplacementMember } from "./access.js";
 import { APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../../shared/operations/appsheet-canonical.js";
 import { projectAppSheetCatalogue } from "./appsheet-catalogue.js";
 import { projectInvoiceAmount } from "./invoice-projection.js";
+import { appSheetLegacyFinancialSummariesForOrders } from "./appsheet-legacy-financial-projection.js";
 import "./commercial.js";
 import "./finance.js";
 import "./period-coverage.js";
 import "./orders.js";
-import "./appsheet-pending-import.js";
+import { previewAppSheetPendingImportDestinationReview } from "./appsheet-pending-import.js";
+import "./appsheet-history-review.js";
 import { memberHistory } from "./member-history.js";
 import { productHistory } from "./product-history.js";
 import { resolveStockAvailability } from "./stock-availability.js";
@@ -33,6 +35,15 @@ operationsRoutes.post("/commands",async(req,res)=>{
  const envelope=envelopeSchema.parse(req.body);
  if(commandSpecs.get(envelope.command)?.internal)throw new OperationError(403,"INTERNAL_COMMAND","Usá el lector del servidor para importar el archivo fuente.");
  res.json(await executeCommand(req.user,envelope));
+});
+operationsRoutes.get("/appsheet-pending-imports/:id/review-preview", async (req, res) => {
+ const batchId = z.string().min(1).max(100).parse(req.params.id);
+ const preview = await db.$transaction(async tx => {
+  await requireCapability(tx, req.user, "imports.review");
+  await requireFullLegacySourceScope(tx, req.user);
+  return previewAppSheetPendingImportDestinationReview(tx, batchId);
+ }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 60_000 });
+ res.json(wire(preview));
 });
 operationsRoutes.get("/changes",async(req,res)=>{await requireCapability(db,req.user,"operations.read").catch(async()=>requireCapability(db,req.user,"delivery.report"));const states=await db.operationObject.findMany({where:{id:{in:[`readEpoch:${req.user.id}`,"readEpoch:operations"]}},select:{version:true,updatedAt:true}});res.json({version:states.reduce((sum,s)=>sum+s.version,0),updatedAt:states.sort((a,b)=>b.updatedAt.getTime()-a.updatedAt.getTime())[0]?.updatedAt??null});});
 operationsRoutes.post("/:area/:id/commands",async(req,res)=>{
@@ -153,16 +164,27 @@ operationsRoutes.get("/orders",async(req,res)=>{
  const limit=pageSize(req.query.limit??200),cursor=pageCursor(req.query.cursor);
  const where:Prisma.OperationOrderWhereInput={...(state?{commercialState:state}:{}),...(scope.memberIds?{memberId:{in:scope.memberIds}}:{})};
  if(cursor&&!await db.operationOrder.findFirst({where:{AND:[where,{id:cursor}]},select:{id:true}}))throw new OperationError(400,"PAGE_CURSOR","Reiniciá los pedidos con sus filtros actuales");
- const rows=await db.operationOrder.findMany({where,include:{lines:true},orderBy:[{createdAt:"desc"},{id:"desc"}],take:limit+1,...(cursor?{cursor:{id:cursor},skip:1}:{})});
- const orders=rows.slice(0,limit);
+ const {rows,orders,legacyFinancial}=await db.$transaction(async tx=>{
+  const rows=await tx.operationOrder.findMany({where,include:{lines:true},orderBy:[{createdAt:"desc"},{id:"desc"}],take:limit+1,...(cursor?{cursor:{id:cursor},skip:1}:{})});
+  const orders=rows.slice(0,limit);
+  const legacyFinancial=await appSheetLegacyFinancialSummariesForOrders(tx,orders);
+  return {rows,orders,legacyFinancial};
+ },{isolationLevel:Prisma.TransactionIsolationLevel.RepeatableRead});
  const skuNameById=await skuNamesForOrderLines(orders.flatMap(order=>order.lines));
  const financial=(await capabilities(db,req.user)).includes("finance.read");
- const items=orders.map(o=>({...projectInvoiceAmount(o),lines:o.lines.map(l=>({...l,skuName:skuNameById.get(l.skuId)??null,costMinor:financial?l.costMinor:null}))}));
+ const items=orders.map(o=>({...projectInvoiceAmount(o),...legacyFinancial.get(o.id)!,lines:o.lines.map(l=>({...l,skuName:skuNameById.get(l.skuId)??null,costMinor:financial?l.costMinor:null}))}));
  res.json(wire({items,versions:await versions(orders.map(o=>o.id)),hasMore:rows.length>limit,nextCursor:rows.length>limit?orders.at(-1)!.id:null}));
 });
 operationsRoutes.get("/orders/:id",async(req,res)=>{
  await requireCapability(db,req.user,"operations.read");const id=String(req.params.id);
- const order=await db.operationOrder.findUnique({where:{id},include:{lines:true}});if(!order)throw new OperationError(404,"ORDER_NOT_FOUND","Pedido no encontrado");
+ const {order,legacyFinancial}=await db.$transaction(async tx=>{
+  const order=await tx.operationOrder.findUnique({where:{id},include:{lines:true}});
+  if(!order)return {order:null,legacyFinancial:null};
+  await requireMemberScope(tx,req.user,order.memberId);
+  const legacyFinancial=(await appSheetLegacyFinancialSummariesForOrders(tx,[order])).get(order.id)!;
+  return {order,legacyFinancial};
+ },{isolationLevel:Prisma.TransactionIsolationLevel.RepeatableRead});
+ if(!order||!legacyFinancial)throw new OperationError(404,"ORDER_NOT_FOUND","Pedido no encontrado");
  await requireMemberScope(db,req.user,order.memberId);
  const skuNameById=await skuNamesForOrderLines(order.lines);
  const caps=await capabilities(db,req.user),financial=caps.includes("finance.read"),scope=await objectScope(db,req.user);
@@ -173,7 +195,7 @@ operationsRoutes.get("/orders/:id",async(req,res)=>{
  const reservationBalances=reservationBalanceIds.length?await db.stockBalance.findMany({where:{id:{in:reservationBalanceIds},...balanceScope},select:{id:true,lotId:true,unit:true,lot:{select:{label:true,skuId:true,sku:{select:{name:true}}}}}}):[];
  const reservationBalanceById=new Map(reservationBalances.map(balance=>[balance.id,{id:balance.id,lotId:balance.lotId,skuId:balance.lot.skuId,skuName:balance.lot.sku.name,unit:balance.unit,lotLabel:balance.lot.label}] as const));
  const enrichedReservations=reservations.map(reservation=>({...reservation,balance:reservationBalanceById.get(reservation.balanceId)??null}));
- res.json(wire({order:{...projectInvoiceAmount(order),lines:order.lines.map(l=>({...l,skuName:skuNameById.get(l.skuId)??null,costMinor:financial?l.costMinor:null}))},reservations:enrichedReservations,allocations:await db.preparationAllocation.findMany({where:{orderId:id,...(visibleBalances?{balanceId:{in:visibleBalances.map(b=>b.id)}}:{})},select:{id:true,lineId:true,lotId:true,balanceId:true,requestedQuantity:true,actualQuantity:true,deliveredQuantity:true,returnedQuantity:true,returnedDeliveredQuantity:true,state:true}}),deliveries:await db.deliveryAssignment.findMany({where:{orderId:id}}),version:(await versions([id]))[id]}));
+ res.json(wire({order:{...projectInvoiceAmount(order),...legacyFinancial,lines:order.lines.map(l=>({...l,skuName:skuNameById.get(l.skuId)??null,costMinor:financial?l.costMinor:null}))},reservations:enrichedReservations,allocations:await db.preparationAllocation.findMany({where:{orderId:id,...(visibleBalances?{balanceId:{in:visibleBalances.map(b=>b.id)}}:{})},select:{id:true,lineId:true,lotId:true,balanceId:true,requestedQuantity:true,actualQuantity:true,deliveredQuantity:true,returnedQuantity:true,returnedDeliveredQuantity:true,state:true}}),deliveries:await db.deliveryAssignment.findMany({where:{orderId:id}}),version:(await versions([id]))[id]}));
 });
 operationsRoutes.get("/purchases",async(req,res)=>{
  await requireCapability(db,req.user,"purchases.write");const limit=pageSize(req.query.limit??200),cursor=pageCursor(req.query.cursor);

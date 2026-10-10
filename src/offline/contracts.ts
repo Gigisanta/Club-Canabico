@@ -40,6 +40,14 @@ export interface DeliveryAssignmentV1 {
   lines: DeliveryLineV1[];
   documents: DeliveryDocumentV1[];
   totalMinor: MinorUnitString | string;
+  /** Independent AppSheet receipts reduce the read-only balance, never Bombo's verified ledger. */
+  verifiedMinor?: MinorUnitString | string;
+  refundedMinor?: MinorUnitString | string;
+  financialState?: string | null;
+  legacyFinancialProjectionState?: "reviewed" | "unknown";
+  legacyFinancialProjectionReason?: "invoice_total_pending" | "historical_payment_review_blocked" | "financial_basis_invalid" | null;
+  legacyPaidMinor?: MinorUnitString | string | null;
+  outstandingMinor?: MinorUnitString | string | null;
   currency: Currency;
   [key: string]: unknown;
 }
@@ -229,6 +237,24 @@ export function assertManifest(value: DeliveryManifestV1): void {
     }
     if (!isMinorUnitString(assignment.totalMinor)) throw new TypeError("El total del manifiesto debe expresarse en unidades menores exactas.");
     if (assignment.currency !== "ARS" && assignment.currency !== "USD") throw new TypeError("Moneda no admitida.");
+    if (assignment.verifiedMinor !== undefined && !isMinorUnitString(assignment.verifiedMinor)) throw new TypeError("El cobro verificado del manifiesto debe expresarse en unidades menores exactas.");
+    if (assignment.refundedMinor !== undefined && !isMinorUnitString(assignment.refundedMinor)) throw new TypeError("El reintegro verificado del manifiesto debe expresarse en unidades menores exactas.");
+    if (assignment.legacyFinancialProjectionState !== undefined) {
+      if (assignment.legacyFinancialProjectionState === "reviewed") {
+        if (!isMinorUnitString(assignment.legacyPaidMinor) || !isMinorUnitString(assignment.outstandingMinor) ||
+          assignment.legacyFinancialProjectionReason !== null ||
+          !["unpaid", "partially_paid", "paid", "refunded", "partially_refunded"].includes(assignment.financialState ?? "")) {
+          throw new TypeError("La proyección financiera revisada del manifiesto no tiene importes y estado coherentes.");
+        }
+      } else if (assignment.legacyFinancialProjectionState === "unknown") {
+        if (assignment.legacyPaidMinor !== null || assignment.outstandingMinor !== null || assignment.financialState !== null ||
+          !["invoice_total_pending", "historical_payment_review_blocked", "financial_basis_invalid"].includes(assignment.legacyFinancialProjectionReason ?? "")) {
+          throw new TypeError("Una proyección financiera desconocida debe ocultar los importes y explicar el bloqueo.");
+        }
+      } else {
+        throw new TypeError("El estado de proyección financiera del manifiesto no es válido.");
+      }
+    }
     for (const line of assignment.lines) {
       if (!line.id) throw new TypeError("Una línea de entrega no tiene identidad.");
       for (const [key, field] of Object.entries(line)) {
