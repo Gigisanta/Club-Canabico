@@ -302,6 +302,27 @@ test("AppSheet preorder source API paginates only reviewed archive rows and reje
     assert.equal(staged.metrics.tableCounts.Pre_Venta, 3);
     assert.equal(staged.metrics.tableCounts.Pre_Detalle_Fact, 3);
     const snapshotId = staged.snapshotId;
+    const rootPath = `/operations/appsheet-migration/snapshots/${snapshotId}/preventas`;
+    const effects = async () => ({
+      orders: await db.operationOrder.count(),
+      deliveries: await db.deliveryAssignment.count(),
+      stockFacts: await db.stockFact.count(),
+      stockBalances: await db.stockBalance.count(),
+      ledgerEvents: await db.ledgerEvent.count(),
+      cashEntries: await db.cashEntry.count(),
+      outbox: await db.operationOutbox.count(),
+      audits: await db.operationAudit.count(),
+      receipts: await db.commandReceipt.count(),
+      operationObjects: await db.operationObject.count(),
+      authority: await db.operationAuthority.findUnique({ where: { id: "operations" } }),
+    });
+    const beforeUnreviewedRead = await effects();
+    const unreviewedResponse = await get(actorIds.authorizedReader, `${rootPath}?limit=1`);
+    const unreviewedBody = await unreviewedResponse.text();
+    assert.equal(unreviewedResponse.status, 423, "la fuente archivada no se lee antes de la revisión humana");
+    assert.ok(!unreviewedBody.includes(fixture.privateMarker), "la captura pendiente no revela valores originales");
+    assert.deepEqual(await effects(), beforeUnreviewedRead, "el rechazo previo a la revisión no escribe efectos ni auditoría");
+
     const request = (command: string, data: Record<string, unknown>): CommandEnvelope => ({
       schemaVersion: 1,
       requestId: randomUUID(),
@@ -323,19 +344,6 @@ test("AppSheet preorder source API paginates only reviewed archive rows and reje
     const review = await reviewResponse.json() as { result: Record<string, unknown> };
     assert.equal(review.result.status, "reviewed");
 
-    const effects = async () => ({
-      orders: await db.operationOrder.count(),
-      deliveries: await db.deliveryAssignment.count(),
-      stockFacts: await db.stockFact.count(),
-      stockBalances: await db.stockBalance.count(),
-      ledgerEvents: await db.ledgerEvent.count(),
-      cashEntries: await db.cashEntry.count(),
-      outbox: await db.operationOutbox.count(),
-      audits: await db.operationAudit.count(),
-      receipts: await db.commandReceipt.count(),
-      operationObjects: await db.operationObject.count(),
-      authority: await db.operationAuthority.findUnique({ where: { id: "operations" } }),
-    });
     const getWithoutEffects = async (actorId: string, path: string) => {
       const before = await effects();
       const response = await get(actorId, path);
@@ -343,7 +351,6 @@ test("AppSheet preorder source API paginates only reviewed archive rows and reje
       assert.deepEqual(after, before, `GET ${path} no debe escribir efectos operativos, audit ni receipts`);
       return response;
     };
-    const rootPath = `/operations/appsheet-migration/snapshots/${snapshotId}/preventas`;
     const readBeforeEffects = await effects();
     const firstResponse = await getWithoutEffects(actorIds.authorizedReader, `${rootPath}?limit=1`);
     assert.equal(firstResponse.status, 200, await firstResponse.clone().text());

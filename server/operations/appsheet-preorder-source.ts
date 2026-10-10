@@ -20,7 +20,7 @@ import {
 import { sha256Canonical } from "../../shared/operations/appsheet-pending-import.js";
 import { OperationError, requireCapability, type Tx, wire } from "./core.js";
 import { requireBoundAppSheetHistoryStage } from "./appsheet-history-review.js";
-import { assertLegacyHistorySourceAllowed, requireFullLegacySourceScope } from "./legacy-source-policy.js";
+import { requireFullLegacySourceScope } from "./legacy-source-policy.js";
 
 const HEAD_TABLE = "Pre_Venta" as const;
 const DETAIL_TABLE = "Pre_Detalle_Fact" as const;
@@ -179,7 +179,6 @@ async function requireReviewedRead(tx: Tx, actor: Actor, snapshotId: string) {
   await requireCapability(tx, actor, "imports.review");
   await requireFullLegacySourceScope(tx, actor);
   const proof = await requireBoundAppSheetHistoryStage(tx, snapshotId, { requireReviewed: true });
-  assertLegacyHistorySourceAllowed(proof.snapshot.sourceSystem);
   if (proof.snapshot.importerVersion !== APPSHEET_HISTORY_IMPORTER_VERSION || proof.snapshot.status !== "reviewed")
     integrityFailure("reviewed_history_snapshot_required");
   await verifySnapshotRecordManifest(tx, proof);
