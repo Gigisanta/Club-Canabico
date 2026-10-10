@@ -24,7 +24,7 @@ import { appSheetPendingReconciliationSchema, APPSHEET_PENDING_TABLES, pendingMa
   reconcileAppSheetPendingRows, type AppSheetPendingSourceRecord } from "../../shared/operations/appsheet-pending.js";
 import type { AppSheetDefinitionInventory } from "../../shared/operations/appsheet-definition.js";
 import { APPSHEET_EXPECTED_LIVE_APP_ID, appSheetAppliedDefinitionHash, ensureAppSheetCaptureManifest,
-  prepareAppSheetDefinitionInventory } from "./appsheet-canonical.js";
+  appSheetDefinitionProductionReadiness, prepareAppSheetDefinitionInventory } from "./appsheet-canonical.js";
 import { legacyPayloadHash } from "./legacy-upload-contract.js";
 import { containsRecognizableCredential, isCredentialBearingHeader } from "./legacy-reader.js";
 import { sourceRecordSchema } from "./legacy-source-contract.js";
@@ -1413,6 +1413,8 @@ export type AppSheetHistoryProjectionReport = {
   definitionSourceSha256: string;
   definitionDescriptorSha256: string;
   definitionFileSha256: string;
+  definitionParserVersion: string;
+  definitionReadinessState: "production-compatible" | "isolated-archive-only";
   definitionIdentityState: AppSheetHistoryDefinition["identityState"];
   snapshotId: string;
   projectionHash: string;
@@ -1868,6 +1870,7 @@ function buildStageControls(prepared: PreparedAppSheetHistoryProjection, backup:
       definitionDescriptorSha256: prepared.definition.descriptorSha256,
       definitionFileSha256: prepared.definition.fileSha256,
       definitionIdentityState: prepared.definition.identityState,
+      definitionReadiness: appSheetDefinitionProductionReadiness(prepared.definition.inventory),
       definitionInventory: prepared.definition.inventory,
       mode: prepared.capture.mode,
       projectionHash: prepared.projectionHash,
@@ -1943,6 +1946,16 @@ function validateAppSheetHistoryReview(
   if (actorId && review.reviewer.trim().toLowerCase() === actorId.trim().toLowerCase())
     fail("independent_technical_reviewer_required");
   return review;
+}
+
+function assertProductionHistoryDefinitionReady(prepared: PreparedAppSheetHistoryProjection): void {
+  const readiness = appSheetDefinitionProductionReadiness(prepared.definition.inventory);
+  if (!readiness.parserSupported) fail("definition_parser_version_unsupported");
+  if (!readiness.appMetadataComplete) fail("definition_app_metadata_incomplete");
+}
+
+function assertHistoryDestinationIdentity(value: string): void {
+  if (!/^appsheet-db-v1:[a-f0-9]{64}$/.test(value)) fail("database_destination_identity_invalid");
 }
 
 function stableCaptureManifest(prepared: PreparedAppSheetHistoryProjection): PreparedAppSheetCaptureManifest {
@@ -2157,6 +2170,8 @@ async function persistHistoryProjection(
   options: AppSheetHistoryStageOptions,
   review: z.infer<typeof appSheetTechnicalReviewSchema>,
 ): Promise<{ snapshotId: string; captureManifestId: string | null; status: "staged"; replay: boolean; metrics: PreparedAppSheetHistoryProjection["metrics"] }> {
+  if (options.target === "production") assertProductionHistoryDefinitionReady(prepared);
+  assertHistoryDestinationIdentity(options.destinationIdentity);
   if (prepared.capture.mode === "preliminary-delta" && options.allowStagedDelta !== true) fail("staged_delta_requires_explicit_flag");
   if (!/^[a-f0-9]{64}$/.test(options.backupEvidence.manifestHash) || !Number.isFinite(Date.parse(options.backupEvidence.snapshotAt)))
     fail("verified_backup_required");
@@ -2223,6 +2238,8 @@ export async function stageAppSheetHistoryProjection(
   options: AppSheetHistoryStageOptions,
   client?: PrismaClient,
 ): Promise<{ snapshotId: string; captureManifestId: string | null; status: "staged"; replay: boolean; metrics: PreparedAppSheetHistoryProjection["metrics"] }> {
+  if (options.target === "production") assertProductionHistoryDefinitionReady(prepared);
+  assertHistoryDestinationIdentity(options.destinationIdentity);
   if (options.target === "production" && prepared.capture.mode !== "stable")
     fail("production_history_requires_stable_capture");
   if (prepared.capture.mode === "preliminary-delta" && options.allowStagedDelta !== true) fail("staged_delta_requires_explicit_flag");
@@ -2250,6 +2267,7 @@ export async function stageAppSheetHistoryProjection(
 
 export function appSheetHistoryProjectionReport(prepared: PreparedAppSheetHistoryProjection, status: "preview" | "staged" = "preview"):
   AppSheetHistoryProjectionReport {
+  const definitionReadiness = appSheetDefinitionProductionReadiness(prepared.definition.inventory);
   const coverage = prepared.coverage as {
     schemaVersion?: unknown; captureId?: unknown; manifestHash?: unknown; dataHash?: unknown; captureDefinitionHash?: unknown;
     appliedDefinitionHash?: unknown; mode?: unknown; window?: unknown; stability?: unknown; source?: unknown; sheets?: unknown;
@@ -2288,6 +2306,8 @@ export function appSheetHistoryProjectionReport(prepared: PreparedAppSheetHistor
     definitionSourceSha256: prepared.definition.sourceSha256,
     definitionDescriptorSha256: prepared.definition.descriptorSha256,
     definitionFileSha256: prepared.definition.fileSha256,
+    definitionParserVersion: definitionReadiness.parserVersion,
+    definitionReadinessState: definitionReadiness.state,
     definitionIdentityState: prepared.definition.identityState,
     snapshotId: prepared.snapshotId,
     projectionHash: prepared.projectionHash,

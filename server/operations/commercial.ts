@@ -2,6 +2,7 @@ import { z } from "zod";
 import { createHash } from "node:crypto";
 import { registerCommand, OperationError, json, objectId, decimal, currency, minor, civilDate, evidence, requireCapability, type Tx, type CommandContext } from "./core.js";
 import { parseQuantity, parseDecimal, moneyForQuantity, allocateMinor, formatDecimal, roundHalfUp } from "../../shared/operations/exact.js";
+import { requireEligibleAppSheetReplacementSkus } from "./access.js";
 const tier=z.strictObject({skuId:objectId,minQuantity:decimal,unitPrice:decimal,scale:z.string().min(1).max(80)});
 const paymentMethod=z.enum(["cash","transfer","mercado_pago","card"]);
 const componentSurchargeRates=z.strictObject({method:paymentMethod,productSurchargeBps:z.number().int().min(0).max(10000),deliverySurchargeBps:z.number().int().min(0).max(10000)});
@@ -105,6 +106,7 @@ export async function quoteOrder(tx:Tx,input:z.infer<typeof quoteInput>,date:str
  const packSelections=new Map(input.packs.map(pack=>[pack.packId,pack.selections]));
  const skuIds=new Set(input.items.map(item=>item.skuId));
  for(const pack of packRows)for(const component of pack.components as unknown as z.infer<typeof packComponent>[]){const selected=component.skuId??packSelections.get(pack.id)?.[component.id];if(selected)skuIds.add(selected);}
+ await requireEligibleAppSheetReplacementSkus(tx,[...skuIds]);
  const skuRows=skuIds.size?await tx.catalogSku.findMany({where:{id:{in:[...skuIds]}}}):[];
  const skuById=new Map(skuRows.map(sku=>[sku.id,sku]));
  const lines:QuotedLine[]=[];

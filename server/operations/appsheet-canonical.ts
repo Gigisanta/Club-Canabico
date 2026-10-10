@@ -152,6 +152,34 @@ export class AppSheetCanonicalError extends Error {
 
 export const APPSHEET_EXPECTED_LIVE_APP_ID = "5b49e640-a7c9-40bb-bccf-ddbc9fcc63f0" as const;
 
+/** Older inventories can be archived in isolation, but production needs the parser that captures app identity metadata. */
+export function appSheetDefinitionParserSupportsProduction(parserVersion: string): boolean {
+  const match = /^bombo-appsheet-definition\/(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(parserVersion);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 1 || (major === 1 && minor >= 2);
+}
+
+export function appSheetDefinitionProductionReadiness(inventory: AppSheetDefinitionInventory, expectedAppId = APPSHEET_EXPECTED_LIVE_APP_ID) {
+  const parserSupported = appSheetDefinitionParserSupportsProduction(inventory.parserVersion);
+  const appMetadataComplete = inventory.app.id === expectedAppId &&
+    typeof inventory.app.name === "string" && inventory.app.name.trim().length > 0 &&
+    typeof inventory.app.version === "string" && inventory.app.version.trim().length > 0;
+  return {
+    parserVersion: inventory.parserVersion,
+    parserSupported,
+    appMetadataComplete,
+    state: parserSupported && appMetadataComplete ? "production-compatible" as const : "isolated-archive-only" as const,
+  };
+}
+
+function assertProductionDefinitionReady(projection: AppSheetCanonicalProjection): void {
+  const readiness = appSheetDefinitionProductionReadiness(projection.definitionInventory, projection.expectedAppId);
+  if (!readiness.parserSupported) fail("definition_parser_version_unsupported");
+  if (!readiness.appMetadataComplete) fail("definition_app_metadata_incomplete");
+}
+
 /** Validate the sanitized editor inventory and its content-addressed descriptor. */
 export function prepareAppSheetDefinitionInventory(value: unknown, expectedAppId: string): AppSheetDefinitionInventory {
   const inventory = appSheetDefinitionInventorySchema.parse(value);
@@ -875,6 +903,7 @@ function snapshotCoverage(projection: AppSheetCanonicalProjection): Record<strin
       dataHash: projection.capture.dataHash,
       captureDefinitionHash: projection.capture.definitionHash,
       appliedDefinitionHash: projection.appliedDefinitionHash,
+      definitionReadiness: appSheetDefinitionProductionReadiness(projection.definitionInventory, projection.expectedAppId),
       expectedAppId: projection.expectedAppId,
       identityState: projection.definitionIdentityState,
       projectionHash: projection.projectionHash,
@@ -952,6 +981,7 @@ function snapshotControls(
       dataHash: projection.capture.dataHash,
       captureDefinitionHash: projection.capture.definitionHash,
       appliedDefinitionHash: projection.appliedDefinitionHash,
+      definitionReadiness: appSheetDefinitionProductionReadiness(projection.definitionInventory, projection.expectedAppId),
       expectedAppId: projection.expectedAppId,
       definitionIdentityState: projection.definitionIdentityState,
       definitionInventory: projection.definitionInventory,
@@ -970,6 +1000,7 @@ function snapshotControls(
         })),
       },
       technicalReview: {
+        schemaVersion: review.schemaVersion,
         reviewKind: review.reviewKind,
         importer: review.importer,
         reviewer: review.reviewer,
@@ -981,8 +1012,8 @@ function snapshotControls(
         manifestHash: review.manifestHash,
         definitionHash: review.definitionHash ?? null,
         commitSha: review.commitSha,
-        target: review.schemaVersion === 2 ? review.target : context.target,
-        destinationIdentity: review.schemaVersion === 2 ? review.destinationIdentity : context.destinationIdentity,
+        bindingSource: review.schemaVersion === 1 ? "legacy-isolated-only" : "explicit-target-and-destination",
+        ...(review.schemaVersion === 2 ? { target: review.target, destinationIdentity: review.destinationIdentity } : {}),
       },
       botInventory: {
         state: "unsupported-in-generated-documentation",
@@ -1006,6 +1037,7 @@ function snapshotControls(
         cataloguePrices: "retained verbatim in LegacySourceRecord; not applied as approved prices",
         catalogueAvailability: "source Estado is retained in appSheet.availability; CatalogSku.active=false until separate operational approval because active exposes /catalog and order drafts",
         definitionIdentity: "expected live app id is separately supplied; if the inventory omits app.id, identity remains unverified and cutover stays blocked; source data manifest definitionHash remains unchanged",
+        definitionReadiness: "production staging requires parser 1.2.0 or newer plus app id, name, and version; older or incomplete inventories remain isolated archives",
       },
     },
   };
@@ -1332,6 +1364,7 @@ async function persistProjection(
 ): Promise<{ snapshotId: string; captureId: string; status: "staged"; replay: boolean; counts: AppSheetCanonicalProjection["summary"] }> {
   if (projection.capture.stabilityMode === "staged-delta" && !allowStagedDelta) fail("staged_delta_requires_explicit_flag");
   if (context.target === "production" && projection.capture.stabilityMode !== "stable") fail("production_requires_stable_capture");
+  if (context.target === "production") assertProductionDefinitionReady(projection);
   const actor = await assertActorCanStage(tx, actorId);
   if (!/^[a-f0-9]{40}$/.test(commitSha)) fail("commit_sha_invalid");
   if (context.target === "production" && (!context.backupEvidence || !HASH.test(context.backupEvidence.manifestHash) ||
@@ -1531,6 +1564,7 @@ export async function stageAppSheetCanonicalMasters(
 ): Promise<{ snapshotId: string; captureId: string; status: "staged"; replay: boolean; counts: AppSheetCanonicalProjection["summary"] }> {
   if (projection.capture.stabilityMode === "staged-delta" && options.allowStagedDelta !== true)
     fail("staged_delta_requires_explicit_flag");
+  if (options.target === "production") assertProductionDefinitionReady(projection);
   const db = client ?? (await import("../db.js")).db;
   for (let attempt = 0; ; attempt++) {
     try {
@@ -1553,6 +1587,7 @@ export async function stageAppSheetCanonicalMasters(
 }
 
 export function appSheetCanonicalProjectionReport(projection: AppSheetCanonicalProjection) {
+  const definitionReadiness = appSheetDefinitionProductionReadiness(projection.definitionInventory, projection.expectedAppId);
   return {
     status: "preview",
     sourceSystem: projection.capture.sourceSystem,
@@ -1561,6 +1596,8 @@ export function appSheetCanonicalProjectionReport(projection: AppSheetCanonicalP
     dataHash: projection.capture.dataHash,
     captureDefinitionHash: projection.capture.definitionHash,
     appliedDefinitionHash: projection.appliedDefinitionHash,
+    definitionParserVersion: definitionReadiness.parserVersion,
+    definitionReadinessState: definitionReadiness.state,
     definitionSourceSha256: projection.definitionInventory.source.sha256,
     definitionDescriptorSha256: projection.definitionInventory.descriptorSha256,
     projectionKind: projection.projectionKind,

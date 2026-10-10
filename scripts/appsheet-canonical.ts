@@ -19,7 +19,7 @@ import { appSheetDatabaseDestinationIdentity } from "../server/operations/appshe
 import { verifyBackupReference } from "../server/operations/financial-source-stage.js";
 
 const PRIVATE_DIR = ".local/appsheet-real-20261009";
-const DEFAULT_DEFINITION = "appsheet-definition-inventory-1.001739-v2.json";
+const DEFAULT_DEFINITION = "appsheet-definition-inventory-live-parity-final.json";
 const MAX_DEFINITION_BYTES = 32 * 1024 * 1024;
 
 interface CliOptions {
@@ -237,7 +237,8 @@ async function run(args: string[], workingDirectory = process.cwd()): Promise<{ 
         declaredCounts: definitionInventory.declaredCounts,
         observedCounts: definitionInventory.observedCounts,
       },
-      cutoverEligible: projection.capture.stabilityMode === "stable" && projection.definitionIdentityState === "verified" && projection.summary.globalDeltaBlockingCount === 0,
+      cutoverEligible: projection.capture.stabilityMode === "stable" && projection.definitionIdentityState === "verified" &&
+        report.definitionReadinessState === "production-compatible" && projection.summary.globalDeltaBlockingCount === 0,
     };
     if (!options.apply) return { code: 0, output: JSON.stringify(report) };
 

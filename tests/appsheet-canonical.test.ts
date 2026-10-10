@@ -9,7 +9,9 @@ import {
   APPSHEET_EXPECTED_LIVE_APP_ID,
   AppSheetCanonicalError,
   appSheetAppliedDefinitionHash,
+  appSheetCanonicalProjectionReport,
   appSheetCanonicalCurrentDestinationHash,
+  appSheetDefinitionParserSupportsProduction,
   prepareAppSheetDefinitionInventory,
   prepareAppSheetMasterProjection,
   stageAppSheetCanonicalMasters,
@@ -20,6 +22,11 @@ import { APPSHEET_CANONICAL_IMPORTER_VERSION } from "../shared/operations/appshe
 import { parseArgs } from "../scripts/appsheet-canonical.js";
 import { requireAppSheetTechnicalReview } from "../shared/operations/appsheet-review.js";
 import { definitionInventory, fixtureDate, hash, project, sourceSystem, spreadsheetId, technicalReview } from "./support/appsheet-canonical-fixture.js";
+
+const ISOLATED_TEST_DESTINATION_ID = appSheetDatabaseDestinationIdentity("isolated-test",
+  new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_canonical?schema=public"));
+const PRODUCTION_DESTINATION_ID = appSheetDatabaseDestinationIdentity("production",
+  new URL("postgresql://fixture:fixture@db.example.invalid:5432/bombo?schema=public"));
 
 type FakeState = {
   manifests: Map<string, Record<string, unknown>>;
@@ -287,6 +294,36 @@ test("canonical master preview retains provenance, prices, and inactive source a
   assert.equal(projection.summary.globalDeltaBlockingCount, 0);
 });
 
+test("definition parser support is numeric and legacy or incomplete inventories stay archive-only", async () => {
+  assert.equal(appSheetDefinitionParserSupportsProduction("bombo-appsheet-definition/1.1.0"), false);
+  assert.equal(appSheetDefinitionParserSupportsProduction("bombo-appsheet-definition/1.2.0"), true);
+  assert.equal(appSheetDefinitionParserSupportsProduction("bombo-appsheet-definition/1.10.0"), true);
+  assert.equal(appSheetDefinitionParserSupportsProduction("bombo-appsheet-definition/2.0.0"), true);
+  assert.equal(appSheetDefinitionParserSupportsProduction("fixture-parser/10"), false);
+
+  const legacyProjection = project();
+  assert.equal(appSheetCanonicalProjectionReport(legacyProjection).definitionReadinessState, "isolated-archive-only");
+  let transactions = 0;
+  const client = { $transaction: async () => { transactions++; throw new Error("must_not_start"); } } as never;
+  await assert.rejects(stageAppSheetCanonicalMasters(legacyProjection, {
+    actorId: "admin-fixture", technicalReview: technicalReview(legacyProjection), commitSha: "1".repeat(40),
+    target: "production", destinationIdentity: PRODUCTION_DESTINATION_ID,
+  }, client), (error: unknown) => error instanceof AppSheetCanonicalError && error.code === "definition_parser_version_unsupported");
+  assert.equal(transactions, 0, "a parser older than 1.2 is rejected before opening a transaction");
+
+  const incompleteProjection = project();
+  incompleteProjection.definitionInventory = {
+    ...incompleteProjection.definitionInventory,
+    parserVersion: "bombo-appsheet-definition/1.10.0",
+    app: { id: APPSHEET_EXPECTED_LIVE_APP_ID, name: null, version: null, deploymentState: null, generatedAt: null },
+  };
+  await assert.rejects(stageAppSheetCanonicalMasters(incompleteProjection, {
+    actorId: "admin-fixture", technicalReview: technicalReview(incompleteProjection), commitSha: "1".repeat(40),
+    target: "production", destinationIdentity: PRODUCTION_DESTINATION_ID,
+  }, client), (error: unknown) => error instanceof AppSheetCanonicalError && error.code === "definition_app_metadata_incomplete");
+  assert.equal(transactions, 0, "incomplete app metadata is rejected before opening a transaction");
+});
+
 test("an omitted unresolved formula marker blocks its selected master field", () => {
   const projection = project({ unresolvedEmail: true });
   assert.equal(projection.summary.memberTargetCount, 0);
@@ -319,7 +356,7 @@ test("staged delta requires an explicit option, keeps verified masters, and emit
 
   let transactions = 0;
   await assert.rejects(stageAppSheetCanonicalMasters(projection, {
-    actorId: "admin-fixture", technicalReview: {}, commitSha: "1".repeat(40), target: "isolated-test",
+    actorId: "admin-fixture", technicalReview: {}, commitSha: "1".repeat(40), target: "isolated-test", destinationIdentity: ISOLATED_TEST_DESTINATION_ID,
   }, { $transaction: async () => { transactions++; throw new Error("should not run"); } } as never),
   (error: unknown) => error instanceof AppSheetCanonicalError && error.code === "staged_delta_requires_explicit_flag");
   assert.equal(transactions, 0, "default rejection must occur before any database transaction");
@@ -331,15 +368,23 @@ test("master staging reuses identical captures and refreshes only an unchanged p
   const preliminaryReview = technicalReview(preliminary);
   const first = await stageAppSheetCanonicalMasters(preliminary, {
     actorId: "admin-fixture", technicalReview: preliminaryReview, allowStagedDelta: true,
-    commitSha: "1".repeat(40), target: "isolated-test",
+    commitSha: "1".repeat(40), target: "isolated-test", destinationIdentity: ISOLATED_TEST_DESTINATION_ID,
   }, database.client);
   assert.equal(first.replay, false);
   assert.equal(database.state().members.size, 1);
   assert.equal(database.state().skus.size, 1);
+  const firstControls = database.state().snapshots.get(first.snapshotId)?.controls as {
+    appSheetCanonical: { definitionReadiness: { state: string }; technicalReview: Record<string, unknown> };
+  };
+  assert.equal(firstControls.appSheetCanonical.definitionReadiness.state, "isolated-archive-only");
+  assert.equal(firstControls.appSheetCanonical.technicalReview.schemaVersion, 1);
+  assert.equal(firstControls.appSheetCanonical.technicalReview.bindingSource, "legacy-isolated-only");
+  assert.equal("target" in firstControls.appSheetCanonical.technicalReview, false);
+  assert.equal("destinationIdentity" in firstControls.appSheetCanonical.technicalReview, false);
 
   const repeatedPreliminary = await stageAppSheetCanonicalMasters(preliminary, {
     actorId: "admin-fixture", technicalReview: preliminaryReview, allowStagedDelta: true,
-    commitSha: "1".repeat(40), target: "isolated-test",
+    commitSha: "1".repeat(40), target: "isolated-test", destinationIdentity: ISOLATED_TEST_DESTINATION_ID,
   }, database.client);
   assert.equal(repeatedPreliminary.replay, true);
   assert.equal(database.state().snapshots.size, 1);
@@ -348,7 +393,7 @@ test("master staging reuses identical captures and refreshes only an unchanged p
   const stableReview = technicalReview(stableSame);
   const promoted = await stageAppSheetCanonicalMasters(stableSame, {
     actorId: "admin-fixture", technicalReview: stableReview,
-    commitSha: "1".repeat(40), target: "isolated-test",
+    commitSha: "1".repeat(40), target: "isolated-test", destinationIdentity: ISOLATED_TEST_DESTINATION_ID,
   }, database.client);
   assert.equal(promoted.replay, false);
   assert.equal(database.state().snapshots.size, 2, "the preliminary and stable source snapshots remain separately traceable");
@@ -359,7 +404,7 @@ test("master staging reuses identical captures and refreshes only an unchanged p
 
   const repeatedStable = await stageAppSheetCanonicalMasters(stableSame, {
     actorId: "admin-fixture", technicalReview: stableReview,
-    commitSha: "1".repeat(40), target: "isolated-test",
+    commitSha: "1".repeat(40), target: "isolated-test", destinationIdentity: ISOLATED_TEST_DESTINATION_ID,
   }, database.client);
   assert.equal(repeatedStable.replay, true);
   assert.equal(database.state().snapshots.size, 2);
@@ -370,7 +415,7 @@ test("master staging reuses identical captures and refreshes only an unchanged p
   const writesBeforeRejectedAttempt = database.writeAttempts();
   await assert.rejects(stageAppSheetCanonicalMasters(changed, {
     actorId: "admin-fixture", technicalReview: changedReview,
-    commitSha: "1".repeat(40), target: "isolated-test",
+    commitSha: "1".repeat(40), target: "isolated-test", destinationIdentity: ISOLATED_TEST_DESTINATION_ID,
   }, database.client), (error: unknown) => error instanceof AppSheetCanonicalError && error.code === "preliminary_master_refresh_requires_explicit_flag");
   assert.equal(database.writeAttempts(), writesBeforeRejectedAttempt, "changed source data is rejected before invoking any write");
   assert.equal(database.state().snapshots.size, beforeRejectedAttempt.snapshots.size);
@@ -378,7 +423,7 @@ test("master staging reuses identical captures and refreshes only an unchanged p
 
   const refreshed = await stageAppSheetCanonicalMasters(changed, {
     actorId: "admin-fixture", technicalReview: changedReview, refreshPreliminary: true,
-    commitSha: "1".repeat(40), target: "isolated-test",
+    commitSha: "1".repeat(40), target: "isolated-test", destinationIdentity: ISOLATED_TEST_DESTINATION_ID,
   }, database.client);
   assert.equal(refreshed.replay, false);
   assert.equal(database.state().snapshots.size, 3, "a refresh adds a new immutable source snapshot");
@@ -402,13 +447,13 @@ test("manual changes reject preliminary refresh without writes, and transaction 
   const preliminary = project({ stagedDelta: true, captureRevision: "manual-preliminary" }, true);
   await stageAppSheetCanonicalMasters(preliminary, {
     actorId: "admin-fixture", technicalReview: technicalReview(preliminary), allowStagedDelta: true,
-    commitSha: "1".repeat(40), target: "isolated-test",
+    commitSha: "1".repeat(40), target: "isolated-test", destinationIdentity: ISOLATED_TEST_DESTINATION_ID,
   }, seeded.client);
 
   const stable = project({ captureRevision: "manual-stable" });
   await stageAppSheetCanonicalMasters(stable, {
     actorId: "admin-fixture", technicalReview: technicalReview(stable),
-    commitSha: "1".repeat(40), target: "isolated-test",
+    commitSha: "1".repeat(40), target: "isolated-test", destinationIdentity: ISOLATED_TEST_DESTINATION_ID,
   }, seeded.client);
 
   const changed = project({ captureRevision: "manual-changed", changedMemberName: "Source update" });
@@ -418,7 +463,7 @@ test("manual changes reject preliminary refresh without writes, and transaction 
     const writesBefore = database.writeAttempts();
     await assert.rejects(stageAppSheetCanonicalMasters(changed, {
       actorId: "admin-fixture", technicalReview: technicalReview(changed), refreshPreliminary: true,
-      commitSha: "1".repeat(40), target: "isolated-test",
+      commitSha: "1".repeat(40), target: "isolated-test", destinationIdentity: ISOLATED_TEST_DESTINATION_ID,
     }, database.client), (error: unknown) => error instanceof AppSheetCanonicalError && error.code === expectedCode);
     assert.equal(database.writeAttempts(), writesBefore);
     assert.equal(database.state().snapshots.size, before.snapshots.size);
@@ -450,7 +495,7 @@ test("manual changes reject preliminary refresh without writes, and transaction 
   const writesBefore = manualDb.writeAttempts();
   await assert.rejects(stageAppSheetCanonicalMasters(changed, {
     actorId: "admin-fixture", technicalReview: technicalReview(changed), refreshPreliminary: true,
-    commitSha: "1".repeat(40), target: "isolated-test",
+    commitSha: "1".repeat(40), target: "isolated-test", destinationIdentity: ISOLATED_TEST_DESTINATION_ID,
   }, manualDb.client), (error: unknown) => error instanceof AppSheetCanonicalError && error.code === "preliminary_master_refresh_manual_change_detected");
   assert.equal(manualDb.writeAttempts(), writesBefore, "manual target content is rejected before invoking writes");
   assert.equal(manualDb.state().members.get(String(member.id))?.name, "Edited in Bombo");
@@ -460,7 +505,7 @@ test("manual changes reject preliminary refresh without writes, and transaction 
   const beforeRollback = rollbackDb.state();
   await assert.rejects(stageAppSheetCanonicalMasters(changed, {
     actorId: "admin-fixture", technicalReview: technicalReview(changed), refreshPreliminary: true,
-    commitSha: "1".repeat(40), target: "isolated-test",
+    commitSha: "1".repeat(40), target: "isolated-test", destinationIdentity: ISOLATED_TEST_DESTINATION_ID,
   }, rollbackDb.client), /injected failure/);
   assert.equal(rollbackDb.state().members.get(String(member.id))?.name, beforeRollback.members.get(String(member.id))?.name);
   assert.equal(rollbackDb.state().objects.get(String(member.id))?.version, beforeRollback.objects.get(String(member.id))?.version);
@@ -475,7 +520,7 @@ test("the staging entry rejects a review bound to another commit before any data
   const database = fakeDatabase();
   await assert.rejects(stageAppSheetCanonicalMasters(projection, {
     actorId: "admin-fixture", technicalReview: review,
-    commitSha: "1".repeat(40), target: "isolated-test",
+    commitSha: "1".repeat(40), target: "isolated-test", destinationIdentity: ISOLATED_TEST_DESTINATION_ID,
   }, database.client));
   assert.equal(database.transactions(), 1, "the public staging entry was exercised");
   assert.equal(database.writeAttempts(), 0, "review mismatch is rejected before persisted state changes");
@@ -491,6 +536,7 @@ test("CLI target parsing keeps preview isolated and requires backup for explicit
   if (preview === "help") return;
   assert.equal(preview.target, "isolated-test");
   assert.equal(preview.apply, false);
+  assert.match(preview.definitionPath, /appsheet-definition-inventory-live-parity-final\.json$/);
   assert.throws(() => parseArgs(["--target", "production"], root), (error: unknown) =>
     error instanceof AppSheetCanonicalError && error.code === "production_apply_and_backup_required");
   assert.throws(() => parseArgs(["--target", "production", "--apply", "--actor-id", "admin", "--review", "review.json"], root), (error: unknown) =>
@@ -700,8 +746,13 @@ test("capture-bound member review survives a later capture review and follows on
     permissionResult.reviewedAt = new Date(secondReviewedAt.getTime() - 1).toISOString();
     assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, firstCapture.captureId), new Set([member.id]),
       "el mismo resultado posterior al baseline de A sigue siendo causal para A");
+    assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, secondCapture.captureId), new Set([member.id]),
+      "el receipt, la auditoría y la versión prueban causalidad aunque reviewedAt sea anterior al baseline de B");
+    permissionResult.reviewedAt = "not-a-timestamp";
+    assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, firstCapture.captureId), new Set(),
+      "una marca temporal malformada no habilita A aunque exista una cadena causal");
     assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, secondCapture.captureId), new Set(),
-      "el resultado semántico anterior al baseline de B no habilita B");
+      "una marca temporal malformada no habilita B aunque exista una cadena causal");
     permissionResult.reviewedAt = permissionReviewedAt.toISOString();
     currentObjectVersion = 2;
     assert.deepEqual(await eligibleAppSheetCanonicalMemberIds(tx as never, firstCapture.captureId), new Set(),

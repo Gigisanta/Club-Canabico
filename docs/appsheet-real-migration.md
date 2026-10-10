@@ -57,16 +57,16 @@ Los CLIs siguientes son los comandos presentes en el checkout. Los previews son 
 # Previews independientes de maestros e historia con identidad de definición revisada.
 ./node_modules/.bin/tsx scripts/appsheet-canonical.ts \
   --capture-dir .local/appsheet-real-20261009 \
-  --definition .local/appsheet-real-20261009/appsheet-definition-inventory-1.001739-v2.json \
+  --definition .local/appsheet-real-20261009/appsheet-definition-inventory-live-parity-final.json \
   --allow-staged-delta
 
 ./node_modules/.bin/tsx scripts/appsheet-history.ts \
   --capture-dir .local/appsheet-real-20261009 \
-  --definition .local/appsheet-real-20261009/appsheet-definition-inventory-1.001739-v2.json \
+  --definition .local/appsheet-real-20261009/appsheet-definition-inventory-live-parity-final.json \
   --allow-staged-delta
 ```
 
-`--allow-staged-delta` es explícito: conserva bloqueos y marca el preview como preliminar. No debe usarse para afirmar un cutoff o un delta final. El inventario `-v2.json` deriva el identificador esperado de la aplicación de las referencias de `ProcessState`; el export HTML no lo presenta como campo directo. El preview actual informa identidad `verified` y enlaza la proyección con un `appliedDefinitionHash`. El manifiesto original de captura permanece inmutable; la definición `-v2` es un artefacto separado. El inventario anterior a `-v2` deja la identidad ausente.
+`--allow-staged-delta` es explícito: conserva bloqueos y marca el preview como preliminar. No debe usarse para afirmar un cutoff o un delta final. Los ejemplos usan el inventario final del parser `1.2.0`, que lee nombre y versión del encabezado y deriva el identificador esperado de las referencias de `ProcessState`. El inventario anterior `-v2.json`, generado por el parser `1.1.0`, permanece como archivo histórico con nombre y versión ausentes; no es la entrada predeterminada actual ni sirve para certificar el staging de producción. El manifiesto original de captura permanece inmutable y la definición se vincula por su propio `appliedDefinitionHash`.
 
 La regresión de historia quedó cubierta por 11 pruebas unitarias focales y fue verificada por el checker con Node `v24.19.0`. El gate independiente completo ejecutó `typecheck`, `test` y `build`: 352 pruebas aprobadas, sin fallos ni omisiones, usando PostgreSQL 18.6 aislado e incluyendo el ensayo de backup/restore. Las pruebas no sustituyen la aplicación de los registros reales ni la comprobación en producción.
 
@@ -87,14 +87,14 @@ node scripts/operations-backup.mjs verify <directorio-privado-nuevo>
 # Ejemplos de ensayo aislado; requieren actor, revisión independiente y respaldo verificado.
 # Una captura preliminar sólo puede ensayarse aislada; producción exige stable=true.
 ./node_modules/.bin/tsx scripts/appsheet-canonical.ts \
-  --definition .local/appsheet-real-20261009/appsheet-definition-inventory-1.001739-v2.json \
+  --definition .local/appsheet-real-20261009/appsheet-definition-inventory-live-parity-final.json \
   --allow-staged-delta --apply --target isolated-test \
   --actor-id <administrador-activo> \
   --review .local/appsheet-real-20261009/masters-review.json \
   --backup-reference <paquete-privado-verificado>
 
 ./node_modules/.bin/tsx scripts/appsheet-history.ts \
-  --definition .local/appsheet-real-20261009/appsheet-definition-inventory-1.001739-v2.json \
+  --definition .local/appsheet-real-20261009/appsheet-definition-inventory-live-parity-final.json \
   --allow-staged-delta --apply --target isolated \
   --actor-id <administrador-activo> \
   --review .local/appsheet-real-20261009/history-review.json \
@@ -148,12 +148,28 @@ La revisión técnica v2 se vincula, además del commit y la proyección, al tip
 
 La elegibilidad de socios del reemplazo exige la revisión de identidades de la captura seleccionada y sus auditorías individuales. Una aprobación genérica de un archivo anterior no la sustituye. La consulta filtra antes de paginar, y el control se aplica también a detalle, historia, acceso clínico, nuevas facturas y creación, cotización, confirmación y revisión de pedidos genéricos. Los socios creados mediante el comando normal siguen disponibles; las modificaciones posteriores legítimas conservan su cadena de recibos y auditoría. La revisión de otra captura no invalida por sí sola la anterior ni autoriza datos de esa otra captura. Se conservan las lecturas históricas y los cobros, entregas, cancelaciones y devoluciones de pedidos ya existentes.
 
+Los productos canónicos permanecen inactivos durante el staging y la revisión. El comando de cambio de autoridad prepara su activación sólo si el hash y la versión actuales coinciden con la revisión; la activación, su manifiesto y las auditorías por producto comparten la transacción del corte. Después, las nuevas operaciones exigen el recibo de esa activación para la misma captura y una cadena completa de cambios de catálogo. El control alcanza packs, facturas, reservas, compras y recepciones. Los productos nativos conservan su disponibilidad y las aperturas físicas anteriores al corte no dependen de una activación todavía imposible. Las pruebas sintéticas de la cadena no demuestran que los gates reales del corte estén satisfechos.
+
+La verificación de una factura histórica utiliza la unidad persistida de cada renglón, además de la fórmula, recibo, hash, versión y reserva de numeración originales. El catálogo vigente se comprueba al guardar cambios nuevos o confirmar, de modo que un cambio posterior de unidad o estado no reescriba la historia ni permita reservar un artículo ahora inválido. Una preventa anterior sin snapshot financiero conocido o sin reserva de numeración comprobable queda pendiente de revisión explícita; no se le asigna automáticamente una fórmula o número nuevos.
+
 El recorrido de factura mantiene borradores y permite crear un socio y volver al formulario. Los reintentos de una respuesta perdida conservan la identidad del comando. La selección del socio recién creado requiere comprobar su registro; una lectura fallida no inventa una opción. Confirmar una preventa desde la edición requiere la misma evidencia explícita de aceptación que su confirmación directa, vinculada a la cotización y su hash. La reserva de stock y entrega ocurre dentro de la transacción; guardar historia no repite cobros ni bots.
 
 La regla financiera v2 separa el 5% de los productos del 5% de Moto para Transferencia/Mercado Pago, y suma el subtotal de cliente de Moto una sola vez. Se conserva el cálculo v1 de las cotizaciones históricas; una cotización que dejó pendiente el recargo de Moto requiere edición y recálculo antes de confirmarse. Los resultados de dinero exacto conservan el cociente, el resto y la regla de redondeo aplicada. La fórmula fuente no especifica por sí sola ese redondeo: comparar contra resultados reales sigue siendo necesario para certificar paridad monetaria.
 
+La exportación de Moto usa `clientSubtotalMinor` en una fórmula v2 definida; conserva el campo anterior para snapshots v1 o legacy. Si falta el subtotal en un snapshot v2, informa el dato ausente sin sustituirlo por un campo antiguo. El importe de staff conserva su selección independiente.
+
 En el legado, `Precio_gramo_línea` y `Valor_Total` son valores iniciales editables y no se reinician al editar. Las seis escalas exactas (`Precio_5_Gramos` a `Precio_30_Gramos`) y las promociones deben permanecer separadas; los intervalos agrupados antiguos de Bombo no permiten inferir esos precios. La acción de guardado `recalcular_factura_Detalle` incluye `Recalcular_Valor`, que también asigna importe y precio: su `SWITCH` sólo enumera las seis escalas y usa cero como fallback, mientras el valor inicial sí enumera promociones. Esta contradicción de definiciones requiere comparar casos guardados reales y la semántica de la acción antes de certificar promociones; no se afirma que el resultado final sea cero. Las tarifas de Moto dependen de servicio, gramos totales y tres filas de catálogo. Se conserva cada expresión y su fase; no se convierten valores de catálogo o monedas desconocidos en importes aprobados. La disponibilidad por lote y su fecha de entrega todavía necesitan correspondencia comprobada con `C_Mercaderia`. Una línea histórica permanece visible, pero la confirmación vuelve a exigir disponibilidad actual tanto en pantalla como en servidor.
 
 La evidencia recibida posteriormente contiene tres libros de distintas fechas, 2.368 instancias de archivos y 94.794 celdas con fórmulas; ese número cuenta celdas, no expresiones únicas. Se conservaron 1.886 objetos únicos por contenido (219.570.906 bytes) y se vincularon 1.174 rutas exactas. Quedan 1.844 rutas faltantes y una ambigua. El delta recibido no fue importado automáticamente. Estos conteos proceden del manifiesto privado del ensayo `f6902ce`; no constituyen una captura final del sistema en uso.
+
+La relectura de Moto confirmó los nombres exactos `Transferencia_moto` y `Subtotal_Cliente_Moto`, ambos **Initial value**, reiniciados al editar y con `Editable_If =FALSE`. `Tarifa_Moto_Cliente` y `Tarifa_Adm` también son valores iniciales, pero su reinicialización depende del rol; `Total_Servicio` no se reinicia. La [documentación oficial de propiedades de columna](https://support.google.com/appsheet/answer/10106509?hl=en) define esta diferencia de actualización. Las expresiones exactas y sus IDs de evidencia permanecen en el inventario privado; aplicar la misma aritmética al guardar no demuestra por sí solo equivalencia de todos esos momentos de cálculo.
+
+Se leyeron adicionalmente los eventos y pasos de actualización y borrado de detalles y facturas, sin ejecutarlos. La lectura visual se contrastó con las acciones de la definición. Se observaron una auto-comparación en la condición de actualización de detalles, valores before/after cruzados en auditoría y `Fecha_After` tomando `Forma_pago` en la auditoría de borrado de factura. El evento de actualización de factura tampoco incluye un cambio aislado de `Aclaracion`, aunque la acción copia ese campo. Son hallazgos de configuración; sus efectos sobre filas reales siguen sin reproducir. Los controles de tipo de cambio se verificaron visualmente porque el árbol de accesibilidad muestra `Adds` incluso cuando sólo `Updates` o `Deletes` están seleccionados.
+
+El staging basado en la documentación generada conserva `botInventory.state=unsupported-in-generated-documentation`; la revisión operativa exige evidencia de bots verificada. Por eso este staging todavía no puede habilitar identidades para el corte real. Una fixture sintética con el contrato completo permite comprobar el comando y sus recibos en PostgreSQL, pero no certifica el writer de staging, los bots reales ni la captura actual. Resolver este punto exige una captura completa y verificable de automatizaciones, no cambiar una marca a `verified`.
+
+El recorrido adicional alcanzó los eventos y pasos principales de los once bots visibles. Factura y portación generan PDF en `Files`, con el timestamp deshabilitado: usan `[Id_Factura]` y `Concatenate("Porte" & [Id_Oculto])`, respectivamente. Se conservaron las referencias a las dos plantillas; esta lectura no capturó su contenido ni acredita generación histórica. El ruteo tiene un webhook seguido de `A_Generar_Ruta`, que pone `Generar_Ruta=FALSE`, `Ruta_Activa=TRUE` y `Tracking_Activo_Desde=NOW()`. La sincronización de ubicación selecciona claves de `C_Moto` mientras el destino visible de la acción es `O_Ruta`; esa discrepancia queda pendiente de verificación. El script de campañas devolvió `Permission denied`. Al cargar su información, el editor marcó un cambio local no guardado; se deshizo y se comprobó `Save` deshabilitado. No se guardó configuración ni se ejecutaron bots. Los endpoints y credenciales quedaron excluidos de la evidencia.
+
+La comparación privada de detalles contra el catálogo capturado encontró 124 diferencias en 2.116 renglones donde pudo calcularse cantidad por precio almacenado; otros 600 no fueron comparables. No se sobrescriben esos importes ni se atribuyen automáticamente a un error: el precio inicial editable, las acciones, los cambios históricos y la captura variable requieren revisión. La clasificación de preventas, deudas, compras impagas y entregas sigue siendo una vista previa. Todavía no existe un importador que enlace todos esos pendientes con objetos operativos y acredite sus disposiciones; por eso `open-objects-approved` permanece bloqueado. Una nota de seguimiento o una excepción explicada no sustituye ese vínculo ni prueba el saldo de una compra.
 
 Estos cambios requieren un commit congelado, controles locales y revisión independiente del mismo SHA. La evidencia de esa ejecución se conserva en un manifiesto privado separado; este texto no afirma CI, despliegue, ingreso de Tiziano/Camila ni carga operativa en producción. Persisten la pausa manual y captura final, resultados de fórmulas sin resolver, adjuntos pendientes y cobertura incompleta de bots/Apps Script. AppSheet permanece intacto.

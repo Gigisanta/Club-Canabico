@@ -8,6 +8,7 @@ import { reportPeriodDateBounds } from "./report-queries.js";
 import { signCursor, verifyCursor } from "./signed-cursor.js";
 import { stockFactScopeWhere } from "./stock-scope.js";
 import { isAppSheetInvoiceTotalPending } from "../../shared/operations/appsheet.js";
+import { APPSHEET_INVOICE_RULE_VERSION } from "../../shared/operations/appsheet-invoice-rules.js";
 
 const feeds = ["sales-lines", "ledger", "stock", "history"] as const;
 type Feed = typeof feeds[number];
@@ -56,16 +57,26 @@ async function page(tx: Tx, feed: Feed, range: { from?: string; to?: string }, s
       const appSheet = quote.source === "appsheet-invoice";
       const pending = isAppSheetInvoiceTotalPending(quote);
       const calculationState = typeof quote.totalCalculationState === "string" ? quote.totalCalculationState : "unknown";
+      const formulaEvidence = quote.appSheetFormula && typeof quote.appSheetFormula === "object" && !Array.isArray(quote.appSheetFormula)
+        ? quote.appSheetFormula as Record<string, unknown> : {};
       const quoteTotal = typeof quote.totalMinor === "string" && /^(0|[1-9][0-9]*)$/.test(quote.totalMinor)
         ? quote.totalMinor : null;
       const totalConsistent = quoteTotal !== null && BigInt(quoteTotal) === row.order.totalMinor;
       const invoiceTotalKnown = !appSheet || ((calculationState === "defined" || calculationState === "staff_confirmed") && totalConsistent);
       const staffConfirmed = appSheet && calculationState === "staff_confirmed";
+      // v2 stores the calculated AppSheet Moto value under its source name.
+      // Keep reading clientTotalMinor for prior snapshots; staff confirmations
+      // continue to use their separately recorded resolution amount.
+      const motoUsesV2Subtotal = appSheet && formulaEvidence.ruleVersion === APPSHEET_INVOICE_RULE_VERSION;
+      const calculatedMotoV2 = motoUsesV2Subtotal && calculationState === "defined";
       const firstLine = firstLineByOrder.get(row.orderId) === row.id;
       const productTotal = staffConfirmed && typeof resolution.productsTotalMinor === "string"
         ? resolution.productsTotalMinor : staffConfirmed ? null : typeof productComponent.totalMinor === "string" ? productComponent.totalMinor : null;
       const motoTotal = staffConfirmed && typeof resolution.motoClientTotalMinor === "string"
-        ? resolution.motoClientTotalMinor : staffConfirmed ? null : typeof motoComponent.clientTotalMinor === "string" ? motoComponent.clientTotalMinor : null;
+        ? resolution.motoClientTotalMinor : staffConfirmed ? null
+          : motoUsesV2Subtotal
+            ? calculatedMotoV2 && typeof motoComponent.clientSubtotalMinor === "string" ? motoComponent.clientSubtotalMinor : null
+            : typeof motoComponent.clientTotalMinor === "string" ? motoComponent.clientTotalMinor : null;
       const lineBasis = lineBasisByOrder.get(row.orderId)?.toString() ?? "0";
       const validProductTotal = productTotal !== null && /^(0|[1-9][0-9]*)$/.test(productTotal);
       const productDelta = staffConfirmed && validProductTotal ? (BigInt(productTotal) - BigInt(lineBasis)).toString() : null;

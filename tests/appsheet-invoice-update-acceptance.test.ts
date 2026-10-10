@@ -66,9 +66,12 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
     const ownerId = `invoice-update-owner-${randomUUID()}`;
     const memberId = `invoice-update-member-${randomUUID()}`;
     const skuId = `invoice-update-sku-${randomUUID()}`;
+    const replacementSkuId = `invoice-update-replacement-sku-${randomUUID()}`;
     const locationId = `invoice-update-location-${randomUUID()}`;
     const lotId = `invoice-update-lot-${randomUUID()}`;
     const balanceId = `invoice-update-balance-${randomUUID()}`;
+    const replacementLotId = `invoice-update-replacement-lot-${randomUUID()}`;
+    const replacementBalanceId = `invoice-update-replacement-balance-${randomUUID()}`;
     const passwordText = randomUUID();
     const password = await bcrypt.hash(passwordText, 4);
     await db.user.create({ data: {
@@ -89,6 +92,7 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
       validUntil,
     } });
     await db.catalogSku.create({ data: { id: skuId, code: skuId, name: "Synthetic invoice product", variety: "Fixture", category: "Fixture", unit: "g", appSheet: { availability: "Sí" } } });
+    await db.catalogSku.create({ data: { id: replacementSkuId, code: replacementSkuId, name: "Synthetic replacement product", variety: "Fixture", category: "Fixture", unit: "g", appSheet: { availability: "Sí" } } });
     await db.location.create({ data: { id: locationId, key: locationId, name: "Synthetic invoice location" } });
     await db.inventoryLot.create({ data: {
       id: lotId,
@@ -102,6 +106,24 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
     await db.stockBalance.create({ data: {
       id: balanceId,
       lotId,
+      locationId,
+      custodianId: ownerId,
+      unit: "g",
+      quantity: "100",
+      reserved: "0",
+    } });
+    await db.inventoryLot.create({ data: {
+      id: replacementLotId,
+      skuId: replacementSkuId,
+      label: "Synthetic replacement lot",
+      unit: "g",
+      unitCost: "1",
+      costCurrency: "ARS",
+      receivedAt: new Date(),
+    } });
+    await db.stockBalance.create({ data: {
+      id: replacementBalanceId,
+      lotId: replacementLotId,
       locationId,
       custodianId: ownerId,
       unit: "g",
@@ -222,14 +244,14 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
       expectedVersion,
       occurredAt: new Date().toISOString(),
     });
-    const input = (options: { quantity: string; preorder: boolean }) => ({
+    const input = (options: { quantity: string; preorder: boolean; skuId?: string; productPaymentMethod?: "cash" | "transfer" | "mercado_pago"; totalMinor?: string }) => ({
       memberId,
       invoiceDate: today,
       currency: "ARS",
       address: { city: "Salta" },
       note: "Synthetic acceptance-bound invoice",
-      productPaymentMethod: "transfer",
-      lines: [{ id: `invoice-line-${randomUUID()}`, skuId, date: today, scale: "fixture", quantity: options.quantity, totalMinor: "10000" }],
+      productPaymentMethod: options.productPaymentMethod ?? "transfer",
+      lines: [{ id: `invoice-line-${randomUUID()}`, skuId: options.skuId ?? skuId, date: today, scale: "fixture", quantity: options.quantity, totalMinor: options.totalMinor ?? "10000" }],
       moto: {
         deliveryDate: today,
         paymentMethod: "mercado_pago",
@@ -242,7 +264,7 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
       },
       preorder: options.preorder,
     });
-    const inputWithoutOptionalDefaults = (options: { quantity: string; preorder: boolean }) => {
+    const inputWithoutOptionalDefaults = (options: { quantity: string; preorder: boolean; skuId?: string; productPaymentMethod?: "cash" | "transfer" | "mercado_pago"; totalMinor?: string }) => {
       const value = input(options);
       return {
         memberId: value.memberId,
@@ -266,6 +288,10 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
       const value = input(options);
       return { ...value, address: {}, note: "", moto: { ...value.moto, notes: "" } };
     };
+    const inputWithoutMoto = (options: { quantity: string; preorder: boolean; skuId?: string; totalMinor?: string }) => {
+      const { moto: _moto, ...value } = input({ ...options, productPaymentMethod: "cash" });
+      return value;
+    };
     const countFinancialEffects = async () => ({
       ledgerEvents: await db.ledgerEvent.count(),
       ledgerLegs: await db.ledgerLeg.count(),
@@ -276,6 +302,7 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
       const order = await db.operationOrder.findUniqueOrThrow({ where: { id: orderId } });
       const lines = await db.operationOrderLine.findMany({ where: { orderId }, orderBy: { id: "asc" } });
       const balance = await db.stockBalance.findUniqueOrThrow({ where: { id: balanceId } });
+      const replacementBalance = await db.stockBalance.findUniqueOrThrow({ where: { id: replacementBalanceId } });
       return {
         order: {
           commercialState: order.commercialState,
@@ -288,9 +315,11 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
           quote: order.quote,
         },
         objectVersion: (await db.operationObject.findUniqueOrThrow({ where: { id: orderId } })).version,
-        lines: lines.map(line => ({ id: line.id, requested: line.requested, revenueMinor: line.revenueMinor.toString() })),
+        lines: lines.map(line => ({ id: line.id, skuId: line.skuId, requested: line.requested, revenueMinor: line.revenueMinor.toString() })),
         stockQuantity: balance.quantity.toString(),
         reserved: balance.reserved.toString(),
+        replacementStockQuantity: replacementBalance.quantity.toString(),
+        replacementReserved: replacementBalance.reserved.toString(),
         reservations: await db.stockReservation.count({ where: { orderId } }),
         deliveries: await db.deliveryAssignment.count({ where: { orderId } }),
         sequenceValue: (await db.appSheetInvoiceSequence.findUniqueOrThrow({ where: { namespace: captureId } })).lastValue.toString(),
@@ -300,6 +329,8 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
     const readReservationCounters = async () => ({
       stockQuantity: (await db.stockBalance.findUniqueOrThrow({ where: { id: balanceId } })).quantity.toString(),
       reserved: (await db.stockBalance.findUniqueOrThrow({ where: { id: balanceId } })).reserved.toString(),
+      replacementStockQuantity: (await db.stockBalance.findUniqueOrThrow({ where: { id: replacementBalanceId } })).quantity.toString(),
+      replacementReserved: (await db.stockBalance.findUniqueOrThrow({ where: { id: replacementBalanceId } })).reserved.toString(),
       stockReservations: await db.stockReservation.count(),
       deliveries: await db.deliveryAssignment.count(),
       sequenceValue: (await db.appSheetInvoiceSequence.findUniqueOrThrow({ where: { namespace: captureId } })).lastValue.toString(),
@@ -336,6 +367,40 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
     assert.equal(unknownAvailability.body.code, "APP_SHEET_SKU_AVAILABILITY_UNVERIFIED");
     await assertRejectedNewInvoiceHasNoEffects(unknownAvailabilityId, unknownAvailabilityRequest, beforeUnknownAvailability);
     await db.catalogSku.update({ where: { id: skuId }, data: { appSheet: { availability: "Sí" } } });
+
+    const inactiveSkuId = `invoice-update-inactive-sku-${randomUUID()}`;
+    const inactiveSkuSaveRequest = envelope(inactiveSkuId, "InvoiceSaved", input({ quantity: "1", preorder: true }));
+    const inactiveSkuSaved = await call(inactiveSkuSaveRequest);
+    assert.equal(inactiveSkuSaved.response.status, 200, JSON.stringify(inactiveSkuSaved.body));
+    const inactiveSkuSavedState = await readOrderState(inactiveSkuId);
+    await db.catalogSku.update({ where: { id: skuId }, data: { active: false, unit: "kg" } });
+    const beforeInactiveSkuConfirm = await readReservationCounters();
+    const inactiveSkuConfirmRequest = envelope(inactiveSkuId, "InvoiceConfirmed", { acceptance: { note: "Registro sintético del operador" } }, 1);
+    const inactiveSkuConfirm = await call(inactiveSkuConfirmRequest);
+    assert.equal(inactiveSkuConfirm.response.status, 422, JSON.stringify(inactiveSkuConfirm.body));
+    assert.equal(inactiveSkuConfirm.body.code, "ORDER_SKU_UNAVAILABLE");
+    assert.deepEqual(await readOrderState(inactiveSkuId), inactiveSkuSavedState, "el historial se verifica aunque el SKU ya esté inactivo, pero no se confirma con el SKU actual inactivo");
+    assert.equal(await db.commandReceipt.findUnique({ where: { requestId: inactiveSkuConfirmRequest.requestId } }), null);
+    assert.equal(await db.operationAudit.count({ where: { requestId: inactiveSkuConfirmRequest.requestId } }), 0);
+    assert.equal(await db.operationOutbox.count({ where: { requestId: inactiveSkuConfirmRequest.requestId } }), 0);
+    assert.deepEqual(await readReservationCounters(), beforeInactiveSkuConfirm);
+
+    const replacementSkuUpdateRequest = envelope(inactiveSkuId, "InvoiceUpdated", {
+      ...inputWithoutOptionalDefaults({ quantity: "1", preorder: false, skuId: replacementSkuId }),
+      acceptance: { note: "El operador registró la cotización vigente para el producto disponible" },
+    }, 1);
+    const replacementSkuUpdated = await call(replacementSkuUpdateRequest);
+    assert.equal(replacementSkuUpdated.response.status, 200, JSON.stringify(replacementSkuUpdated.body));
+    const replacementSkuState = await readOrderState(inactiveSkuId);
+    assert.equal(replacementSkuState.order.commercialState, "confirmed");
+    assert.equal(replacementSkuState.lines.length, 1);
+    assert.equal(replacementSkuState.lines[0]!.skuId, replacementSkuId);
+    assert.equal(replacementSkuState.reserved, "0", "la SKU histórica inactiva no consume stock al reemplazar la cotización");
+    assert.equal(replacementSkuState.replacementReserved, "1", "sólo se reserva la SKU de la cotización actual");
+    assert.equal(replacementSkuState.reservations, 1);
+    assert.equal(replacementSkuState.deliveries, 1);
+    assert.equal((replacementSkuState.order.quote as Record<string, any>).invoiceNumber, (inactiveSkuSavedState.order.quote as Record<string, any>).invoiceNumber, "editar conserva el número histórico reservado");
+    await db.catalogSku.update({ where: { id: skuId }, data: { active: true, unit: "g" } });
 
     const boundaryId = `invoice-update-upper-bound-${randomUUID()}`;
     const boundarySaveRequest = envelope(boundaryId, "InvoiceSaved", input({ quantity: "99", preorder: true }));
@@ -480,6 +545,127 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
     assert.equal(await db.operationAudit.count({ where: { requestId: v1ConfirmRequest.requestId } }), 0);
     assert.equal(await db.operationOutbox.count({ where: { requestId: v1ConfirmRequest.requestId } }), 0);
     assert.deepEqual(await countFinancialEffects(), financialEffectsBefore);
+
+    const rangedV1Id = `invoice-update-v1-out-of-range-${randomUUID()}`;
+    const rangedV1SaveRequest = envelope(rangedV1Id, "InvoiceSaved", inputWithoutMoto({ quantity: "99", preorder: true, totalMinor: "990000" }));
+    const rangedV1Saved = await call(rangedV1SaveRequest);
+    assert.equal(rangedV1Saved.response.status, 200, JSON.stringify(rangedV1Saved.body));
+    const rangedV1SavedState = await readOrderState(rangedV1Id);
+    const rangedV1CurrentQuote = rangedV1SavedState.order.quote as Record<string, any>;
+    const rangedV1CurrentFormula = rangedV1CurrentQuote.appSheetFormula as Record<string, any>;
+    const rangedV1Line = { ...rangedV1CurrentQuote.lines[0], requested: "100", unitPrice: "99.000000000000" };
+    const rangedV1Quote = {
+      ...rangedV1CurrentQuote,
+      input: { ...rangedV1CurrentQuote.input, lines: rangedV1CurrentQuote.input.lines.map((line: Record<string, unknown>) => ({ ...line, quantity: "100" })) },
+      lines: [rangedV1Line],
+      appSheetFormula: {
+        ...rangedV1CurrentFormula,
+        schemaVersion: "appsheet-invoice-calculation/v1",
+        ruleVersion: APPSHEET_INVOICE_RULE_VERSION_V1,
+        sourceExpressions: APPSHEET_INVOICE_SOURCE_EXPRESSIONS_V1,
+        results: { ...rangedV1CurrentFormula.results, Cantidad_Gr: "100000" },
+      },
+    };
+    await db.operationOrder.update({ where: { id: rangedV1Id }, data: { quote: rangedV1Quote } });
+    await db.operationOrderLine.updateMany({ where: { orderId: rangedV1Id }, data: { requested: "100", unitPrice: "99.000000000000" } });
+    const rangedV1Receipt = await db.commandReceipt.findUniqueOrThrow({ where: { requestId: rangedV1SaveRequest.requestId } });
+    const rangedV1Response = rangedV1Receipt.response as Record<string, any>;
+    await db.commandReceipt.update({ where: { requestId: rangedV1SaveRequest.requestId }, data: {
+      response: { ...rangedV1Response, result: { ...rangedV1Response.result, snapshotHash: digest(canonicalJson(rangedV1Quote)) } },
+    } });
+    const rangedV1State = await readOrderState(rangedV1Id);
+    const beforeRangedV1Confirm = await readReservationCounters();
+    const rangedV1ConfirmRequest = envelope(rangedV1Id, "InvoiceConfirmed", { acceptance: { note: "Evidencia sintética del operador" } }, 1);
+    const rangedV1Confirm = await call(rangedV1ConfirmRequest);
+    assert.equal(rangedV1Confirm.response.status, 422, JSON.stringify(rangedV1Confirm.body));
+    assert.equal(rangedV1Confirm.body.code, "APP_SHEET_INVOICE_QUANTITY_RANGE", "v1 válida se vuelve a validar contra el rango actual antes de confirmar");
+    assert.deepEqual(await readOrderState(rangedV1Id), rangedV1State, "el rechazo conserva intacto el snapshot histórico v1");
+    assert.equal(await db.commandReceipt.findUnique({ where: { requestId: rangedV1ConfirmRequest.requestId } }), null);
+    assert.equal(await db.operationAudit.count({ where: { requestId: rangedV1ConfirmRequest.requestId } }), 0);
+    assert.equal(await db.operationOutbox.count({ where: { requestId: rangedV1ConfirmRequest.requestId } }), 0);
+    assert.deepEqual(await readReservationCounters(), beforeRangedV1Confirm);
+    assert.deepEqual(await countFinancialEffects(), financialEffectsBefore);
+
+    const directConfirmId = `invoice-update-direct-confirm-${randomUUID()}`;
+    const directSaveRequest = envelope(directConfirmId, "InvoiceSaved", inputWithoutMoto({ quantity: "1", preorder: true }));
+    const directSaved = await call(directSaveRequest);
+    assert.equal(directSaved.response.status, 200, JSON.stringify(directSaved.body));
+    const directSavedState = await readOrderState(directConfirmId);
+    const directSavedReceipt = await db.commandReceipt.findUniqueOrThrow({ where: { requestId: directSaveRequest.requestId } });
+    const directSavedResponse = directSavedReceipt.response as Record<string, any>;
+    const directConfirmRequest = envelope(directConfirmId, "InvoiceConfirmed", { acceptance: { note: "El operador registra la cotización revisada" } }, 1);
+    const directConfirm = await call(directConfirmRequest);
+    assert.equal(directConfirm.response.status, 200, JSON.stringify(directConfirm.body));
+    const directConfirmedState = await readOrderState(directConfirmId);
+    const directConfirmedQuote = directConfirmedState.order.quote as Record<string, any>;
+    assert.equal(directConfirmedState.order.commercialState, "confirmed");
+    assert.equal(directConfirmedState.reservations, 1);
+    assert.equal(directConfirmedState.deliveries, 0);
+    assert.equal(directConfirmedQuote.acceptance.note, "El operador registra la cotización revisada");
+    assert.equal(directConfirmedQuote.acceptance.acceptedBy, ownerId);
+    assert.equal(directConfirmedQuote.acceptance.quoteVersion, 1);
+    assert.equal(directConfirmedQuote.acceptance.snapshotHash, directSavedResponse.result.snapshotHash);
+    assert.ok(Number.isFinite(Date.parse(directConfirmedQuote.acceptance.acceptedAt)));
+    assert.deepEqual(await countFinancialEffects(), financialEffectsBefore, "confirmar no emite cobros ni asienta caja");
+
+    await db.operationAuthority.update({ where: { id: "operations" }, data: { cutoverProfile: "legacy" } });
+    const legacyCompatibleId = `invoice-update-legacy-compatible-${randomUUID()}`;
+    const legacyCompatibleSaveRequest = envelope(legacyCompatibleId, "InvoiceSaved", inputWithoutMoto({ quantity: "1", preorder: true }));
+    const legacyCompatibleSave = await call(legacyCompatibleSaveRequest);
+    assert.equal(legacyCompatibleSave.response.status, 200, JSON.stringify(legacyCompatibleSave.body));
+    const legacyCompatibleState = await readOrderState(legacyCompatibleId);
+    const legacyCompatibleQuote = legacyCompatibleState.order.quote as Record<string, unknown>;
+    assert.equal(Object.hasOwn(legacyCompatibleQuote, "appSheetFormula"), false);
+    assert.equal((legacyCompatibleQuote as Record<string, unknown>).invoiceNumber, null, "el historial legacy conserva su numeración sin asignación automática");
+    const legacyCompatibleReceipt = await db.commandReceipt.findUniqueOrThrow({ where: { requestId: legacyCompatibleSaveRequest.requestId } });
+    const legacyCompatibleResponse = legacyCompatibleReceipt.response as Record<string, any>;
+    const legacyCompatibleConfirmRequest = envelope(legacyCompatibleId, "InvoiceConfirmed", { acceptance: { note: "Evidencia operativa del flujo legacy" } }, 1);
+    const legacyCompatibleConfirm = await call(legacyCompatibleConfirmRequest);
+    assert.equal(legacyCompatibleConfirm.response.status, 200, JSON.stringify(legacyCompatibleConfirm.body));
+    const legacyCompatibleConfirmed = await readOrderState(legacyCompatibleId);
+    const legacyCompatibleConfirmedQuote = legacyCompatibleConfirmed.order.quote as Record<string, any>;
+    assert.equal(legacyCompatibleConfirmed.order.commercialState, "confirmed", "el perfil legacy mantiene su compatibilidad");
+    assert.equal(legacyCompatibleConfirmedQuote.acceptance.acceptedBy, ownerId);
+    assert.equal(legacyCompatibleConfirmedQuote.acceptance.quoteVersion, 1);
+    assert.equal(legacyCompatibleConfirmedQuote.acceptance.snapshotHash, legacyCompatibleResponse.result.snapshotHash);
+
+    const pendingLegacyId = `invoice-update-legacy-pending-${randomUUID()}`;
+    const pendingLegacySaveRequest = envelope(pendingLegacyId, "InvoiceSaved", inputWithoutMoto({ quantity: "1", preorder: true }));
+    const pendingLegacySave = await call(pendingLegacySaveRequest);
+    assert.equal(pendingLegacySave.response.status, 200, JSON.stringify(pendingLegacySave.body));
+    const pendingLegacyState = await readOrderState(pendingLegacyId);
+    const pendingLegacyQuote = pendingLegacyState.order.quote as Record<string, unknown>;
+    assert.equal(Object.hasOwn(pendingLegacyQuote, "appSheetFormula"), false);
+    assert.equal((pendingLegacyQuote as Record<string, unknown>).invoiceNumber, null);
+    await db.operationAuthority.update({ where: { id: "operations" }, data: { cutoverProfile: "appsheet-replacement" } });
+    const beforePendingLegacyConfirm = await readReservationCounters();
+    const pendingLegacyConfirmRequest = envelope(pendingLegacyId, "InvoiceConfirmed", { acceptance: { note: "No reemplaza un cálculo pendiente" } }, 1);
+    const pendingLegacyConfirm = await call(pendingLegacyConfirmRequest);
+    assert.equal(pendingLegacyConfirm.response.status, 409, JSON.stringify(pendingLegacyConfirm.body));
+    assert.equal(pendingLegacyConfirm.body.code, "INVOICE_SNAPSHOT_RECALCULATION_REQUIRED");
+    assert.deepEqual(await readOrderState(pendingLegacyId), pendingLegacyState, "no recalcula, numera ni modifica el snapshot legacy al cambiar al perfil de reemplazo");
+    assert.equal(await db.appSheetInvoiceNumberReservation.findUnique({ where: { orderId: pendingLegacyId } }), null);
+    assert.equal(await db.commandReceipt.findUnique({ where: { requestId: pendingLegacyConfirmRequest.requestId } }), null);
+    assert.equal(await db.operationAudit.count({ where: { requestId: pendingLegacyConfirmRequest.requestId } }), 0);
+    assert.equal(await db.operationOutbox.count({ where: { requestId: pendingLegacyConfirmRequest.requestId } }), 0);
+    assert.deepEqual(await readReservationCounters(), beforePendingLegacyConfirm);
+    assert.deepEqual(await countFinancialEffects(), financialEffectsBefore);
+
+    const unknownRuleQuote = { ...pendingLegacyQuote, appSheetFormula: { schemaVersion: "appsheet-invoice-calculation/v999", ruleVersion: "appsheet-invoice-rules/v999" } };
+    await db.operationOrder.update({ where: { id: pendingLegacyId }, data: { quote: unknownRuleQuote } });
+    const unknownRuleState = await readOrderState(pendingLegacyId);
+    const beforeUnknownRuleConfirm = await readReservationCounters();
+    const unknownRuleConfirmRequest = envelope(pendingLegacyId, "InvoiceConfirmed", { acceptance: { note: "Una versión no identificada también debe recalcularse" } }, 1);
+    const unknownRuleConfirm = await call(unknownRuleConfirmRequest);
+    assert.equal(unknownRuleConfirm.response.status, 409, JSON.stringify(unknownRuleConfirm.body));
+    assert.equal(unknownRuleConfirm.body.code, "INVOICE_SNAPSHOT_RECALCULATION_REQUIRED");
+    assert.deepEqual(await readOrderState(pendingLegacyId), unknownRuleState);
+    assert.equal(await db.commandReceipt.findUnique({ where: { requestId: unknownRuleConfirmRequest.requestId } }), null);
+    assert.equal(await db.operationAudit.count({ where: { requestId: unknownRuleConfirmRequest.requestId } }), 0);
+    assert.equal(await db.operationOutbox.count({ where: { requestId: unknownRuleConfirmRequest.requestId } }), 0);
+    assert.deepEqual(await readReservationCounters(), beforeUnknownRuleConfirm);
+    assert.deepEqual(await countFinancialEffects(), financialEffectsBefore);
+    assert.equal((await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } })).cutoverProfile, "appsheet-replacement");
 
     const acceptedInput = { ...inputWithoutOptionalDefaults({ quantity: "1", preorder: false }), acceptance: { note: "Aceptación sintética de la cotización mostrada" } };
     const acceptedRequest = envelope(preorderId, "InvoiceUpdated", acceptedInput, 1);

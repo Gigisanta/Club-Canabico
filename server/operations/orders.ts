@@ -9,13 +9,18 @@ import { commercialAddress } from "./member-fields.js";
 import { reserveOrder, prepareOrder, releaseOrderReservations, cancelOrderLines, dispatchOrder, deliverOrder, inspectOrderReturn } from "./stock.js";
 import { postLedger, accountBalance } from "./finance.js";
 import { applyAppSheetInvoiceSequenceSeed, reserveNewAppSheetInvoiceNumber, verifyExistingAppSheetInvoiceReservation } from "./appsheet-invoice-sequence.js";
-import { requireEligibleAppSheetReplacementMember } from "./access.js";
+import {
+ requireEligibleAppSheetReplacementMember,
+ requireEligibleAppSheetReplacementOrderSkus,
+ requireEligibleAppSheetReplacementSkus,
+} from "./access.js";
 const today=(now:Date)=>new Intl.DateTimeFormat("en-CA",{timeZone:"America/Argentina/Buenos_Aires"}).format(now);
 async function draft(ctx:CommandContext){const order=await ctx.tx.operationOrder.findUniqueOrThrow({where:{id:ctx.envelope.targetId}});if(!["draft","preorder"].includes(order.commercialState))throw new OperationError(409,"CONFIRMED_QUOTE_FROZEN","La cotización confirmada requiere una revisión aceptada");return order;}
 
 type StoredOrder = NonNullable<Awaited<ReturnType<CommandContext["tx"]["operationOrder"]["findUnique"]>>>;
 async function confirmOrderSnapshot(ctx:CommandContext,order:StoredOrder,quote:Record<string,unknown>,options:{deliveryAddress?:Record<string,unknown>;acceptance?:Record<string,unknown>;financialState?:"paid"|"unpaid"}={}){
  await requireEligibleAppSheetReplacementMember(ctx.tx,order.memberId);
+ await requireEligibleAppSheetReplacementOrderSkus(ctx.tx,order.id);
  const permission=await ctx.tx.memberPermission.findFirst({where:{memberId:order.memberId,kind:"operations",status:"verified",validFrom:{lte:today(ctx.now)},validUntil:{gte:today(ctx.now)}}});
  if(!permission)throw new OperationError(423,"MEMBER_PERMISSION_PENDING","El socio requiere un permiso operativo verificado y vigente");
  const reservations=await reserveOrder(ctx,order.id);
@@ -67,11 +72,11 @@ const invoiceUpdatedInput = z.record(z.string(),z.unknown()).superRefine((raw,ct
  const parsed=appsheetInvoiceInput.safeParse(invoice);
  if(!parsed.success){for(const issue of parsed.error.issues)ctx.addIssue({code:"custom",path:issue.path,message:issue.message});return;}
  if(acceptance!==undefined&&!evidence.safeParse(acceptance).success)
-  ctx.addIssue({code:"custom",path:["acceptance"],message:"La aceptación debe conservar evidencia explícita.");
+  ctx.addIssue({code:"custom",path:["acceptance"],message:"La aceptación debe conservar evidencia explícita."});
  if(!parsed.data.preorder&&acceptance===undefined)
-  ctx.addIssue({code:"custom",path:["acceptance"],message:"La conversión de una preventa requiere la aceptación explícita del cliente.");
+  ctx.addIssue({code:"custom",path:["acceptance"],message:"La conversión de una preventa requiere la aceptación explícita del cliente."});
  if(parsed.data.preorder&&acceptance!==undefined)
-  ctx.addIssue({code:"custom",path:["acceptance"],message:"Guardá la preventa sin aceptación; registrala al confirmar la cotización.");
+  ctx.addIssue({code:"custom",path:["acceptance"],message:"Guardá la preventa sin aceptación; registrala al confirmar la cotización."});
 }).transform(raw=>{
  const {acceptance,...invoice}=raw;
  const normalized=appsheetInvoiceInput.parse(invoice);
@@ -95,23 +100,47 @@ function requireReplacementInvoiceInputAvailability(input:AppSheetInvoiceInput,s
    throw new OperationError(422,"APP_SHEET_INVOICE_QUANTITY_RANGE","La cantidad de cada producto debe estar entre 1 y 99 gramos.");
  }
 }
-async function requireCurrentAppSheetInvoiceAvailability(ctx:CommandContext,skuIds:string[],replacement:boolean){
- const skus=skuIds.length?await ctx.tx.catalogSku.findMany({where:{id:{in:skuIds}}}):[],skuById=new Map(skus.map(sku=>[sku.id,sku]));
+async function requireCurrentAppSheetInvoiceAvailability(ctx:CommandContext,input:AppSheetInvoiceInput,replacement:boolean){
+ const skuIds=[...new Set(input.lines.map(line=>line.skuId))],skus=skuIds.length?await ctx.tx.catalogSku.findMany({where:{id:{in:skuIds}}}):[],skuById=new Map(skus.map(sku=>[sku.id,sku]));
+ if(replacement){await requireEligibleAppSheetReplacementSkus(ctx.tx,skuIds);requireReplacementInvoiceInputAvailability(input,skuById);return;}
  for(const skuId of skuIds){
   const sku=skuById.get(skuId),appSheet=sku?.appSheet&&typeof sku.appSheet==="object"&&!Array.isArray(sku.appSheet)?sku.appSheet as {availability?:unknown}:{};
   if(!sku?.active||sku.unit!=="g")throw new OperationError(422,"ORDER_SKU_UNAVAILABLE","El producto de la factura debe estar activo y expresado en gramos");
-  if(replacement?appSheet.availability!=="Sí":appSheet.availability==="NO")
-   throw new OperationError(422,replacement?"APP_SHEET_SKU_AVAILABILITY_UNVERIFIED":"ORDER_SKU_UNAVAILABLE",replacement?"La disponibilidad AppSheet del producto debe estar confirmada como Sí antes de confirmar la factura.":"El producto de la factura no está disponible");
+  if(appSheet.availability==="NO")
+   throw new OperationError(422,"ORDER_SKU_UNAVAILABLE","El producto de la factura no está disponible");
  }
 }
-function buildAppSheetInvoiceSnapshot(input:AppSheetInvoiceInput,skuById:Map<string,InvoiceSku>,options:AppSheetInvoiceCalculationOptions={}){
+function historicalInvoiceUnits(input:AppSheetInvoiceInput,quote:Record<string,unknown>):Map<string,string>{
+ const storedLines=quote.lines;
+ if(!Array.isArray(storedLines)||storedLines.length!==input.lines.length)
+  throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La factura histórica no conserva sus unidades y renglones originales");
+ const byId=new Map<string,Record<string,unknown>>();
+ for(const value of storedLines){
+  if(!value||typeof value!=="object"||Array.isArray(value))
+   throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La factura histórica no conserva sus unidades y renglones originales");
+  const line=value as Record<string,unknown>;
+  if(typeof line.id!=="string"||byId.has(line.id))
+   throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La factura histórica no conserva identidades de renglón válidas");
+  byId.set(line.id,line);
+ }
+ const units=new Map<string,string>();
+ for(const line of input.lines){
+  const stored=byId.get(line.id);
+  if(!stored||stored.skuId!==line.skuId||typeof stored.unit!=="string")
+   throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La factura histórica no conserva sus unidades y renglones originales");
+  units.set(line.id,stored.unit);
+ }
+ return units;
+}
+function buildAppSheetInvoiceSnapshot(input:AppSheetInvoiceInput,skuById:Map<string,InvoiceSku>,options:AppSheetInvoiceCalculationOptions&{historicalUnits?:Map<string,string>}={}){
  if(options.replacement&&!options.historicalSnapshot)requireReplacementInvoiceInputAvailability(input,skuById);
  const lines=input.lines.map(line=>{
   const sku=skuById.get(line.skuId);
   const appSheet=sku?.appSheet&&typeof sku.appSheet==="object"&&!Array.isArray(sku.appSheet)?sku.appSheet as {availability?:unknown}:{};
-  if(!sku?.active||(!options.historicalSnapshot&&appSheet.availability==="NO")||sku.unit!=="g")throw new OperationError(422,"ORDER_SKU_UNAVAILABLE","El producto de la factura debe estar activo, disponible y expresado en gramos");
+  const unit=options.historicalSnapshot?options.historicalUnits?.get(line.id):sku?.unit;
+  if((!options.historicalSnapshot&&(!sku?.active||appSheet.availability==="NO"))||unit!=="g")throw new OperationError(options.historicalSnapshot?409:422,options.historicalSnapshot?"INVOICE_SNAPSHOT_INVALID":"ORDER_SKU_UNAVAILABLE",options.historicalSnapshot?"La factura histórica no conserva la unidad AppSheet original.":"El producto de la factura debe estar activo, disponible y expresado en gramos");
   let quantity:bigint;
-  try{quantity=parseQuantity(line.quantity,sku.unit);}catch{throw new OperationError(422,"QUOTE_QUANTITY","La cantidad debe respetar la precisión de la unidad seleccionada");}
+  try{quantity=parseQuantity(line.quantity,unit);}catch{throw new OperationError(422,"QUOTE_QUANTITY","La cantidad debe respetar la precisión de la unidad seleccionada");}
   if(quantity<=0n)throw new OperationError(422,"QUOTE_QUANTITY","La cantidad de la línea debe ser positiva");
   const total=checkInvoiceMinor(BigInt(line.totalMinor));
   // unitPrice is required by the shared order-line table for historical consumers;
@@ -120,7 +149,7 @@ function buildAppSheetInvoiceSnapshot(input:AppSheetInvoiceInput,skuById:Map<str
   const quantityScaled=parseDecimal(line.quantity,3);
   const unitPriceScaled=quantityScaled===0n?0n:roundHalfUp(total*10n**15n,quantityScaled*100n);
   return {
-   id:line.id,skuId:sku.id,unit:sku.unit,requested:line.quantity,unitPrice:formatDecimal(unitPriceScaled,12),
+   id:line.id,skuId:sku?.id??line.skuId,unit,requested:line.quantity,unitPrice:formatDecimal(unitPriceScaled,12),
    referenceMinor:total.toString(),discountMinor:"0",revenueMinor:total.toString(),
    appsheet:{date:line.date,scale:line.scale,explicitTotalMinor:total.toString()},
   };
@@ -217,7 +246,8 @@ async function verifiedAppSheetSnapshot(ctx:CommandContext,order:StoredOrder,quo
   if(sequenceId===null||sequenceYear===null||sequenceCaptureId===null)throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La instantánea no conserva la reserva transaccional de su número.");
   if(authority?.cutoverProfile==="appsheet-replacement"&&authority.captureManifestId!==sequenceCaptureId)throw new OperationError(409,"INVOICE_SEQUENCE_CAPTURE_MISMATCH","La reserva no corresponde a la captura activa.");
   await verifyExistingAppSheetInvoiceReservation(ctx.tx,{captureId:sequenceCaptureId,orderId:order.id,invoiceNumber:invoiceNumberFromQuote(quote),generatedId:sequenceId,generatedYear:sequenceYear});
-  const built=buildAppSheetInvoiceSnapshot(parsed.data,new Map(skus.map(sku=>[sku.id,sku])),{replacement:true,historicalSnapshot:true,ruleVersion:ruleVersion!,invoiceNumber:invoiceNumberFromQuote(quote),evaluatedAt,numbering:{captureId:sequenceCaptureId,id:sequenceId,year:sequenceYear}});
+  const historicalUnits=historicalInvoiceUnits(parsed.data,quote);
+  const built=buildAppSheetInvoiceSnapshot(parsed.data,new Map(skus.map(sku=>[sku.id,sku])),{replacement:true,historicalSnapshot:true,historicalUnits,ruleVersion:ruleVersion!,invoiceNumber:invoiceNumberFromQuote(quote),evaluatedAt,numbering:{captureId:sequenceCaptureId,id:sequenceId,year:sequenceYear}});
   if(appSheetQuoteCanonical(built.quote)!==appSheetQuoteCanonical(quote))throw new OperationError(409,"INVOICE_SNAPSHOT_CHANGED","La confirmación debe partir de la última factura AppSheet guardada");
   const [object,receipt]=await Promise.all([
    ctx.tx.operationObject.findUnique({where:{id:order.id},select:{version:true}}),
@@ -230,7 +260,8 @@ async function verifiedAppSheetSnapshot(ctx:CommandContext,order:StoredOrder,quo
    throw new OperationError(409,"APP_SHEET_MOTO_FORMULA_RECALCULATION_REQUIRED","La regla histórica no calculó el 5% de la moto; editá y recalculá la factura para generar una cotización actual antes de confirmarla.");
   return built;
  }
- const built=buildAppSheetInvoiceSnapshot(parsed.data,new Map(skus.map(sku=>[sku.id,sku])),{historicalSnapshot:true});
+ const historicalUnits=historicalInvoiceUnits(parsed.data,quote);
+ const built=buildAppSheetInvoiceSnapshot(parsed.data,new Map(skus.map(sku=>[sku.id,sku])),{historicalSnapshot:true,historicalUnits});
  if(appSheetQuoteCanonical(built.quote)!==appSheetQuoteCanonical(quote))throw new OperationError(409,"INVOICE_SNAPSHOT_CHANGED","La instantánea de la factura cambió después de guardarse");
  const [object,receipt]=await Promise.all([
   ctx.tx.operationObject.findUnique({where:{id:order.id},select:{version:true}}),
@@ -251,6 +282,7 @@ registerCommand("InvoiceSaved",{kind:"order",capability:"orders.write",create:tr
  if(!member)throw new OperationError(422,"MEMBER_REQUIRED","Elegí un socio identificado");
  if(replacement)await requireEligibleAppSheetReplacementMember(ctx.tx,member.id);
  const skuIds=[...new Set(v.lines.map(line=>line.skuId))],skus=await ctx.tx.catalogSku.findMany({where:{id:{in:skuIds}}});
+ if(replacement)await requireEligibleAppSheetReplacementSkus(ctx.tx,skuIds);
  const skuById=new Map(skus.map(sku=>[sku.id,sku]));
  if(replacement)requireReplacementInvoiceInputAvailability(v,skuById);
  let effectiveInput=v,built:ReturnType<typeof buildAppSheetInvoiceSnapshot>;
@@ -310,6 +342,7 @@ registerCommand("InvoiceUpdated",{kind:"order",capability:"orders.write",schema:
  }
  const effectiveInput=invoiceNumberLocked?{...v,invoiceNumber:storedInvoiceNumber??undefined}:v;
  const skuIds=[...new Set(v.lines.map(line=>line.skuId))],skus=skuIds.length?await ctx.tx.catalogSku.findMany({where:{id:{in:skuIds}}}):[];
+ if(replacement)await requireEligibleAppSheetReplacementSkus(ctx.tx,skuIds);
  const formulaEvidence=previousQuote.appSheetFormula&&typeof previousQuote.appSheetFormula==="object"&&!Array.isArray(previousQuote.appSheetFormula)?previousQuote.appSheetFormula as Record<string,unknown>:null;
  const numbering=formulaEvidence?.numbering&&typeof formulaEvidence.numbering==="object"&&!Array.isArray(formulaEvidence.numbering)?formulaEvidence.numbering as Record<string,unknown>:null;
  const sequenceId=typeof numbering?.sequenceId==="string"&&/^[1-9]\d*$/.test(numbering.sequenceId)?BigInt(numbering.sequenceId):null;
@@ -350,14 +383,21 @@ registerCommand("InvoiceConfirmed",{kind:"order",capability:"orders.write",schem
  const quote=order.quote as Record<string,unknown>;
  if(quote.source!=="appsheet-invoice"||!Array.isArray(quote.lines)||!quote.lines.length)throw new OperationError(409,"INVOICE_SNAPSHOT_INVALID","La factura no contiene una instantánea AppSheet completa");
  await requireEligibleAppSheetReplacementMember(ctx.tx,order.memberId);
- const verified=await verifiedAppSheetSnapshot(ctx,order,quote);
  const authority=await currentInvoiceAuthority(ctx);
- await requireCurrentAppSheetInvoiceAvailability(ctx,verified.lines.map(line=>line.skuId),authority?.cutoverProfile==="appsheet-replacement");
+ const formulaValue=quote.appSheetFormula,formulaEvidence=formulaValue&&typeof formulaValue==="object"&&!Array.isArray(formulaValue)?formulaValue as Record<string,unknown>:null;
+ const hasKnownRuleVersion=formulaEvidence?.ruleVersion===APPSHEET_INVOICE_RULE_VERSION||formulaEvidence?.ruleVersion===APPSHEET_INVOICE_RULE_VERSION_V1;
+ if(authority?.cutoverProfile==="appsheet-replacement"&&!hasKnownRuleVersion)
+  throw new OperationError(409,"INVOICE_SNAPSHOT_RECALCULATION_REQUIRED","La cotización histórica no conserva una versión verificable de las reglas AppSheet; editá y recalculá la factura antes de confirmarla.");
+ await verifiedAppSheetSnapshot(ctx,order,quote);
+ const currentInput=appsheetInvoiceInput.parse(quote.input);
+ await requireCurrentAppSheetInvoiceAvailability(ctx,currentInput,authority?.cutoverProfile==="appsheet-replacement");
  const snapshot=quote as typeof quote & {moto?:AppSheetInvoiceInput["moto"]};
  const deliveryAddress=snapshot.moto?{
   ...order.address as Record<string,unknown>,motoDestination:snapshot.moto.destination,motoDeliveryDate:snapshot.moto.deliveryDate,motoServiceType:snapshot.moto.serviceType,
  }:order.address as Record<string,unknown>;
- return confirmOrderSnapshot(ctx,order,quote,{deliveryAddress,acceptance:ctx.envelope.data.acceptance as Record<string,unknown>,financialState:"unpaid"});
+ const acceptedQuote={...(ctx.envelope.data.acceptance as Record<string,unknown>),acceptedBy:ctx.actor.id,acceptedAt:ctx.now.toISOString(),quoteVersion:order.quoteVersion,snapshotHash:appSheetQuoteHash(quote)};
+ // This records the operator-provided evidence; it does not verify customer consent.
+ return confirmOrderSnapshot(ctx,order,quote,{deliveryAddress,acceptance:acceptedQuote,financialState:"unpaid"});
 }});
 
 const invoiceTotalConfirmationSchema=z.strictObject({

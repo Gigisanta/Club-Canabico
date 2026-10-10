@@ -21,12 +21,13 @@ import {
   type PreparedAppSheetHistoryProjection,
 } from "../server/operations/appsheet-history.js";
 import { APPSHEET_EXPECTED_LIVE_APP_ID } from "../server/operations/appsheet-canonical.js";
+import type { AppSheetDefinitionInventory } from "../shared/operations/appsheet-definition.js";
 import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_MOVEMENT_OVERLAP_FIELDS,
   APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
 import { appSheetDatabaseDestinationIdentity } from "../server/operations/appsheet-database-target.js";
 import { canonicalJson } from "../shared/operations/exact.js";
 import { pendingMappingFingerprintPayload, reconcileAppSheetPendingRows } from "../shared/operations/appsheet-pending.js";
-import { parseAppSheetHistoryCliArgs, privateAppSheetChildPath, runAppSheetHistoryCli } from "../scripts/appsheet-history.js";
+import { appSheetHistoryPreviewDestinationIdentity, parseAppSheetHistoryCliArgs, privateAppSheetChildPath, runAppSheetHistoryCli } from "../scripts/appsheet-history.js";
 
 const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 const HISTORY_TEST_DESTINATION_ID = appSheetDatabaseDestinationIdentity("isolated-test",
@@ -177,11 +178,18 @@ test("history CLI defaults to read-only preview and rejects unsafe apply argumen
   if (options === "help") throw new Error("unexpected_help");
   assert.equal(options.apply, false);
   assert.equal(options.target, "isolated");
-  assert.match(options.definitionPath, /appsheet-definition-inventory-1\.001739-v2\.json$/);
+  assert.match(options.definitionPath, /appsheet-definition-inventory-live-parity-final\.json$/);
   assert.throws(() => parseAppSheetHistoryCliArgs(["--apply"], "/workspace/bombo"),
     (error) => error instanceof AppSheetHistoryStageError && error.code === "apply_review_actor_and_backup_required");
   assert.throws(() => privateAppSheetChildPath("../review.json", "/workspace/bombo/.local/appsheet-real-20261009", "/workspace/bombo"),
     (error) => error instanceof AppSheetHistoryStageError && error.code === "private_direct_child_required");
+});
+
+test("history preview destination fingerprint errors expose only a safe code", () => {
+  const unsafeUrl = new URL("postgresql://fixture:private-secret@127.0.0.1:5432/bombo_ui_history?host=private-route.example");
+  assert.throws(() => appSheetHistoryPreviewDestinationIdentity("isolated", unsafeUrl), (error) =>
+    error instanceof AppSheetHistoryStageError && error.code === "database_target_identity_invalid" &&
+    !error.message.includes("private-secret") && !error.message.includes("private-route.example"));
 });
 
 test("coverage fingerprint hashes exception counts without changing the public count contract", () => {
@@ -324,7 +332,10 @@ function stageFixture(): PreparedAppSheetHistoryProjection {
     },
     definition: {
       appliedDefinitionHash: "c".repeat(64), sourceSha256: "1".repeat(64), descriptorSha256: "2".repeat(64),
-      fileSha256: "3".repeat(64), identityState: "verified", inventory: {},
+      fileSha256: "3".repeat(64), identityState: "verified", inventory: {
+        schemaVersion: 1, parserVersion: "bombo-appsheet-definition/1.2.0",
+        app: { id: APPSHEET_EXPECTED_LIVE_APP_ID, name: "Synthetic App", version: "1.001739" },
+      } as unknown as AppSheetDefinitionInventory,
     },
     projectionHash: "d".repeat(64),
     coverage: { effects: { cash: false } }, controls: {}, persistedRecords: [], persistedFacts: [], exceptions: [],
@@ -361,7 +372,8 @@ function stageReview() {
 }
 
 function legacyStageReview() {
-  return { ...baseStageReview(), schemaVersion: 1 as const };
+  const { target: _target, destinationIdentity: _destinationIdentity, ...unbound } = baseStageReview();
+  return { ...unbound, schemaVersion: 1 as const };
 }
 
 function populatedStageFixture(): PreparedAppSheetHistoryProjection {
@@ -632,6 +644,68 @@ test("unbound and isolated-bound reviews are rejected for production before open
   await assert.rejects(stageAppSheetHistoryProjection(stablePrepared, {
     ...productionOptions, technicalReview: stageReview(),
   }, client), (error) => error instanceof AppSheetHistoryStageError && error.code === "technical_review_invalid");
+  assert.equal(transactionCount, 0);
+});
+
+test("production history staging rejects legacy parser or incomplete app metadata before a transaction", async () => {
+  let transactionCount = 0;
+  const client = { $transaction: async () => {
+    transactionCount++;
+    throw new Error("must_not_start");
+  } } as unknown as PrismaClient;
+  const options = {
+    actorId: "authorized-user", technicalReview: stageReview(), commitSha: "e".repeat(40), allowStagedDelta: true,
+    target: "production" as const, destinationIdentity: PRODUCTION_TEST_DESTINATION_ID,
+    backupEvidence: { manifestHash: "9".repeat(64), snapshotAt: "2026-10-09T12:00:00.000Z" },
+  };
+  const legacyParser = stageFixture();
+  legacyParser.capture = { ...legacyParser.capture, mode: "stable" };
+  legacyParser.definition.inventory = { ...legacyParser.definition.inventory, parserVersion: "bombo-appsheet-definition/1.1.0" } as AppSheetDefinitionInventory;
+  await assert.rejects(stageAppSheetHistoryProjection(legacyParser, options, client), (error) =>
+    error instanceof AppSheetHistoryStageError && error.code === "definition_parser_version_unsupported");
+  assert.equal(transactionCount, 0);
+
+  const incompleteMetadata = stageFixture();
+  incompleteMetadata.capture = { ...incompleteMetadata.capture, mode: "stable" };
+  incompleteMetadata.definition.inventory = {
+    ...incompleteMetadata.definition.inventory,
+    app: { id: APPSHEET_EXPECTED_LIVE_APP_ID, name: null, version: null },
+  } as AppSheetDefinitionInventory;
+  await assert.rejects(stageAppSheetHistoryProjection(incompleteMetadata, options, client), (error) =>
+    error instanceof AppSheetHistoryStageError && error.code === "definition_app_metadata_incomplete");
+  assert.equal(transactionCount, 0);
+});
+
+test("isolated history archives accept an old parser and persist its limits without claiming a bound review", async () => {
+  const prepared = populatedStageFixture();
+  prepared.definition.inventory = {
+    ...prepared.definition.inventory,
+    parserVersion: "bombo-appsheet-definition/1.1.0",
+    app: { id: null, name: null, version: null },
+  } as AppSheetDefinitionInventory;
+  const memory = memoryHistoryClient();
+  await stageAppSheetHistoryProjection(prepared, {
+    actorId: "authorized-user", technicalReview: legacyStageReview(), commitSha: "e".repeat(40),
+    allowStagedDelta: true, target: "isolated-test", destinationIdentity: HISTORY_TEST_DESTINATION_ID,
+    backupEvidence: { manifestHash: "9".repeat(64), snapshotAt: "2026-10-09T12:00:00.000Z" },
+  }, memory.client);
+  const controls = memory.snapshot?.controls as { appSheetHistoryStage: Record<string, unknown> };
+  assert.equal(controls.appSheetHistoryStage.definitionReadiness &&
+    (controls.appSheetHistoryStage.definitionReadiness as { state: string }).state, "isolated-archive-only");
+  const review = controls.appSheetHistoryStage.technicalReview as Record<string, unknown>;
+  assert.equal(review.bindingSource, "legacy-isolated-only");
+  assert.equal("target" in review, false);
+  assert.equal("destinationIdentity" in review, false);
+});
+
+test("history destination fingerprint format is rejected before opening a write transaction", async () => {
+  let transactionCount = 0;
+  const client = { $transaction: async () => { transactionCount++; throw new Error("must_not_start"); } } as unknown as PrismaClient;
+  await assert.rejects(stageAppSheetHistoryProjection(stageFixture(), {
+    actorId: "authorized-user", technicalReview: stageReview(), commitSha: "e".repeat(40),
+    allowStagedDelta: true, target: "isolated-test", destinationIdentity: "postgresql://private.example/database",
+    backupEvidence: { manifestHash: "9".repeat(64), snapshotAt: "2026-10-09T12:00:00.000Z" },
+  }, client), (error) => error instanceof AppSheetHistoryStageError && error.code === "database_destination_identity_invalid");
   assert.equal(transactionCount, 0);
 });
 

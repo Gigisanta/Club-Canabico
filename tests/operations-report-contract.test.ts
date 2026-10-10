@@ -147,8 +147,8 @@ test("customer segmentation uses all confirmed history through the inclusive Bue
 
 test("pending AppSheet captures stay outside official reports while generic orders remain included", { skip: !reportTestSchema }, async t => {
   t.after(async () => {
-    await reportTestSchema!.db.operationOrderLine.deleteMany({ where: { id: { in: ["utc-boundary-generic-line", "pending-appsheet-line", "unknown-appsheet-line", "staff-confirmed-a-line", "staff-confirmed-b-line", "staff-version-zero-line", "staff-version-mismatch-line"] } } });
-    await reportTestSchema!.db.operationOrder.deleteMany({ where: { id: { in: ["utc-boundary-order", "pending-appsheet-order", "pending-only-appsheet-order", "unknown-appsheet-order", "staff-confirmed-appsheet-order", "staff-version-zero-order", "staff-version-mismatch-order"] } } });
+    await reportTestSchema!.db.operationOrderLine.deleteMany({ where: { id: { in: ["utc-boundary-generic-line", "pending-appsheet-line", "unknown-appsheet-line", "v2-calculated-a-line", "v2-calculated-b-line", "v2-missing-moto-line", "legacy-v1-moto-line", "staff-confirmed-a-line", "staff-confirmed-b-line", "staff-version-zero-line", "staff-version-mismatch-line"] } } });
+    await reportTestSchema!.db.operationOrder.deleteMany({ where: { id: { in: ["utc-boundary-order", "pending-appsheet-order", "pending-only-appsheet-order", "unknown-appsheet-order", "v2-calculated-appsheet-order", "v2-missing-moto-order", "legacy-v1-moto-order", "staff-confirmed-appsheet-order", "staff-version-zero-order", "staff-version-mismatch-order"] } } });
     await reportTestSchema!.db.operationMember.deleteMany({ where: { id: { in: ["utc-boundary-member", "pending-only-member", "staff-confirmed-member", "staff-version-member"] } } });
     await reportTestSchema!.db.user.deleteMany({ where: { id: "report-export-owner" } });
     await reportTestSchema!.db.historicalDeliverySale.deleteMany({ where: { sourceSystem: "report-contract-boundary" } });
@@ -244,6 +244,50 @@ test("pending AppSheet captures stay outside official reports while generic orde
   });
   await reportTestSchema!.db.operationOrder.create({
     data: {
+      id: "v2-calculated-appsheet-order", memberId: "utc-boundary-member", channel: "delivery", currency: "ARS",
+      commercialState: "confirmed", fulfillmentState: "delivered", subtotalMinor: 1_000n, surchargeMinor: 50n, deliveryMinor: 315n, totalMinor: 1_365n,
+      quote: {
+        source: "appsheet-invoice", currency: "ARS", capturedBaseMinor: "1300", capturedProductMinor: "1000",
+        subtotalMinor: "1000", totalMinor: "1365", subtotalCalculationState: "defined", totalCalculationState: "defined",
+        totalCalculationSource: "appsheet_recalculation_action",
+        appSheetFormula: { ruleVersion: "appsheet-invoice-rules/v2", results: { Subtotal_Cliente_Moto: "315" } },
+        paymentComponents: {
+          products: { paymentMethod: "transfer", transferMinor: "50", totalMinor: "1050" },
+          moto: { paymentMethod: "transfer", clientTariffMinor: "300", transferMinor: "15", clientSubtotalMinor: "315" },
+        },
+      },
+      address: {}, createdBy: "report-contract-fixture", confirmedAt: fixture,
+    },
+  });
+  await reportTestSchema!.db.operationOrder.create({
+    data: {
+      id: "legacy-v1-moto-order", memberId: "utc-boundary-member", channel: "delivery", currency: "ARS",
+      commercialState: "confirmed", fulfillmentState: "delivered", subtotalMinor: 400n, deliveryMinor: 75n, totalMinor: 475n,
+      quote: {
+        source: "appsheet-invoice", currency: "ARS", capturedBaseMinor: "475", capturedProductMinor: "400",
+        subtotalMinor: "400", totalMinor: "475", subtotalCalculationState: "defined", totalCalculationState: "defined",
+        appSheetFormula: { ruleVersion: "appsheet-invoice-rules/v1" },
+        paymentComponents: { products: { paymentMethod: "cash", totalMinor: "400" }, moto: { paymentMethod: "cash", clientTotalMinor: "75" } },
+      },
+      address: {}, createdBy: "report-contract-fixture", confirmedAt: fixture,
+    },
+  });
+  await reportTestSchema!.db.operationOrder.create({
+    data: {
+      id: "v2-missing-moto-order", memberId: "utc-boundary-member", channel: "delivery", currency: "ARS",
+      commercialState: "confirmed", fulfillmentState: "delivered", subtotalMinor: 400n, deliveryMinor: 100n, totalMinor: 500n,
+      quote: {
+        source: "appsheet-invoice", currency: "ARS", capturedBaseMinor: "500", capturedProductMinor: "400",
+        subtotalMinor: "400", totalMinor: "500", subtotalCalculationState: "defined", totalCalculationState: "defined",
+        appSheetFormula: { ruleVersion: "appsheet-invoice-rules/v2" },
+        // A v2 snapshot must not fall back to this old field when its v2 value is missing.
+        paymentComponents: { products: { paymentMethod: "cash", totalMinor: "400" }, moto: { paymentMethod: "cash", clientTotalMinor: "100" } },
+      },
+      address: {}, createdBy: "report-contract-fixture", confirmedAt: fixture,
+    },
+  });
+  await reportTestSchema!.db.operationOrder.create({
+    data: {
       id: "staff-confirmed-appsheet-order", memberId: "staff-confirmed-member", channel: "local", currency: "ARS",
       commercialState: "confirmed", fulfillmentState: "delivered", quoteVersion: 1, subtotalMinor: 1_000n, deliveryMinor: 700n, totalMinor: 1_350n,
       quote: {
@@ -288,6 +332,22 @@ test("pending AppSheet captures stay outside official reports while generic orde
         requested: "1", delivered: "1", unitPrice: "1", referenceMinor: 800n, revenueMinor: 800n,
       },
       {
+        id: "v2-calculated-a-line", orderId: "v2-calculated-appsheet-order", skuId: "v2-sku-a", unit: "g",
+        requested: "1", delivered: "1", unitPrice: "1", referenceMinor: 400n, revenueMinor: 400n,
+      },
+      {
+        id: "v2-calculated-b-line", orderId: "v2-calculated-appsheet-order", skuId: "v2-sku-b", unit: "g",
+        requested: "1", delivered: "1", unitPrice: "1", referenceMinor: 600n, revenueMinor: 600n,
+      },
+      {
+        id: "legacy-v1-moto-line", orderId: "legacy-v1-moto-order", skuId: "legacy-v1-sku", unit: "g",
+        requested: "1", delivered: "1", unitPrice: "1", referenceMinor: 400n, revenueMinor: 400n,
+      },
+      {
+        id: "v2-missing-moto-line", orderId: "v2-missing-moto-order", skuId: "v2-missing-sku", unit: "g",
+        requested: "1", delivered: "1", unitPrice: "1", referenceMinor: 400n, revenueMinor: 400n,
+      },
+      {
         id: "staff-confirmed-a-line", orderId: "staff-confirmed-appsheet-order", skuId: "staff-sku-a", unit: "g",
         requested: "1", delivered: "1", unitPrice: "1", referenceMinor: 400n, revenueMinor: 400n,
       },
@@ -330,8 +390,8 @@ test("pending AppSheet captures stay outside official reports while generic orde
     "sales-revenue",
     { from: civilDate, to: civilDate },
   );
-  assert.equal(report.metrics.operational.confirmedOrderCount, 2);
-  assert.deepEqual(report.metrics.operational.orderTotalByCurrency, [{ currency: "ARS", minor: "5501350" }]);
+  assert.equal(report.metrics.operational.confirmedOrderCount, 5);
+  assert.deepEqual(report.metrics.operational.orderTotalByCurrency, [{ currency: "ARS", minor: "5503690" }]);
   assert.deepEqual(report.metrics.pendingAppSheetInvoices.capturedBaseMinorByCurrency, [{ currency: "ARS", minor: "190001600" }]);
   assert.deepEqual(report.metrics.pendingAppSheetInvoices.capturedProductLineMinorByCurrency, [{ currency: "ARS", minor: "190000800" }]);
   assert.deepEqual(report.metrics.pendingAppSheetInvoices.capturedClientTariffMinorByCurrency, [{ currency: "ARS", minor: "800" }]);
@@ -344,13 +404,13 @@ test("pending AppSheet captures stay outside official reports while generic orde
   assert.deepEqual(report.metrics.staffConfirmedAppSheetInvoices.motoClientTotalMinorByCurrency, [{ currency: "ARS", minor: "300" }]);
   assert.deepEqual(report.metrics.staffConfirmedAppSheetInvoices.unallocatedProductDeltaMinorByCurrency, [{ currency: "ARS", minor: "50" }]);
   assert.equal(report.metrics.operational.netProductRevenueByCurrency, null);
-  assert.deepEqual(report.metrics.operational.lineBasisNetProductRevenueByCurrency, [{ currency: "ARS", minor: "5501000" }]);
+  assert.deepEqual(report.metrics.operational.lineBasisNetProductRevenueByCurrency, [{ currency: "ARS", minor: "5502800" }]);
   assert.equal(report.metrics.historicalDelivery.saleCount, 1);
 
   const products = await reportTestSchema!.queries.queryOperationsReport("product-contribution", { from: civilDate, to: civilDate });
-  assert.equal(products.metrics.deliveredLineCount, 3);
+  assert.equal(products.metrics.deliveredLineCount, 7);
   assert.deepEqual(products.metrics.pendingAppSheetInvoices.capturedProductLineMinorByCurrency, [{ currency: "ARS", minor: "190000800" }]);
-  assert.deepEqual(products.metrics.recognizedDeliveryAndSurchargeByCurrency, [{ currency: "ARS", minor: "300" }]);
+  assert.deepEqual(products.metrics.recognizedDeliveryAndSurchargeByCurrency, [{ currency: "ARS", minor: "840" }]);
   assert.deepEqual(products.metrics.pendingAppSheetDeliveryTariffByCurrency, [{ currency: "ARS", minor: "800" }]);
   assert.equal(products.metrics.pendingAppSheetDeliveryTariffRecognized, false);
   assert.equal(products.metrics.productAmountAttributionComplete, false);
@@ -433,11 +493,31 @@ test("pending AppSheet captures stay outside official reports while generic orde
   const manualExportRows = exportedRows.filter(row => row.objectId === "staff-confirmed-appsheet-order");
   assert.equal(manualExportRows.length, 2);
   assert.equal(manualExportRows[0]!.invoiceTotalMinor, "1350");
+  assert.equal(manualExportRows[0]!.invoiceMotoClientTotalMinor, "300");
   assert.equal(manualExportRows[0]!.invoiceTotalCalculationSource, "staff_confirmation");
   assert.equal(manualExportRows[0]!.invoiceUnallocatedProductDeltaMinor, "50");
   assert.equal(manualExportRows[0]!.invoiceSnapshotHash, "a".repeat(64));
   assert.equal(manualExportRows[1]!.invoiceTotalMinor, "");
+  assert.equal(manualExportRows[1]!.invoiceMotoClientTotalMinor, "");
   assert.equal(exportedRows.find(row => row.objectId === "unknown-appsheet-order")!.kind, "captured-product-line");
+
+  const calculatedV2Rows = exportedRows.filter(row => row.objectId === "v2-calculated-appsheet-order");
+  assert.equal(calculatedV2Rows.length, 2);
+  const calculatedV2Invoice = calculatedV2Rows.find(row => row.invoiceTotalMinor !== "")!;
+  assert.equal(calculatedV2Invoice.invoiceTotalMinor, "1365");
+  assert.equal(calculatedV2Invoice.invoiceProductsTotalMinor, "1050");
+  assert.equal(calculatedV2Invoice.invoiceMotoClientTotalMinor, "315");
+  assert.deepEqual(calculatedV2Rows.map(row => row.amountMinor), ["400", "600"]);
+  assert.deepEqual(calculatedV2Rows.map(row => row.quantity), ["1", "1"]);
+  assert.equal(calculatedV2Rows.filter(row => row.invoiceMotoClientTotalMinor !== "").length, 1);
+
+  const legacyV1Invoice = exportedRows.find(row => row.objectId === "legacy-v1-moto-order")!;
+  assert.equal(legacyV1Invoice.invoiceTotalMinor, "475");
+  assert.equal(legacyV1Invoice.invoiceMotoClientTotalMinor, "75");
+
+  const incompleteV2Invoice = exportedRows.find(row => row.objectId === "v2-missing-moto-order")!;
+  assert.equal(incompleteV2Invoice.invoiceTotalMinor, "500");
+  assert.equal(incompleteV2Invoice.invoiceMotoClientTotalMinor, "");
 
   const { memberHistory } = await import("../server/operations/member-history.js");
   const history = await memberHistory("utc-boundary-member", 10);

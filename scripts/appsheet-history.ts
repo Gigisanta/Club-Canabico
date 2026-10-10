@@ -23,7 +23,7 @@ import { appSheetDatabaseDestinationIdentity } from "../server/operations/appshe
 import { verifyBackupReference } from "../server/operations/financial-source-stage.js";
 
 const PRIVATE_DIR = ".local/appsheet-real-20261009";
-const DEFAULT_DEFINITION = "appsheet-definition-inventory-1.001739-v2.json";
+const DEFAULT_DEFINITION = "appsheet-definition-inventory-live-parity-final.json";
 const MAX_REVIEW_BYTES = 1_000_000;
 
 export interface AppSheetHistoryCliOptions {
@@ -176,6 +176,14 @@ function selectedDatabaseUrl(target: "isolated" | "production"): URL {
   return url;
 }
 
+export function appSheetHistoryPreviewDestinationIdentity(target: "isolated" | "production", databaseUrl: URL): string {
+  try {
+    return appSheetDatabaseDestinationIdentity(target === "isolated" ? "isolated-test" : "production", databaseUrl);
+  } catch {
+    throw new AppSheetHistoryStageError("database_target_identity_invalid");
+  }
+}
+
 export async function runAppSheetHistoryCli(args: string[], workingDirectory = process.cwd()): Promise<{ code: number; output: string }> {
   let options: AppSheetHistoryCliOptions | "help";
   try { options = parseAppSheetHistoryCliArgs(args, workingDirectory); }
@@ -193,9 +201,11 @@ export async function runAppSheetHistoryCli(args: string[], workingDirectory = p
     const definition = await loadAppSheetHistoryDefinition(definitionPath);
     const prepared = prepareAppSheetHistoryProjection(capture, definition);
     const configuredTargetUrl = options.target === "isolated" ? process.env.TEST_DATABASE_URL : process.env.DATABASE_URL;
-    const previewDestinationIdentity = configuredTargetUrl
-      ? appSheetDatabaseDestinationIdentity(options.target === "isolated" ? "isolated-test" : "production", selectedDatabaseUrl(options.target))
-      : null;
+    let previewDestinationIdentity: string | null = null;
+    if (configuredTargetUrl) {
+      try { previewDestinationIdentity = appSheetHistoryPreviewDestinationIdentity(options.target, selectedDatabaseUrl(options.target)); }
+      catch { throw new AppSheetHistoryStageError("database_target_identity_invalid"); }
+    }
     const report = {
       ...appSheetHistoryProjectionReport(prepared),
       commitSha: initialGit.commitSha,

@@ -4,7 +4,12 @@ import { z } from "zod";
 import { formatDecimal, moneyForQuantity, parseDecimal, parseQuantity, roundHalfUp, type QuantityUnit } from "../../shared/operations/exact.js";
 import { audit, civilDate, currency, decimal, evidence, json, objectId, objectScope, registerCommand, touchAggregate, OperationError, type CommandContext } from "./core.js";
 import { resolveStockAvailability, type StockAvailabilityChannel, type StockAvailabilityResolution } from "./stock-availability.js";
-import { requireAppSheetOpeningSourceRecord } from "./access.js";
+import {
+  recordAppSheetCanonicalSkuMutation,
+  requireAppSheetOpeningSourceRecord,
+  requireEligibleAppSheetReplacementOrderSkus,
+  requireEligibleAppSheetReplacementSkus,
+} from "./access.js";
 
 export interface StockPreparationAllocationInput {
   lineId: string;
@@ -478,6 +483,7 @@ export async function reserveOrder(ctx: CommandContext, orderId: string): Promis
   if (!["draft", "preorder", "confirmed"].includes(order.commercialState))
     throw new OperationError(409, "ORDER_RESERVATION_STATE", "El pedido no permite reservar stock");
   if (!order.lines.length) throw new OperationError(422, "ORDER_LINES_REQUIRED", "El pedido necesita renglones antes de reservar");
+  await requireEligibleAppSheetReplacementOrderSkus(ctx.tx, order.id);
 
   const active = await currentReservations(ctx, orderId);
   const lines = lineById(order);
@@ -1114,11 +1120,13 @@ registerCommand("CatalogSkuUpdated", {
     const input = skuUpdateSchema.parse(skuData);
     const current = await ctx.tx.catalogSku.findUnique({ where: { id: ctx.envelope.targetId } });
     if (!current) throw new OperationError(404, "SKU_NOT_FOUND", "No se encontró el producto de catálogo");
+    await requireEligibleAppSheetReplacementSkus(ctx.tx, [current.id]);
     parseQ(input.minQuantity, input.unit, "Stock mínimo");
     if (current.unit !== input.unit)
       throw new OperationError(409, "SKU_UNIT_IMMUTABLE", "La unidad de un SKU es inmutable; creá otro SKU para usar una unidad distinta");
     const sku = await ctx.tx.catalogSku.update({ where: { id: current.id }, data: input });
     await audit(ctx, "CatalogSkuUpdated", { skuId: sku.id, evidence: proof });
+    await recordAppSheetCanonicalSkuMutation(ctx, current, sku);
     return { sku };
   },
 });
@@ -1173,6 +1181,7 @@ registerCommand("PurchaseOrderCreated", {
     if (!supplier) throw new OperationError(422, "PURCHASE_SUPPLIER_REQUIRED", "Elegí un proveedor activo");
     if (new Set(input.items.map((item) => item.lineId)).size !== input.items.length)
       throw new OperationError(422, "PURCHASE_DUPLICATE_LINE", "Cada renglón de compra debe tener un identificador único");
+    await requireEligibleAppSheetReplacementSkus(ctx.tx, [...new Set(input.items.map(item => item.skuId))]);
     const stored: PurchaseLine[] = [];
     let totalMinor = ZERO;
     for (const item of input.items) {
@@ -1232,6 +1241,7 @@ registerCommand("GoodsReceived", {
     if (!custodian) throw new OperationError(422, "RECEIPT_CUSTODIAN_REQUIRED", "Elegí una persona activa responsable de la custodia");
     await requireStockObjectScope(ctx,[location.id],[custodian.id]);
     const purchaseLines = readPurchaseLines(purchase.items);
+    await requireEligibleAppSheetReplacementSkus(ctx.tx, [...new Set(purchaseLines.map(line => line.skuId))]);
     const purchaseLineById = new Map(purchaseLines.map((line) => [line.lineId, line]));
     const existingReceipts = await ctx.tx.goodsReceipt.findMany({ where: { purchaseId: purchase.id }, select: { items: true } });
     const receivedByLine = new Map<string, bigint>();

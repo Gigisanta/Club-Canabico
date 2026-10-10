@@ -192,7 +192,7 @@ type CanonicalIdentityAuditBinding={
  id:string;sourceTable:string;sourceKey:string;destinationType:string;destinationId:string;approvedBy:string|null;
 };
 type CanonicalIdentityAuditSource={id:string;contentHash:string};
-type CanonicalIdentityAuditFingerprint={sourceTable:string;sourceKey:string;destinationType:string;destinationId:string;dataHash:string};
+type CanonicalIdentityAuditFingerprint={sourceTable:string;sourceKey:string;destinationType:string;destinationId:string;dataHash:string;operationVersion?:number};
 
 /** Prove that identity approvals belong to this snapshot review, not a reused legacy approval or another capture. */
 async function hasCanonicalIdentityReviewAudits(tx:Tx,input:{snapshotId:string;reviewerId:string;reviewedAt:Date;captureId:string;manifestHash:string;
@@ -341,17 +341,17 @@ async function prepareCanonicalIdentityReview(ctx:CommandContext,input:Canonical
 
 const canonicalMemberMutationCommands=["MemberUpdated","PermissionVerified","ClinicalRecordReviewed"] as const;
 function isServerDate(value:Date){return value instanceof Date&&Number.isFinite(value.getTime());}
-function responseDateAtOrAfterBaseline(value:unknown,reviewedAt:Date){
+function responseDateIsFinite(value:unknown){
  if(typeof value!=="string")return false;
  const date=new Date(value);
- return Number.isFinite(date.getTime())&&date>=reviewedAt;
+ return Number.isFinite(date.getTime());
 }
 
 type CanonicalMemberMutationCandidate={member:{id:string;legacyCustomerId:string|null;sourceSystem:string|null;sourceId:string|null;
  name:string;email:string;phone:string;address:unknown;preferences:unknown};baselineVersion:number;currentVersion:number;baselineHash:string;currentHash:string};
 
 /** Accept only contiguous, server-receipted member-safe commands after identity approval. */
-async function canonicalMemberMutationChainIds(tx:Tx,candidates:CanonicalMemberMutationCandidate[],reviewedAt:Date):Promise<Set<string>>{
+async function canonicalMemberMutationChainIds(tx:Tx,candidates:CanonicalMemberMutationCandidate[]):Promise<Set<string>>{
  const eligible=new Set<string>(),validCandidates=candidates.filter(candidate=>Number.isSafeInteger(candidate.baselineVersion)&&candidate.baselineVersion>=0&&
   Number.isSafeInteger(candidate.currentVersion)&&candidate.currentVersion>=candidate.baselineVersion);
  if(!validCandidates.length)return eligible;
@@ -374,8 +374,8 @@ async function canonicalMemberMutationChainIds(tx:Tx,candidates:CanonicalMemberM
   let expectedVersion=baselineVersion+1,latestMemberHash=baselineHash,valid=true;
   for(const receipt of rows){
    // Identity review revalidated the destination at baselineVersion; a contiguous
-   // post-baseline server receipt chain proves causality. The DB timestamps below
-   // use transaction start, so compare server result dates only with the review.
+   // post-baseline server receipt chain proves causality. Database timestamps use
+   // transaction start and are validated for shape, not used as a wall-clock order.
    if(receipt.resultingVersion!==expectedVersion++||receipt.resultingVersion>currentVersion||
       !canonicalMemberMutationCommands.includes(receipt.command as typeof canonicalMemberMutationCommands[number])||
       receipt.targetId!==member.id||!isServerDate(receipt.committedAt)){valid=false;break;}
@@ -397,11 +397,11 @@ async function canonicalMemberMutationChainIds(tx:Tx,candidates:CanonicalMemberM
    }else if(receipt.command==="PermissionVerified"){
     const permission=asJsonObject(result.permission);
     if(!permission||permission.memberId!==member.id||permission.status!=="verified"||permission.reviewerId!==receipt.actorId||
-       !responseDateAtOrAfterBaseline(permission.reviewedAt,reviewedAt)){valid=false;break;}
+       !responseDateIsFinite(permission.reviewedAt)){valid=false;break;}
    }else{
     const clinical=asJsonObject(result.clinical);
     if(!clinical||clinical.memberId!==member.id||!["verified","rejected","needs_information"].includes(String(clinical.verification))||
-       clinical.reviewedBy!==receipt.actorId||!responseDateAtOrAfterBaseline(clinical.reviewedAt,reviewedAt)){valid=false;break;}
+       clinical.reviewedBy!==receipt.actorId||!responseDateIsFinite(clinical.reviewedAt)){valid=false;break;}
    }
   }
   if(valid&&expectedVersion===currentVersion+1&&currentHash===latestMemberHash)eligible.add(member.id);
@@ -493,7 +493,7 @@ export async function eligibleAppSheetCanonicalMemberIds(tx:Tx,captureId:string|
   if(!hashPattern.test(currentHash))continue;
   candidates.push({member,baselineVersion:fingerprint.operationVersion,currentVersion:object.version,baselineHash:fingerprint.dataHash,currentHash});
  }
- return canonicalMemberMutationChainIds(tx,candidates,snapshot.reviewedAt);
+ return canonicalMemberMutationChainIds(tx,candidates);
 }
 
 /** null means no AppSheet replacement authority is active; an empty set means none of its imported members are eligible. */
@@ -505,11 +505,15 @@ export async function appSheetReplacementCanonicalMemberIds(tx:Tx,onlyMemberIds?
 
 /** Keep native MemberCreated rows available while failing closed for unreviewed or mismatched imported provenance. */
 export async function requireEligibleAppSheetReplacementMember(tx:Tx,memberId:string):Promise<void>{
- const eligibleCanonicalIds=await appSheetReplacementCanonicalMemberIds(tx,[memberId]);
- if(eligibleCanonicalIds===null)return;
  const member=await tx.operationMember.findUnique({where:{id:memberId},select:{id:true,sourceSystem:true,sourceId:true,legacyCustomerId:true}});
  if(!member)throw new OperationError(404,"MEMBER_NOT_FOUND","Socio no encontrado");
+ const authority=await tx.operationAuthority.findUnique({where:{id:"operations"},select:{mode:true,cutoverProfile:true,captureManifestId:true}});
+ if(authority?.mode!=="active"||authority.cutoverProfile!=="appsheet-replacement")return;
+ // Native members do not depend on the state of the imported capture. Resolve
+ // them before the canonical eligibility query loads capture, inventory, or
+ // destination fingerprints. Any partial provenance remains fail-closed below.
  if(member.sourceSystem===null&&member.sourceId===null&&member.legacyCustomerId===null)return;
+ const eligibleCanonicalIds=await eligibleAppSheetCanonicalMemberIds(tx,authority.captureManifestId,[memberId]);
  if(member.sourceSystem===APPSHEET_CANONICAL_SOURCE_SYSTEM&&eligibleCanonicalIds.has(member.id))return;
  throw new OperationError(423,"APPSHEET_MEMBER_NOT_ELIGIBLE","El socio importado no pertenece a la captura AppSheet revisada por la autoridad activa.",{memberId});
 }
@@ -553,9 +557,13 @@ type AppSheetReplacementProof={
  capture:{captureId:string;manifestHash:string;dataHash:string;definitionHash:string|null;firstReadAt:Date;verificationStartedAt:Date;
   verificationCompletedAt:Date;cutoffAt:Date;stability:unknown};
  appliedDefinitionHash:string;
- master:{id:string;fileHash:string;sourceRecords:number;projectionHash:string;commitSha:string;technicalReviewHash:string;backupManifestHash:string};
+ master:{id:string;fileHash:string;sourceRecords:number;projectionHash:string;destinationIdentity:string;commitSha:string;technicalReviewHash:string;backupManifestHash:string};
+ skuActivationPlan:CanonicalSkuActivationPlan[];
  history:{id:string;fileHash:string;sourceRecords:number;facts:number;publicationFingerprint:string;projectionHash:string;commitSha:string;technicalReviewHash:string};
 };
+export type CanonicalSkuSnapshot={id:string;code:string;name:string;variety:string;category:string;unit:string;active:boolean;sourceSystem:string|null;sourceId:string|null;appSheet:unknown};
+export type CanonicalSkuActivationPlan={skuId:string;sourceKey:string;baselineHash:string;baselineVersion:number;activatedHash:string;activatedVersion:number;snapshot:CanonicalSkuSnapshot};
+export type CanonicalSkuActivationContext={capture:{captureId:string};master:{id:string;projectionHash:string;destinationIdentity:string};skuActivationPlan:CanonicalSkuActivationPlan[]};
 /** Require the final AppSheet pause gate before using capture-backed opening or numbering data. */
 export async function requireApprovedAppSheetFinalDeltaGate(tx:Tx,captureId:string){
  const gate=await tx.cutoverGate.findUnique({where:{id:"final-delta-reconciled"}});
@@ -640,12 +648,13 @@ async function requireVerifiedAppSheetReplacement(ctx:CommandContext,captureId:s
  for(const raw of rawFingerprints){
   const fingerprint=raw!;
   if(typeof fingerprint.sourceTable!=="string"||typeof fingerprint.sourceKey!=="string"||typeof fingerprint.destinationType!=="string"||
-     typeof fingerprint.destinationId!=="string"||typeof fingerprint.dataHash!=="string"||!hashPattern.test(fingerprint.dataHash))
+     typeof fingerprint.destinationId!=="string"||typeof fingerprint.dataHash!=="string"||!hashPattern.test(fingerprint.dataHash)||
+     typeof fingerprint.operationVersion!=="number"||!Number.isSafeInteger(fingerprint.operationVersion)||fingerprint.operationVersion<0)
    throw appSheetReadinessError("canonical_master_identity_review_fingerprint_invalid");
   const key=canonicalJson([fingerprint.sourceTable,fingerprint.sourceKey]);
   if(fingerprintByKey.has(key))throw appSheetReadinessError("canonical_master_identity_review_fingerprint_ambiguous");
   fingerprintByKey.set(key,{sourceTable:fingerprint.sourceTable,sourceKey:fingerprint.sourceKey,destinationType:fingerprint.destinationType,
-   destinationId:fingerprint.destinationId,dataHash:fingerprint.dataHash});
+   destinationId:fingerprint.destinationId,dataHash:fingerprint.dataHash,operationVersion:fingerprint.operationVersion});
  }
  const recordsByKey=new Map(masterRecords.map(record=>[canonicalJson([record.sourceTable,record.sourceKey]),{id:record.id,contentHash:record.contentHash}]));
  if(recordsByKey.size!==masterRecords.length||fingerprintByKey.size!==masterRecords.length||!master.reviewedAt||
@@ -653,16 +662,17 @@ async function requireVerifiedAppSheetReplacement(ctx:CommandContext,captureId:s
     captureId:capture.captureId,manifestHash:capture.manifestHash,projectionHash:definition.projectionHash,destinationIdentity:definition.destinationIdentity,
     expectedIdentityCount,identities,recordsByKey,fingerprintsByKey:fingerprintByKey}))
   throw appSheetReadinessError("canonical_master_identity_review_audit_missing_or_unbound");
- const membersById=new Map<string,{id:string;legacyCustomerId:string|null;sourceSystem:string|null;sourceId:string|null}>();
- const skusById=new Map<string,{id:string;sourceSystem:string|null;sourceId:string|null;active:boolean}>();
- const objectsById=new Map<string,{id:string;kind:string}>();
+const membersById=new Map<string,{id:string;legacyCustomerId:string|null;sourceSystem:string|null;sourceId:string|null;name:string;email:string;phone:string;address:unknown;preferences:unknown}>();
+ const skusById=new Map<string,CanonicalSkuSnapshot>();
+ const objectsById=new Map<string,{id:string;kind:string;version:number}>();
+ const skuActivationPlan:CanonicalSkuActivationPlan[]=[];
  const allDestinationIds=[...new Set(identities.map(identity=>identity.destinationId))];
  for(let start=0;start<allDestinationIds.length;start+=500){
   const ids=allDestinationIds.slice(start,start+500);
   const [members,skus,objects]=await Promise.all([
-   ctx.tx.operationMember.findMany({where:{id:{in:ids}},select:{id:true,legacyCustomerId:true,sourceSystem:true,sourceId:true}}),
-   ctx.tx.catalogSku.findMany({where:{id:{in:ids}},select:{id:true,sourceSystem:true,sourceId:true,active:true}}),
-   ctx.tx.operationObject.findMany({where:{id:{in:ids}},select:{id:true,kind:true}}),
+   ctx.tx.operationMember.findMany({where:{id:{in:ids}},select:{id:true,legacyCustomerId:true,sourceSystem:true,sourceId:true,name:true,email:true,phone:true,address:true,preferences:true}}),
+   ctx.tx.catalogSku.findMany({where:{id:{in:ids}},select:{id:true,code:true,name:true,variety:true,category:true,unit:true,active:true,sourceSystem:true,sourceId:true,appSheet:true}}),
+   ctx.tx.operationObject.findMany({where:{id:{in:ids}},select:{id:true,kind:true,version:true}}),
   ]);
   for(const row of members)membersById.set(row.id,row);
   for(const row of skus)skusById.set(row.id,row);
@@ -677,9 +687,25 @@ async function requireVerifiedAppSheetReplacement(ctx:CommandContext,captureId:s
    ?(()=>{const member=membersById.get(identity.destinationId);return Boolean(member&&member.legacyCustomerId===record.sourceKey&&
      member.sourceSystem===APPSHEET_CANONICAL_SOURCE_SYSTEM&&member.sourceId===record.sourceKey);})()
    :(()=>{const sku=skusById.get(identity.destinationId);return Boolean(sku&&sku.sourceSystem===APPSHEET_CANONICAL_SOURCE_SYSTEM&&
-     sku.sourceId===record.sourceKey&&sku.active);})();
+     sku.sourceId===record.sourceKey);})();
   const object=objectsById.get(identity.destinationId);
   if(!destinationMatches||!object||object.kind!==destinationType)throw appSheetReadinessError("canonical_master_destination_missing");
+  const fingerprint=fingerprintByKey.get(canonicalJson([record.sourceTable,record.sourceKey]));
+  const current=destinationType==="member"?membersById.get(identity.destinationId):skusById.get(identity.destinationId);
+  if(!fingerprint||fingerprint.destinationId!==identity.destinationId||fingerprint.operationVersion===undefined||
+     object.version!==fingerprint.operationVersion||!current||
+     appSheetCanonicalCurrentDestinationHash(current,destinationType as "member"|"sku")!==fingerprint.dataHash)
+   throw appSheetReadinessError("canonical_master_destination_changed_after_identity_review",{destinationType,sourceKey:record.sourceKey});
+  if(destinationType==="sku"){
+   const sku=skusById.get(identity.destinationId)!;
+   if(sku.active)throw appSheetReadinessError("canonical_sku_must_remain_inactive_until_authority_activation",{skuId:sku.id});
+   const activatedSnapshot={...sku,active:true};
+   const activatedVersion=fingerprint.operationVersion+1;
+   if(!Number.isSafeInteger(activatedVersion)||activatedVersion>2147483646)
+    throw appSheetReadinessError("canonical_sku_operation_version_exhausted",{skuId:sku.id});
+   skuActivationPlan.push({skuId:sku.id,sourceKey:record.sourceKey,baselineHash:fingerprint.dataHash,baselineVersion:fingerprint.operationVersion,
+    activatedHash:appSheetCanonicalCurrentDestinationHash(activatedSnapshot,"sku"),activatedVersion,snapshot:activatedSnapshot});
+  }
   masterRecordKeys.add(canonicalJson([record.sourceTable,record.sourceKey]));
  }
  if(masterRecordKeys.size!==masterRecords.length)throw appSheetReadinessError("canonical_master_source_identity_ambiguous");
@@ -772,11 +798,291 @@ async function requireVerifiedAppSheetReplacement(ctx:CommandContext,captureId:s
    firstReadAt:capture.firstReadAt,verificationStartedAt:capture.verificationStartedAt,verificationCompletedAt:capture.verificationCompletedAt,
    cutoffAt:capture.cutoffAt,stability:capture.stability},
   appliedDefinitionHash:definition.appliedHash,
-  master:{id:master.id,fileHash:master.fileHash,sourceRecords:masterRecords.length,projectionHash:definition.projectionHash,commitSha:definition.commitSha,
+  master:{id:master.id,fileHash:master.fileHash,sourceRecords:masterRecords.length,projectionHash:definition.projectionHash,
+   destinationIdentity:definition.destinationIdentity,commitSha:definition.commitSha,
    technicalReviewHash:definition.reviewHash,backupManifestHash:definition.backupManifestHash},
+  skuActivationPlan:skuActivationPlan.sort((left,right)=>left.skuId.localeCompare(right.skuId)),
   history:{id:history.id,fileHash:history.fileHash,sourceRecords:historyRecords.length,facts:historyFacts.length,publicationFingerprint:publication.fingerprint,
    projectionHash:String(stage.projectionHash),commitSha:String(historyTechnicalReview.commitSha),technicalReviewHash:historyReviewHash},
  };
+}
+
+const canonicalSkuActivationAuditAction="appsheet.canonical_sku_activated";
+type CanonicalSkuActivationReceiptEntry=Omit<CanonicalSkuActivationPlan,"snapshot">;
+function canonicalSkuActivationReceiptManifest(proof:AppSheetReplacementProof,entries:CanonicalSkuActivationReceiptEntry[]){
+ return {schemaVersion:1,captureId:proof.capture.captureId,snapshotId:proof.master.id,projectionHash:proof.master.projectionHash,
+  destinationIdentity:proof.master.destinationIdentity,entries};
+}
+/** Make the reviewed, inactive SKU projection available only in the AuthorityActivated transaction. */
+async function activateReviewedCanonicalSkus(ctx:CommandContext,proof:AppSheetReplacementProof){
+ const plans=proof.skuActivationPlan;
+ const ids=plans.map(plan=>plan.skuId);
+ const [skus,objects]=await Promise.all([
+  ids.length?ctx.tx.catalogSku.findMany({where:{id:{in:ids}}}):Promise.resolve([]),
+  ids.length?ctx.tx.operationObject.findMany({where:{id:{in:ids}}}):Promise.resolve([]),
+ ]);
+ const skuById=new Map(skus.map(sku=>[sku.id,sku])),objectById=new Map(objects.map(object=>[object.id,object]));
+ for(const plan of plans){
+  const sku=skuById.get(plan.skuId),object=objectById.get(plan.skuId);
+  if(!sku||!object||object.kind!=="sku"||object.version!==plan.baselineVersion||
+     appSheetCanonicalCurrentDestinationHash(sku,"sku")!==plan.baselineHash||sku.sourceSystem!==APPSHEET_CANONICAL_SOURCE_SYSTEM||sku.sourceId!==plan.sourceKey)
+   throw appSheetReadinessError("canonical_sku_changed_before_activation",{skuId:plan.skuId});
+ }
+ const entries:CanonicalSkuActivationReceiptEntry[]=[];
+ for(const plan of plans){
+  const current=skuById.get(plan.skuId)!;
+  let activated=current;
+  let activatedVersion=plan.baselineVersion;
+  if(!current.active){
+   activated=await ctx.tx.catalogSku.update({where:{id:plan.skuId},data:{active:true}});
+   const changed=await ctx.tx.operationObject.updateMany({where:{id:plan.skuId,kind:"sku",version:plan.baselineVersion},data:{version:{increment:1}}});
+   if(changed.count!==1)throw appSheetReadinessError("canonical_sku_version_changed_during_activation",{skuId:plan.skuId});
+   activatedVersion=plan.baselineVersion+1;
+  }
+  const activatedSnapshot:CanonicalSkuSnapshot={id:activated.id,code:activated.code,name:activated.name,variety:activated.variety,category:activated.category,
+   unit:activated.unit,active:activated.active,sourceSystem:activated.sourceSystem,sourceId:activated.sourceId,appSheet:activated.appSheet};
+  const activatedHash=appSheetCanonicalCurrentDestinationHash(activatedSnapshot,"sku");
+  if(activatedHash!==plan.activatedHash||activatedVersion!==plan.activatedVersion)
+   throw appSheetReadinessError("canonical_sku_activation_result_mismatch",{skuId:plan.skuId});
+  const entry={skuId:plan.skuId,sourceKey:plan.sourceKey,baselineHash:plan.baselineHash,baselineVersion:plan.baselineVersion,
+   activatedHash,activatedVersion};
+  entries.push(entry);
+  await ctx.tx.operationAudit.create({data:{actorId:ctx.actor.id,action:canonicalSkuActivationAuditAction,objectId:plan.skuId,requestId:ctx.envelope.requestId,
+   details:json({schemaVersion:1,captureId:proof.capture.captureId,snapshotId:proof.master.id,projectionHash:proof.master.projectionHash,
+    destinationIdentity:proof.master.destinationIdentity,...entry,snapshot:activatedSnapshot})}});
+ }
+ return canonicalSkuActivationReceiptManifest(proof,entries);
+}
+
+const canonicalSkuMutationAuditAction="appsheet.canonical_sku_mutation";
+const canonicalSkuMutationCommands=["CatalogSkuUpdated","CatalogueSheetSaved"] as const;
+function canonicalSkuSnapshot(value:unknown):CanonicalSkuSnapshot|null{
+ const row=asJsonObject(value);
+ if(!row||typeof row.id!=="string"||typeof row.code!=="string"||typeof row.name!=="string"||typeof row.variety!=="string"||
+   typeof row.category!=="string"||typeof row.unit!=="string"||typeof row.active!=="boolean"||
+   !(row.sourceSystem===null||typeof row.sourceSystem==="string")||!(row.sourceId===null||typeof row.sourceId==="string")||
+   !Object.hasOwn(row,"appSheet"))return null;
+ return {id:row.id,code:row.code,name:row.name,variety:row.variety,category:row.category,unit:row.unit,active:row.active,
+  sourceSystem:row.sourceSystem,sourceId:row.sourceId,appSheet:row.appSheet};
+}
+
+/** Preserve a full hash-chain edge for SKU commands whose API result may be partial. */
+export async function recordAppSheetCanonicalSkuMutation(ctx:CommandContext,beforeValue:unknown,afterValue:unknown,responseAppSheet?:unknown){
+ const before=canonicalSkuSnapshot(beforeValue),after=canonicalSkuSnapshot(afterValue);
+ if(!before||!after||after.sourceSystem!==APPSHEET_CANONICAL_SOURCE_SYSTEM)return;
+ if(ctx.envelope.command!=="CatalogSkuUpdated"&&ctx.envelope.command!=="CatalogueSheetSaved")return;
+ const resultingVersion=ctx.envelope.expectedVersion+1;
+ const beforeHash=appSheetCanonicalCurrentDestinationHash(before,"sku"),afterHash=appSheetCanonicalCurrentDestinationHash(after,"sku");
+ await ctx.tx.operationAudit.create({data:{actorId:ctx.actor.id,action:canonicalSkuMutationAuditAction,objectId:after.id,requestId:ctx.envelope.requestId,
+  details:json({schemaVersion:1,command:ctx.envelope.command,skuId:after.id,sourceId:after.sourceId,sourceSystem:after.sourceSystem,
+   baselineVersion:ctx.envelope.expectedVersion,resultingVersion,beforeHash,afterHash,snapshot:after,
+   ...(ctx.envelope.command==="CatalogueSheetSaved"?{responseAppSheet:responseAppSheet??null}:{})})}});
+}
+
+type CanonicalSkuMutationCandidate={sku:CanonicalSkuSnapshot;sourceKey:string;activatedVersion:number;currentVersion:number;activatedHash:string;currentHash:string};
+/** Accept only the AuthorityActivated receipt plus contiguous, server-recorded mutations after SKU activation. */
+async function canonicalSkuMutationChainIds(tx:Tx,candidates:CanonicalSkuMutationCandidate[]):Promise<Set<string>>{
+ const eligible=new Set<string>(),valid=candidates.filter(candidate=>Number.isSafeInteger(candidate.activatedVersion)&&candidate.activatedVersion>=0&&
+  Number.isSafeInteger(candidate.currentVersion)&&candidate.currentVersion>=candidate.activatedVersion);
+ if(!valid.length)return eligible;
+ const receipts=await tx.commandReceipt.findMany({where:{OR:valid.map(candidate=>({targetId:candidate.sku.id,resultingVersion:{gt:candidate.activatedVersion}}))},
+  orderBy:[{targetId:"asc"},{resultingVersion:"asc"}],select:{requestId:true,actorId:true,targetId:true,command:true,response:true,resultingVersion:true,committedAt:true}});
+ const mutationReceipts=receipts.filter(receipt=>canonicalSkuMutationCommands.includes(receipt.command as typeof canonicalSkuMutationCommands[number]));
+ const requestIds=mutationReceipts.map(receipt=>receipt.requestId),targetIds=[...new Set(mutationReceipts.map(receipt=>receipt.targetId))];
+ const [commandAudits,mutationAudits]=requestIds.length?await Promise.all([
+  tx.operationAudit.findMany({where:{objectId:{in:targetIds},action:{in:[...canonicalSkuMutationCommands]},requestId:{in:requestIds}},
+   select:{actorId:true,action:true,objectId:true,requestId:true,details:true,createdAt:true}}),
+  tx.operationAudit.findMany({where:{objectId:{in:targetIds},action:canonicalSkuMutationAuditAction,requestId:{in:requestIds}},
+   select:{actorId:true,action:true,objectId:true,requestId:true,details:true,createdAt:true}}),
+ ]):[[],[]];
+ const receiptsBySku=new Map<string,typeof receipts>(),commandAuditsByRequest=new Map<string,typeof commandAudits>(),mutationAuditsByRequest=new Map<string,typeof mutationAudits>();
+ for(const receipt of receipts){const rows=receiptsBySku.get(receipt.targetId)??[];rows.push(receipt);receiptsBySku.set(receipt.targetId,rows);}
+ for(const row of commandAudits){const key=`${row.objectId}\0${row.requestId??""}\0${row.action}`,rows=commandAuditsByRequest.get(key)??[];rows.push(row);commandAuditsByRequest.set(key,rows);}
+ for(const row of mutationAudits){const key=`${row.objectId}\0${row.requestId??""}`,rows=mutationAuditsByRequest.get(key)??[];rows.push(row);mutationAuditsByRequest.set(key,rows);}
+ for(const candidate of valid){
+  const {sku,sourceKey,activatedVersion,currentVersion,activatedHash,currentHash}=candidate;
+  const rows=receiptsBySku.get(sku.id)??[];
+  if(rows.length!==currentVersion-activatedVersion||rows.some(receipt=>!canonicalSkuMutationCommands.includes(receipt.command as typeof canonicalSkuMutationCommands[number])))continue;
+  if(!rows.length){if(currentHash===activatedHash)eligible.add(sku.id);continue;}
+  let expectedVersion=activatedVersion+1,latestHash=activatedHash,ok=true;
+  for(const receipt of rows){
+   if(receipt.resultingVersion!==expectedVersion++||receipt.resultingVersion>currentVersion||receipt.targetId!==sku.id||
+      !canonicalSkuMutationCommands.includes(receipt.command as typeof canonicalSkuMutationCommands[number])||
+      !(receipt.committedAt instanceof Date)||!Number.isFinite(receipt.committedAt.getTime())){ok=false;break;}
+   const genericRows=commandAuditsByRequest.get(`${sku.id}\0${receipt.requestId}\0${receipt.command}`)??[];
+   const mutationRows=mutationAuditsByRequest.get(`${sku.id}\0${receipt.requestId}`)??[];
+   if(genericRows.length!==1||mutationRows.length!==1){ok=false;break;}
+   const generic=genericRows[0]!,mutation=mutationRows[0]!,genericDetails=asJsonObject(generic.details),details=asJsonObject(mutation.details);
+   const response=asJsonObject(receipt.response),result=response&&asJsonObject(response.result),snapshot=details&&canonicalSkuSnapshot(details.snapshot);
+   if(generic.actorId!==receipt.actorId||generic.requestId!==receipt.requestId||generic.objectId!==sku.id||
+      !(generic.createdAt instanceof Date)||!Number.isFinite(generic.createdAt.getTime())||genericDetails?.version!==receipt.resultingVersion||
+      mutation.actorId!==receipt.actorId||mutation.requestId!==receipt.requestId||mutation.objectId!==sku.id||
+      !(mutation.createdAt instanceof Date)||!Number.isFinite(mutation.createdAt.getTime())||!details||details.schemaVersion!==1||
+      details.command!==receipt.command||details.skuId!==sku.id||details.sourceSystem!==APPSHEET_CANONICAL_SOURCE_SYSTEM||details.sourceId!==sourceKey||
+      details.baselineVersion!==receipt.resultingVersion-1||details.resultingVersion!==receipt.resultingVersion||details.beforeHash!==latestHash||
+      !snapshot||snapshot.id!==sku.id||snapshot.sourceSystem!==APPSHEET_CANONICAL_SOURCE_SYSTEM||snapshot.sourceId!==sourceKey||
+      appSheetCanonicalCurrentDestinationHash(snapshot,"sku")!==details.afterHash||!response||response.requestId!==receipt.requestId||
+      response.targetId!==sku.id||response.version!==receipt.resultingVersion||!result){ok=false;break;}
+   if(receipt.command==="CatalogSkuUpdated"){
+    const responseSku=result.sku&&canonicalSkuSnapshot(result.sku);
+    if(!responseSku||appSheetCanonicalCurrentDestinationHash(responseSku,"sku")!==details.afterHash){ok=false;break;}
+   }else if(result.skuId!==sku.id||canonicalJson(result.appSheet)!==canonicalJson(details.responseAppSheet)){ok=false;break;}
+   latestHash=String(details.afterHash);
+  }
+  if(ok&&expectedVersion===currentVersion+1&&latestHash===currentHash)eligible.add(sku.id);
+ }
+ return eligible;
+}
+
+/** Return SKU identities that were reviewed and activated by the active capture, then stayed on an auditable mutation chain. */
+export async function eligibleAppSheetCanonicalSkuIds(tx:Tx,captureId:string|null,onlySkuIds?:string[]):Promise<Set<string>>{
+ if(!captureId||onlySkuIds?.length===0)return new Set();
+ let capture:Awaited<ReturnType<typeof requireStableAppSheetCapture>>;
+ try{capture=await requireStableAppSheetCapture(tx,captureId);}catch(error){
+  if(error instanceof OperationError&&error.code==="APPSHEET_REPLACEMENT_NOT_READY")return new Set();
+  throw error;
+ }
+ const destinationIdentity=productionAppSheetDestinationIdentity();
+ if(!destinationIdentity)return new Set();
+ const authority=await tx.operationAuthority.findUnique({where:{id:"operations"},select:{mode:true,cutoverProfile:true,captureManifestId:true,epoch:true,approvedBy:true}});
+ if(authority?.mode!=="active"||authority.cutoverProfile!=="appsheet-replacement"||authority.captureManifestId!==capture.captureId||!authority.approvedBy||
+    !Number.isSafeInteger(authority.epoch))return new Set();
+ const snapshots=await tx.legacyImportSnapshot.findMany({where:{sourceSystem:APPSHEET_CANONICAL_SOURCE_SYSTEM,captureManifestId:capture.captureId,
+  fileHash:capture.manifestHash,importerVersion:APPSHEET_CANONICAL_IMPORTER_VERSION},select:{id:true,status:true,createdBy:true,reviewedBy:true,reviewedAt:true,
+  controls:true,coverage:true,fileHash:true,sourceSystem:true,importerVersion:true}});
+ if(snapshots.length!==1)return new Set();
+ const snapshot=snapshots[0]!,controls=asJsonObject(snapshot.controls),projection=controls&&asJsonObject(controls.appSheetCanonical);
+ const stageContext=projection&&asJsonObject(projection.stageContext),projectionHash=typeof projection?.projectionHash==="string"?projection.projectionHash:"";
+ if(snapshot.status!=="reviewed"||!snapshot.reviewedBy||snapshot.reviewedBy===snapshot.createdBy||!snapshot.reviewedAt||snapshot.fileHash!==capture.manifestHash||
+  snapshot.sourceSystem!==APPSHEET_CANONICAL_SOURCE_SYSTEM||snapshot.importerVersion!==APPSHEET_CANONICAL_IMPORTER_VERSION||!stageContext||stageContext.target!=="production"||
+  stageContext.destinationIdentity!==destinationIdentity||!hashPattern.test(projectionHash))return new Set();
+ const reviewer=await tx.user.findUnique({where:{id:snapshot.reviewedBy},select:{active:true}});
+ if(!reviewer?.active)return new Set();
+ const [records,allReceipts]=await Promise.all([
+  tx.legacySourceRecord.findMany({where:{snapshotId:snapshot.id},select:{id:true,sourceTable:true,sourceKey:true,contentHash:true,fileHash:true,importerVersion:true,treatment:true}}),
+  tx.commandReceipt.findMany({where:{targetId:"operations",command:"AuthorityActivated"},orderBy:{resultingVersion:"desc"},
+   select:{requestId:true,actorId:true,targetId:true,command:true,response:true,resultingVersion:true,authorityEpoch:true,committedAt:true}}),
+ ]);
+ const skuRecords=records.filter(record=>record.sourceTable==="D_Catalogo_Mercaderia"),
+  fingerprints=Array.isArray(projection.destinationFingerprints)?projection.destinationFingerprints.map(asJsonObject):[];
+ const identityCount=records.length;
+ if(!skuRecords.length||records.some(record=>!record.sourceKey||record.fileHash!==snapshot.fileHash||record.importerVersion!==snapshot.importerVersion||record.treatment!=="fact_candidate"))return new Set();
+ const tableCoverageRaw=asJsonObject(snapshot.coverage),tableProjection=tableCoverageRaw&&asJsonObject(tableCoverageRaw.appSheetCanonical),tables=Array.isArray(tableProjection?.tables)?tableProjection.tables.map(asJsonObject):null;
+ if(!tables||tables.some(table=>!table))return new Set();
+ for(const tableName of ["C_Cliente","D_Catalogo_Mercaderia"]){
+  const actual=records.filter(record=>record.sourceTable===tableName).length,declared=tables.find(table=>table!.sourceTable===tableName);
+  if(!declared||declared!.sourceRecordCount!==actual||declared!.canonicalTargetCount!==actual||declared!.blockingExceptionCount!==0||declared!.reviewExceptionCount!==0)return new Set();
+ }
+ if(fingerprints.length!==identityCount||fingerprints.some(row=>!row))return new Set();
+ const sourceKeys=skuRecords.map(record=>record.sourceKey),[identities,snapshotReviews]=await Promise.all([
+  tx.legacyIdentity.findMany({where:{sourceSystem:APPSHEET_CANONICAL_SOURCE_SYSTEM,sourceTable:"D_Catalogo_Mercaderia",sourceKey:{in:sourceKeys}},
+   select:{id:true,sourceSystem:true,sourceTable:true,sourceKey:true,destinationType:true,destinationId:true,approvedBy:true}}),
+  tx.operationAudit.findMany({where:{objectId:snapshot.id,action:canonicalIdentitiesReviewedAction},select:{actorId:true,requestId:true,details:true,createdAt:true},take:2}),
+ ]);
+ if(identities.length!==skuRecords.length||new Set(identities.map(identity=>identity.sourceKey)).size!==skuRecords.length||identities.some(identity=>identity.destinationType!=="sku"||identity.approvedBy===null))return new Set();
+ const snapshotReview=snapshotReviews[0]&&asJsonObject(snapshotReviews[0].details);
+ if(snapshotReviews.length!==1||snapshotReviews[0]!.actorId!==snapshot.reviewedBy||!snapshotReviews[0]!.requestId||
+  !(snapshotReviews[0]!.createdAt instanceof Date)||snapshotReviews[0]!.createdAt<snapshot.reviewedAt||!snapshotReview||snapshotReview.schemaVersion!==1||
+  snapshotReview.snapshotId!==snapshot.id||snapshotReview.captureId!==capture.captureId||snapshotReview.manifestHash!==capture.manifestHash||
+  snapshotReview.projectionHash!==projectionHash||snapshotReview.destinationIdentity!==destinationIdentity||snapshotReview.identityCount!==identityCount||
+  snapshotReview.expectedIdentityCount!==identityCount)return new Set();
+ const identityAudits=await tx.operationAudit.findMany({where:{objectId:{in:identities.map(identity=>identity.id)},action:canonicalIdentityReviewedAction},
+  select:{actorId:true,objectId:true,requestId:true,details:true,createdAt:true}});
+ const auditsByIdentity=new Map<string,typeof identityAudits>();
+ for(const auditRow of identityAudits){const rows=auditsByIdentity.get(auditRow.objectId)??[];rows.push(auditRow);auditsByIdentity.set(auditRow.objectId,rows);}
+ const recordByKey=new Map(skuRecords.map(record=>[record.sourceKey,record])),identityByKey=new Map(identities.map(identity=>[identity.sourceKey,identity]));
+ const fingerprintByKey=new Map<string,Record<string,unknown>>();
+ for(const raw of fingerprints){const row=raw!;if(row.sourceTable!=="D_Catalogo_Mercaderia")continue;
+  if(typeof row.sourceKey!=="string"||fingerprintByKey.has(row.sourceKey))return new Set();fingerprintByKey.set(row.sourceKey,row);}
+ if(fingerprintByKey.size!==skuRecords.length)return new Set();
+ const expectedAuthorityReceipts=allReceipts.filter(receipt=>{
+  const response=asJsonObject(receipt.response),result=response&&asJsonObject(response.result),activatedAuthority=result&&asJsonObject(result.authority);
+  return activatedAuthority?.mode==="active"&&activatedAuthority.cutoverProfile==="appsheet-replacement"&&activatedAuthority.captureManifestId===capture.captureId&&
+   activatedAuthority.epoch===authority.epoch&&activatedAuthority.approvedBy===authority.approvedBy;
+ });
+ if(expectedAuthorityReceipts.length!==1)return new Set();
+ const authorityReceipt=expectedAuthorityReceipts[0]!,authorityResponse=asJsonObject(authorityReceipt.response),authorityResult=authorityResponse&&asJsonObject(authorityResponse.result),
+  activatedAuthority=authorityResult&&asJsonObject(authorityResult.authority),activationManifest=authorityResult&&asJsonObject(authorityResult.appSheetSkuActivation),
+  manifestEntries=Array.isArray(activationManifest?.entries)?activationManifest.entries.map(asJsonObject):null;
+ if(!authorityResponse||authorityResponse.requestId!==authorityReceipt.requestId||authorityResponse.targetId!=="operations"||
+  authorityResponse.version!==authorityReceipt.resultingVersion||authorityReceipt.targetId!=="operations"||authorityReceipt.command!=="AuthorityActivated"||
+  authorityReceipt.actorId!==authority.approvedBy||authorityReceipt.authorityEpoch+1!==authority.epoch||
+  !(authorityReceipt.committedAt instanceof Date)||!Number.isFinite(authorityReceipt.committedAt.getTime())||!activatedAuthority||
+  !activationManifest||activationManifest.schemaVersion!==1||activationManifest.captureId!==capture.captureId||activationManifest.snapshotId!==snapshot.id||
+  activationManifest.projectionHash!==projectionHash||activationManifest.destinationIdentity!==destinationIdentity||!manifestEntries||
+  manifestEntries.length!==skuRecords.length||manifestEntries.some(entry=>!entry))return new Set();
+ const authorityAudits=await tx.operationAudit.findMany({where:{objectId:"operations",action:"AuthorityActivated",requestId:authorityReceipt.requestId},
+  select:{actorId:true,requestId:true,details:true,createdAt:true}});
+ if(authorityAudits.length!==1||authorityAudits[0]!.actorId!==authorityReceipt.actorId||authorityAudits[0]!.requestId!==authorityReceipt.requestId||
+  !(authorityAudits[0]!.createdAt instanceof Date)||!Number.isFinite(authorityAudits[0]!.createdAt.getTime())||
+  asJsonObject(authorityAudits[0]!.details)?.version!==authorityReceipt.resultingVersion)return new Set();
+ const entriesBySku=new Map<string,Record<string,unknown>>();
+ for(const entry of manifestEntries){const skuId=String(entry!.skuId);if(!skuId||entriesBySku.has(skuId))return new Set();entriesBySku.set(skuId,entry!);}
+ if(entriesBySku.size!==skuRecords.length)return new Set();
+ const skuIds=identities.map(identity=>identity.destinationId),[skus,objects,activationAudits]=await Promise.all([
+  tx.catalogSku.findMany({where:{id:{in:skuIds}},select:{id:true,code:true,name:true,variety:true,category:true,unit:true,active:true,sourceSystem:true,sourceId:true,appSheet:true}}),
+  tx.operationObject.findMany({where:{id:{in:skuIds}},select:{id:true,kind:true,version:true}}),
+  tx.operationAudit.findMany({where:{objectId:{in:skuIds},action:canonicalSkuActivationAuditAction,requestId:authorityReceipt.requestId},
+   select:{actorId:true,action:true,objectId:true,requestId:true,details:true,createdAt:true}}),
+ ]);
+ const skuById=new Map(skus.map(sku=>[sku.id,sku])),objectById=new Map(objects.map(object=>[object.id,object])),
+  activationAuditsBySku=new Map(activationAudits.map(row=>[row.objectId,row]));
+ if(activationAudits.length!==skuRecords.length)return new Set();
+ const candidates:CanonicalSkuMutationCandidate[]=[];
+ for(const identity of identities){
+  const record=recordByKey.get(identity.sourceKey),fingerprint=fingerprintByKey.get(identity.sourceKey),entry=entriesBySku.get(identity.destinationId),
+   sku=skuById.get(identity.destinationId),object=objectById.get(identity.destinationId),auditRow=activationAuditsBySku.get(identity.destinationId),
+   reviewRows=auditsByIdentity.get(identity.id)??[],reviewDetails=reviewRows.length===1?asJsonObject(reviewRows[0]!.details):null,
+   activationDetails=auditRow&&asJsonObject(auditRow.details),activatedSnapshot=activationDetails&&canonicalSkuSnapshot(activationDetails.snapshot);
+  if(!record||!fingerprint||!entry||!sku||!object||object.kind!=="sku"||!auditRow||auditRow.actorId!==authorityReceipt.actorId||
+   auditRow.requestId!==authorityReceipt.requestId||!(auditRow.createdAt instanceof Date)||!Number.isFinite(auditRow.createdAt.getTime())||!activationDetails||
+   reviewRows.length!==1||reviewRows[0]!.actorId!==snapshot.reviewedBy||reviewRows[0]!.requestId!==snapshotReviews[0]!.requestId||
+   !(reviewRows[0]!.createdAt instanceof Date)||reviewRows[0]!.createdAt<snapshot.reviewedAt||!reviewDetails||reviewDetails.schemaVersion!==1||
+   reviewDetails.identityId!==identity.id||reviewDetails.snapshotId!==snapshot.id||reviewDetails.captureId!==capture.captureId||reviewDetails.manifestHash!==capture.manifestHash||
+   reviewDetails.projectionHash!==projectionHash||reviewDetails.destinationIdentity!==destinationIdentity||reviewDetails.sourceRecordId!==record.id||
+   reviewDetails.sourceTable!==identity.sourceTable||reviewDetails.sourceKey!==identity.sourceKey||reviewDetails.sourceContentHash!==record.contentHash||
+   reviewDetails.destinationType!=="sku"||reviewDetails.destinationId!==identity.destinationId||reviewDetails.approvedBy!==snapshot.reviewedBy||
+   typeof fingerprint.destinationId!=="string"||fingerprint.destinationId!==identity.destinationId||fingerprint.destinationType!=="sku"||
+   typeof fingerprint.dataHash!=="string"||!hashPattern.test(fingerprint.dataHash)||typeof fingerprint.operationVersion!=="number"||
+   !Number.isSafeInteger(fingerprint.operationVersion)||fingerprint.operationVersion<0||reviewDetails.destinationDataHash!==fingerprint.dataHash||
+   entry.skuId!==identity.destinationId||entry.sourceKey!==record.sourceKey||entry.baselineHash!==fingerprint.dataHash||
+   entry.baselineVersion!==fingerprint.operationVersion||entry.activatedVersion!==fingerprint.operationVersion+1||
+   activationDetails.schemaVersion!==1||activationDetails.captureId!==capture.captureId||activationDetails.snapshotId!==snapshot.id||
+   activationDetails.projectionHash!==projectionHash||activationDetails.destinationIdentity!==destinationIdentity||activationDetails.skuId!==identity.destinationId||
+   activationDetails.sourceKey!==record.sourceKey||activationDetails.baselineHash!==entry.baselineHash||activationDetails.baselineVersion!==entry.baselineVersion||
+   activationDetails.activatedHash!==entry.activatedHash||activationDetails.activatedVersion!==entry.activatedVersion||!activatedSnapshot||
+   !activatedSnapshot.active||activatedSnapshot.id!==identity.destinationId||activatedSnapshot.sourceSystem!==APPSHEET_CANONICAL_SOURCE_SYSTEM||
+   activatedSnapshot.sourceId!==record.sourceKey||appSheetCanonicalCurrentDestinationHash(activatedSnapshot,"sku")!==entry.activatedHash||
+   object.version<entry.activatedVersion||sku.sourceSystem!==APPSHEET_CANONICAL_SOURCE_SYSTEM||sku.sourceId!==record.sourceKey)continue;
+  const entryWithoutExtras={skuId:entry.skuId,sourceKey:entry.sourceKey,baselineHash:entry.baselineHash,baselineVersion:entry.baselineVersion,
+   activatedHash:entry.activatedHash,activatedVersion:entry.activatedVersion};
+  const auditedEntry={skuId:activationDetails.skuId,sourceKey:activationDetails.sourceKey,baselineHash:activationDetails.baselineHash,
+   baselineVersion:activationDetails.baselineVersion,activatedHash:activationDetails.activatedHash,activatedVersion:activationDetails.activatedVersion};
+  if(canonicalJson(entryWithoutExtras)!==canonicalJson(auditedEntry))continue;
+  candidates.push({sku:activatedSnapshot,sourceKey:record.sourceKey,activatedVersion:entry.activatedVersion as number,currentVersion:object.version,
+   activatedHash:entry.activatedHash as string,currentHash:appSheetCanonicalCurrentDestinationHash(sku,"sku")});
+ }
+ const chainEligible=await canonicalSkuMutationChainIds(tx,candidates),selectedIds=new Set(onlySkuIds??[]);
+ return new Set([...chainEligible].filter(id=>!selectedIds.size||selectedIds.has(id)));
+}
+
+/** Keep native catalog rows intact; canonical rows must be reviewed and activated by the selected capture. */
+export async function requireEligibleAppSheetReplacementSkus(tx:Tx,skuIds:string[]):Promise<void>{
+ if(!skuIds.length)return;
+ const authority=await tx.operationAuthority.findUnique({where:{id:"operations"},select:{mode:true,cutoverProfile:true,captureManifestId:true}});
+ if(authority?.mode!=="active"||authority.cutoverProfile!=="appsheet-replacement")return;
+ const skus=await tx.catalogSku.findMany({where:{id:{in:[...new Set(skuIds)]}},select:{id:true,sourceSystem:true,sourceId:true}});
+ const imported=skus.filter(sku=>sku.sourceSystem!==null||sku.sourceId!==null),canonical=imported.filter(sku=>sku.sourceSystem===APPSHEET_CANONICAL_SOURCE_SYSTEM);
+ if(imported.length!==canonical.length)throw new OperationError(423,"APPSHEET_SKU_NOT_ELIGIBLE","El producto importado no pertenece a la captura AppSheet revisada por la autoridad activa.");
+ if(!canonical.length)return;
+ const eligible=await eligibleAppSheetCanonicalSkuIds(tx,authority.captureManifestId,canonical.map(sku=>sku.id));
+ const denied=canonical.find(sku=>!eligible.has(sku.id));
+ if(denied)throw new OperationError(423,"APPSHEET_SKU_NOT_ELIGIBLE","El producto AppSheet no pertenece a la captura activa revisada o perdió su cadena de aprobación.",{skuId:denied.id});
+}
+
+export async function requireEligibleAppSheetReplacementOrderSkus(tx:Tx,orderId:string){
+ const lines=await tx.operationOrderLine.findMany({where:{orderId},select:{skuId:true}});
+ await requireEligibleAppSheetReplacementSkus(tx,[...new Set(lines.map(line=>line.skuId))]);
 }
 
 type OpeningSourceKind="cash"|"stock";
@@ -1095,15 +1401,19 @@ registerCommand("AuthorityActivated",{kind:"authority",capability:"cutover.appro
   if(ctx.envelope.targetId!=="operations")throw new OperationError(400,"AUTHORITY_ID","Circuito inválido");
   const input=authorityActivationSchema.parse(ctx.envelope.data);
   await requireCanonicalAppSheetReplacementProfile(ctx.tx,input.cutoverProfile);
+  let skuActivationManifest:ReturnType<typeof canonicalSkuActivationReceiptManifest>|undefined;
   if(input.cutoverProfile==="appsheet-replacement"){
    const proof=await requireVerifiedAppSheetReplacement(ctx,input.captureId!);
    await requireApprovedCutoverGates(ctx,input.cutoverProfile,input.captureId,proof);
    await requireReplacementOpeningGateEvidence(ctx,proof);
+   // The SKU activation, its per-SKU seals, and the authority transition share
+   // this serializable transaction. Any failed gate or write rolls all of them back.
+   skuActivationManifest=await activateReviewedCanonicalSkus(ctx,proof);
   }else await requireApprovedCutoverGates(ctx,input.cutoverProfile,input.captureId);
   const old=await ctx.tx.operationAuthority.findUnique({where:{id:"operations"}});
   if(old?.mode==="active")throw new OperationError(409,"AUTHORITY_ALREADY_ACTIVE","El circuito ya está activo");
   const authority=await ctx.tx.operationAuthority.upsert({where:{id:"operations"},create:{id:"operations",mode:"active",cutoverProfile:input.cutoverProfile,captureManifestId:input.cutoverProfile==="appsheet-replacement"?input.captureId:null,epoch:2,approvedBy:ctx.actor.id,evidence:json(input.evidence)},update:{mode:"active",cutoverProfile:input.cutoverProfile,captureManifestId:input.cutoverProfile==="appsheet-replacement"?input.captureId:null,epoch:{increment:1},approvedBy:ctx.actor.id,evidence:json(input.evidence)}});
-  return {authority};
+  return {authority,...(skuActivationManifest?{appSheetSkuActivation:skuActivationManifest}:{})};
  }});
 /** Field/route enforcement for compatibility APIs. Driver and clinical profiles have no broad legacy views. */
 export const legacyAccessGuard: RequestHandler = async (req,res,next)=>{
