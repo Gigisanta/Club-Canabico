@@ -233,8 +233,8 @@ test("CollectionVerified applies legacy balance only against the unchanged revie
   const spec = commandSpecs.get("CollectionVerified");
   assert.ok(spec);
   const result = await spec.execute(commandContext(fixture.tx, "CollectionVerified"));
-  assert.equal(result.result.appliedMinor, 6_000n);
-  assert.equal(result.result.excessMinor, 2_000n);
+  assert.equal(result.appliedMinor, 6_000n);
+  assert.equal(result.excessMinor, 2_000n);
   assert.equal(fixture.writes.includes("ledger.create"), true);
   assert.equal(fixture.writes.includes("collection.update"), true);
   assert.equal(fixture.writes.includes("credit.create"), true);
@@ -251,8 +251,8 @@ test("repeated CollectionVerified reports consume a reviewed legacy settlement o
   const second = await spec.execute(commandContext(fixture.tx, "CollectionVerified", { targetId: "collection-2", appliedMinor: "3000" }));
   const third = await spec.execute(commandContext(fixture.tx, "CollectionVerified", { targetId: "collection-3", appliedMinor: "2000" }));
 
-  assert.deepEqual([first.result.appliedMinor, second.result.appliedMinor, third.result.appliedMinor], [4_000n, 2_000n, 0n]);
-  assert.deepEqual([first.result.excessMinor, second.result.excessMinor, third.result.excessMinor], [4_000n, 1_000n, 2_000n]);
+  assert.deepEqual([first.appliedMinor, second.appliedMinor, third.appliedMinor], [4_000n, 2_000n, 0n]);
+  assert.deepEqual([first.excessMinor, second.excessMinor, third.excessMinor], [4_000n, 1_000n, 2_000n]);
   assert.equal(fixture.orderState.verifiedMinor, 6_000n, "Bombo receipts cannot apply beyond the 6,000 left after legacy paid");
   assert.equal(fixture.orderState.financialState, "paid");
   assert.deepEqual(["collection-1", "collection-2", "collection-3"].map(id => fixture.collectionReports.get(id)?.status),
@@ -265,7 +265,7 @@ test("MemberCreditApplied uses a reviewed legacy settlement when calculating the
   assert.ok(spec);
   const result = await spec.execute(commandContext(fixture.tx, "MemberCreditApplied"));
 
-  assert.equal(result.result.appliedMinor, 5_000n);
+  assert.equal(result.appliedMinor, 5_000n);
   assert.equal(fixture.orderState.verifiedMinor, 5_000n);
   assert.equal(fixture.orderState.financialState, "partially_paid", "legacy 4,000 plus applied credit 5,000 leaves 1,000 outstanding");
   assert.equal(fixture.writes.includes("credit.update"), true);
