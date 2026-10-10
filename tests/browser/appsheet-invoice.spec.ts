@@ -1216,9 +1216,10 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
   expect(injectedCollision).toBe(true);
   expect(injectedCollisionEnvelope).not.toBeNull();
   expect(injectedCollisionEnvelope!.data.lines).toEqual(expect.arrayContaining([expect.objectContaining({ id: collisionLineId })]));
-  expect(rolledBack.status()).toBeGreaterThanOrEqual(400);
-  await expect(editor.getByRole("alert")).toContainText("Resultado del guardado pendiente");
-  await expect(editor.getByTestId("appsheet-retry-invoice")).toBeEnabled();
+  expect(rolledBack.status()).toBe(409);
+  await expect(editor.getByRole("alert")).toContainText("Ya existe un registro con esos datos");
+  await expect(editor.getByTestId("appsheet-retry-invoice")).toHaveCount(0);
+  await expect(editor.getByTestId("appsheet-save-invoice")).toBeEnabled();
   await expect(field(editor, "note")).toHaveValue(note);
   await expect(historicalLine).toHaveCount(1);
   const afterRolledBackUpdate = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
@@ -1238,7 +1239,7 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
     response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/orders",
   );
   const updatedPromise = saveResponse(page, "InvoiceUpdated");
-  await editor.getByTestId("appsheet-retry-invoice").click();
+  await editor.getByTestId("appsheet-save-invoice").click();
   const updated = await updatedPromise;
   expect(invoiceUpdatedPosts).toHaveLength(3);
   const updatedStatus = updated.status();
