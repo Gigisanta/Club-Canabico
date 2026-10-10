@@ -649,7 +649,9 @@ test("AppSheet pending import binds a reviewed receipt and preserves partial ARS
     assert.equal(await db.appSheetPendingImportDisposition.count({ where: { batchId: plan.batchId } }), 16);
     assert.deepEqual(await beforePendingEffects(), operationsBeforePendingImport);
 
-    const declaredDestinationReviewedAt = new Date(Date.now() - 30_000).toISOString();
+    // The reviewer's claim must follow the backup snapshot; the server's
+    // persisted approval timestamp is captured independently during execution.
+    const declaredDestinationReviewedAt = new Date(Date.parse(pendingBinding.backupSnapshotAt) + 1).toISOString();
     const destinationReviewRequest = request(plan.batchId, "AppSheetPendingImportDestinationReviewed", {
       review: reviewFor(actorIds.destinationReviewer, "independent-pending-import-destination", declaredDestinationReviewedAt),
     }, 1);

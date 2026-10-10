@@ -99,7 +99,11 @@ test("plan review and staging normalize backup snapshot dates at the command tra
     });
 
     assert.deepEqual(retry, initial, "a JSON-backed retry must reconstruct the original wire envelope");
-    assert.equal(canonicalCommandBodyHash(retry), canonicalCommandBodyHash(initial),
+    const initialWire = JSON.parse(JSON.stringify(initial)) as typeof initial;
+    const retryWire = JSON.parse(JSON.stringify(retry)) as typeof retry;
+    assert.equal(Object.hasOwn(initialWire.data, "preservedUndefined"), false,
+      "undefined values are omitted by the JSON transport consumed by the API");
+    assert.equal(canonicalCommandBodyHash(retryWire), canonicalCommandBodyHash(initialWire),
       "Date and ISO inputs must produce the same idempotency body hash");
   }
 

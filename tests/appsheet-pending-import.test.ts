@@ -199,6 +199,7 @@ function reviewedSettlementFixture(order = commercialOrder(), capturedOrder = co
       findUniqueOrThrow: async () => account,
       findUnique: async () => account,
     },
+    operationAuthority: { findUnique: async () => null },
     operationAccess: { findUnique: async () => null },
     appSheetLegacySettlement: {
       findUnique: async () => settlement,
