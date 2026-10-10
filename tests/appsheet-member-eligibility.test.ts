@@ -4,7 +4,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import bcrypt from "bcryptjs";
 import { Prisma } from "@prisma/client";
-import { type CommandEnvelope } from "../shared/operations/contracts.js";
+import { profileCapabilities, type CommandEnvelope } from "../shared/operations/contracts.js";
 import { canonicalJson } from "../shared/operations/exact.js";
 import { canonicalCommandBodyHash } from "../server/operations/canonical.js";
 import {
@@ -65,6 +65,15 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
     const passwordText = randomUUID();
     const password = await bcrypt.hash(passwordText, 4);
     await db.user.create({ data: { id: ownerId, name: "Synthetic owner", email: `${ownerId}@appsheet-member.test`, password, role: "owner" } });
+    // This isolated fixture opts its synthetic owner into clinical review so the
+    // positive and rejected-member cases reach the clinical eligibility checks.
+    await db.operationAccess.create({ data: {
+      userId: ownerId,
+      profile: "owner",
+      enabled: true,
+      capabilities: [...profileCapabilities.owner, "clinical.review"],
+      scope: {},
+    } });
 
     const hash = (value: unknown) => createHash("sha256").update(typeof value === "string" ? value : canonicalJson(value), "utf8").digest("hex");
     const inputJson = (value: unknown): Prisma.InputJsonValue => {
