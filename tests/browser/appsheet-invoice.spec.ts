@@ -1730,7 +1730,12 @@ test("an empty AppSheet preorder shell saves as pending, rejects failed writes, 
   expect(await financeSnapshot(page)).toEqual(financeBefore);
 });
 
-test("an invoice line keeps its optional price-per-gram separate through draft editing and save", async ({ page }) => {
+test.describe(() => {
+  test.afterEach(async ({ page }) => {
+    await page.unrouteAll({ behavior: "wait" });
+  });
+
+  test("an invoice line keeps its optional price-per-gram separate through draft editing and save", async ({ page }) => {
   await page.route("**/api/operations/context", async route => {
     const response = await route.fetch();
     if (response.status() !== 200) return route.fulfill({ response });
@@ -1858,4 +1863,5 @@ test("an invoice line keeps its optional price-per-gram separate through draft e
     expect(Object.hasOwn(detail.order.quote.lines[index], "pricePerGramMinor")).toBe(false);
   }
   expect(detail.order.lines[0].revenueMinor).toBe("1201");
+  });
 });
