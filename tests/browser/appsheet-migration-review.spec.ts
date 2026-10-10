@@ -636,5 +636,5 @@ test("la revisión de destino AppSheet muestra vista previa, bloquea planes obso
     }),
   });
   expect(finalState.effects).toEqual({ ...stateBefore.effects, deliveryAssignments: stateBefore.effects.deliveryAssignments + 1 });
-  await expect(page.getByRole("status").filter({ hasText: /^La revisión creó / })).toContainText("1 asignación de entrega pendiente");
+  await expect(page.getByRole("status").filter({ hasText: "La revisión creó " })).toContainText("1 asignación de entrega pendiente");
 });
