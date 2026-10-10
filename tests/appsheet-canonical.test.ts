@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes, randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import test from "node:test";
 import {
@@ -24,9 +25,9 @@ import { requireAppSheetTechnicalReview } from "../shared/operations/appsheet-re
 import { definitionInventory, fixtureDate, hash, project, sourceSystem, spreadsheetId, technicalReview } from "./support/appsheet-canonical-fixture.js";
 
 const ISOLATED_TEST_DESTINATION_ID = appSheetDatabaseDestinationIdentity("isolated-test",
-  new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_canonical?schema=public"));
+  new URL("postgresql://127.0.0.1:5432/bombo_ui_canonical?schema=public"));
 const PRODUCTION_DESTINATION_ID = appSheetDatabaseDestinationIdentity("production",
-  new URL("postgresql://fixture:fixture@db.example.invalid:5432/bombo?schema=public"));
+  new URL("postgresql://db.example.invalid:5432/bombo?schema=public"));
 
 type FakeState = {
   manifests: Map<string, Record<string, unknown>>;
@@ -581,7 +582,10 @@ test("technical review is bound to the exact source commit", () => {
 
 test("capture-bound member review survives a later capture review and follows only its selected capture", async () => {
   const previousDatabaseUrl = process.env.DATABASE_URL;
-  const databaseUrl = "postgresql://synthetic:synthetic@127.0.0.1/bombo_ui_capture_review?schema=synthetic";
+  const credentialedDatabaseUrl = new URL("postgresql://127.0.0.1/bombo_ui_capture_review?schema=synthetic");
+  credentialedDatabaseUrl.username = randomUUID();
+  credentialedDatabaseUrl.password = randomBytes(32).toString("base64url");
+  const databaseUrl = credentialedDatabaseUrl.toString();
   process.env.DATABASE_URL = databaseUrl;
   try {
     const first = project({ captureRevision: "identity-review-capture-a" });

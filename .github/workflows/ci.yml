@@ -50,6 +50,17 @@ jobs:
           /usr/lib/postgresql/18/bin/createdb --host localhost --username raiz bombo_ui_wrong_target_ci
       - run: npm run build
       - run: npm test
+      - name: Repeat backup and restore after the concurrent suite
+        run: |
+          npx tsx --test --test-reporter=tap tests/operations-backup.test.ts | tee backup-restore-rehearsal.tap
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFile} from 'node:fs/promises';
+          const output = await readFile('backup-restore-rehearsal.tap', 'utf8');
+          assert.match(output, /^# pass [1-9][0-9]*$/m, 'the isolated rehearsal must execute its tests');
+          assert.match(output, /^# fail 0$/m, 'the isolated rehearsal must pass');
+          assert.match(output, /^# skipped 0$/m, 'the isolated rehearsal must cover the schema-default fixture');
+          NODE
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
       - run: npx playwright test --config=playwright.offline.config.ts

@@ -608,73 +608,56 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
     assert.ok(Number.isFinite(Date.parse(directConfirmedQuote.acceptance.acceptedAt)));
     assert.deepEqual(await countFinancialEffects(), financialEffectsBefore, "confirmar no emite cobros ni asienta caja");
 
-    const authorityObject = await db.operationObject.findUnique({ where: { id: "operations" }, select: { version: true } });
-    const suspendReplacementRequest = envelope("operations", "AuthoritySuspended", {
-      reason: "Synthetic lifecycle transition before legacy invoice compatibility coverage",
-    }, authorityObject?.version ?? 0);
-    const suspendReplacement = await call(suspendReplacementRequest);
-    assert.equal(suspendReplacement.response.status, 200, JSON.stringify(suspendReplacement.body));
-    const suspendedAuthority = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
-    assert.equal(suspendedAuthority.mode, "shadow");
-    assert.equal(suspendedAuthority.cutoverProfile, "appsheet-replacement");
-    await db.operationAuthority.update({ where: { id: "operations" }, data: { cutoverProfile: "legacy", mode: "active" } });
-    const legacyCompatibleId = `invoice-update-legacy-compatible-${randomUUID()}`;
-    const legacyCompatibleSaveRequest = envelope(legacyCompatibleId, "InvoiceSaved", inputWithoutMoto({ quantity: "1", preorder: true }));
-    const legacyCompatibleSave = await call(legacyCompatibleSaveRequest);
-    assert.equal(legacyCompatibleSave.response.status, 200, JSON.stringify(legacyCompatibleSave.body));
-    const legacyCompatibleState = await readOrderState(legacyCompatibleId);
-    const legacyCompatibleQuote = legacyCompatibleState.order.quote as Record<string, unknown>;
-    assert.equal(Object.hasOwn(legacyCompatibleQuote, "appSheetFormula"), false);
-    assert.equal((legacyCompatibleQuote as Record<string, unknown>).invoiceNumber, null, "el historial legacy conserva su numeración sin asignación automática");
-    const legacyCompatibleReceipt = await db.commandReceipt.findUniqueOrThrow({ where: { requestId: legacyCompatibleSaveRequest.requestId } });
-    const legacyCompatibleResponse = legacyCompatibleReceipt.response as Record<string, any>;
-    const legacyCompatibleConfirmRequest = envelope(legacyCompatibleId, "InvoiceConfirmed", { acceptance: { note: "Evidencia operativa del flujo legacy" } }, 1);
-    const legacyCompatibleConfirm = await call(legacyCompatibleConfirmRequest);
-    assert.equal(legacyCompatibleConfirm.response.status, 200, JSON.stringify(legacyCompatibleConfirm.body));
-    const legacyCompatibleConfirmed = await readOrderState(legacyCompatibleId);
-    const legacyCompatibleConfirmedQuote = legacyCompatibleConfirmed.order.quote as Record<string, any>;
-    assert.equal(legacyCompatibleConfirmed.order.commercialState, "confirmed", "el perfil legacy mantiene su compatibilidad");
-    assert.equal(legacyCompatibleConfirmedQuote.acceptance.acceptedBy, ownerId);
-    assert.equal(legacyCompatibleConfirmedQuote.acceptance.quoteVersion, 1);
-    assert.equal(legacyCompatibleConfirmedQuote.acceptance.snapshotHash, legacyCompatibleResponse.result.snapshotHash);
-
-    const pendingLegacyId = `invoice-update-legacy-pending-${randomUUID()}`;
-    const pendingLegacySaveRequest = envelope(pendingLegacyId, "InvoiceSaved", inputWithoutMoto({ quantity: "1", preorder: true }));
-    const pendingLegacySave = await call(pendingLegacySaveRequest);
-    assert.equal(pendingLegacySave.response.status, 200, JSON.stringify(pendingLegacySave.body));
-    const pendingLegacyState = await readOrderState(pendingLegacyId);
-    const pendingLegacyQuote = pendingLegacyState.order.quote as Record<string, unknown>;
-    assert.equal(Object.hasOwn(pendingLegacyQuote, "appSheetFormula"), false);
-    assert.equal((pendingLegacyQuote as Record<string, unknown>).invoiceNumber, null);
-    await db.operationAuthority.update({ where: { id: "operations" }, data: { cutoverProfile: "appsheet-replacement" } });
-    const beforePendingLegacyConfirm = await readReservationCounters();
-    const pendingLegacyConfirmRequest = envelope(pendingLegacyId, "InvoiceConfirmed", { acceptance: { note: "No reemplaza un cálculo pendiente" } }, 1);
-    const pendingLegacyConfirm = await call(pendingLegacyConfirmRequest);
-    assert.equal(pendingLegacyConfirm.response.status, 409, JSON.stringify(pendingLegacyConfirm.body));
-    assert.equal(pendingLegacyConfirm.body.code, "INVOICE_SNAPSHOT_RECALCULATION_REQUIRED");
-    assert.deepEqual(await readOrderState(pendingLegacyId), pendingLegacyState, "no recalcula, numera ni modifica el snapshot legacy al cambiar al perfil de reemplazo");
-    assert.equal(await db.appSheetInvoiceNumberReservation.findUnique({ where: { orderId: pendingLegacyId } }), null);
-    assert.equal(await db.commandReceipt.findUnique({ where: { requestId: pendingLegacyConfirmRequest.requestId } }), null);
-    assert.equal(await db.operationAudit.count({ where: { requestId: pendingLegacyConfirmRequest.requestId } }), 0);
-    assert.equal(await db.operationOutbox.count({ where: { requestId: pendingLegacyConfirmRequest.requestId } }), 0);
-    assert.deepEqual(await readReservationCounters(), beforePendingLegacyConfirm);
+    // Seed a historical snapshot without a verifiable calculation version
+    // while the replacement authority remains active. This keeps the command
+    // test focused on the stale snapshot guard instead of bypassing cutover.
+    const pendingHistoricalId = "invoice-update-historical-pending-" + randomUUID();
+    const pendingHistoricalSaveRequest = envelope(pendingHistoricalId, "InvoiceSaved", inputWithoutMoto({ quantity: "1", preorder: true }));
+    const pendingHistoricalSave = await call(pendingHistoricalSaveRequest);
+    assert.equal(pendingHistoricalSave.response.status, 200, JSON.stringify(pendingHistoricalSave.body));
+    const currentHistoricalState = await readOrderState(pendingHistoricalId);
+    const pendingHistoricalQuote = structuredClone(currentHistoricalState.order.quote) as Record<string, any>;
+    assert.ok(pendingHistoricalQuote.appSheetFormula, "la cotización de control tiene evidencia de cálculo v2");
+    delete pendingHistoricalQuote.appSheetFormula;
+    await db.operationOrder.update({ where: { id: pendingHistoricalId }, data: { quote: pendingHistoricalQuote } });
+    const pendingHistoricalReceipt = await db.commandReceipt.findUniqueOrThrow({ where: { requestId: pendingHistoricalSaveRequest.requestId } });
+    const pendingHistoricalState = await readOrderState(pendingHistoricalId);
+    assert.equal(Object.hasOwn(pendingHistoricalState.order.quote as Record<string, unknown>, "appSheetFormula"), false,
+      "la fixture histórica no conserva versión de reglas verificable");
+    const pendingHistoricalReservation = await db.appSheetInvoiceNumberReservation.findUniqueOrThrow({ where: { orderId: pendingHistoricalId } });
+    const beforePendingHistoricalConfirm = await readReservationCounters();
+    const pendingHistoricalConfirmRequest = envelope(pendingHistoricalId, "InvoiceConfirmed", { acceptance: { note: "No reemplaza un cálculo pendiente" } }, 1);
+    const pendingHistoricalConfirm = await call(pendingHistoricalConfirmRequest);
+    assert.equal(pendingHistoricalConfirm.response.status, 409, JSON.stringify(pendingHistoricalConfirm.body));
+    assert.equal(pendingHistoricalConfirm.body.code, "INVOICE_SNAPSHOT_RECALCULATION_REQUIRED");
+    assert.deepEqual(await readOrderState(pendingHistoricalId), pendingHistoricalState, "no recalcula ni modifica el snapshot histórico pendiente");
+    assert.deepEqual(await db.appSheetInvoiceNumberReservation.findUniqueOrThrow({ where: { orderId: pendingHistoricalId } }), pendingHistoricalReservation);
+    assert.deepEqual(await db.commandReceipt.findUniqueOrThrow({ where: { requestId: pendingHistoricalSaveRequest.requestId } }), pendingHistoricalReceipt,
+      "el rechazo conserva el recibo original de la cotización histórica");
+    assert.equal(await db.commandReceipt.findUnique({ where: { requestId: pendingHistoricalConfirmRequest.requestId } }), null);
+    assert.equal(await db.operationAudit.count({ where: { requestId: pendingHistoricalConfirmRequest.requestId } }), 0);
+    assert.equal(await db.operationOutbox.count({ where: { requestId: pendingHistoricalConfirmRequest.requestId } }), 0);
+    assert.deepEqual(await readReservationCounters(), beforePendingHistoricalConfirm);
     assert.deepEqual(await countFinancialEffects(), financialEffectsBefore);
 
-    const unknownRuleQuote = { ...pendingLegacyQuote, appSheetFormula: { schemaVersion: "appsheet-invoice-calculation/v999", ruleVersion: "appsheet-invoice-rules/v999" } };
-    await db.operationOrder.update({ where: { id: pendingLegacyId }, data: { quote: unknownRuleQuote } });
-    const unknownRuleState = await readOrderState(pendingLegacyId);
+    const unknownRuleQuote = { ...pendingHistoricalQuote, appSheetFormula: { schemaVersion: "appsheet-invoice-calculation/v999", ruleVersion: "appsheet-invoice-rules/v999" } };
+    await db.operationOrder.update({ where: { id: pendingHistoricalId }, data: { quote: unknownRuleQuote } });
+    const unknownRuleState = await readOrderState(pendingHistoricalId);
+    const pendingHistoricalReservationAfterVersionSeed = await db.appSheetInvoiceNumberReservation.findUniqueOrThrow({ where: { orderId: pendingHistoricalId } });
     const beforeUnknownRuleConfirm = await readReservationCounters();
-    const unknownRuleConfirmRequest = envelope(pendingLegacyId, "InvoiceConfirmed", { acceptance: { note: "Una versión no identificada también debe recalcularse" } }, 1);
+    const unknownRuleConfirmRequest = envelope(pendingHistoricalId, "InvoiceConfirmed", { acceptance: { note: "Una versión no identificada también debe recalcularse" } }, 1);
     const unknownRuleConfirm = await call(unknownRuleConfirmRequest);
     assert.equal(unknownRuleConfirm.response.status, 409, JSON.stringify(unknownRuleConfirm.body));
     assert.equal(unknownRuleConfirm.body.code, "INVOICE_SNAPSHOT_RECALCULATION_REQUIRED");
-    assert.deepEqual(await readOrderState(pendingLegacyId), unknownRuleState);
+    assert.deepEqual(await readOrderState(pendingHistoricalId), unknownRuleState);
+    assert.deepEqual(await db.appSheetInvoiceNumberReservation.findUniqueOrThrow({ where: { orderId: pendingHistoricalId } }), pendingHistoricalReservationAfterVersionSeed);
+    assert.deepEqual(await db.commandReceipt.findUniqueOrThrow({ where: { requestId: pendingHistoricalSaveRequest.requestId } }), pendingHistoricalReceipt,
+      "la versión desconocida no reescribe el recibo original de la cotización");
     assert.equal(await db.commandReceipt.findUnique({ where: { requestId: unknownRuleConfirmRequest.requestId } }), null);
     assert.equal(await db.operationAudit.count({ where: { requestId: unknownRuleConfirmRequest.requestId } }), 0);
     assert.equal(await db.operationOutbox.count({ where: { requestId: unknownRuleConfirmRequest.requestId } }), 0);
     assert.deepEqual(await readReservationCounters(), beforeUnknownRuleConfirm);
     assert.deepEqual(await countFinancialEffects(), financialEffectsBefore);
-    assert.equal((await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } })).cutoverProfile, "appsheet-replacement");
 
     const acceptedInput = { ...inputWithoutOptionalDefaults({ quantity: "1", preorder: false }), acceptance: { note: "Aceptación sintética de la cotización mostrada" } };
     const acceptedRequest = envelope(preorderId, "InvoiceUpdated", acceptedInput, 1);

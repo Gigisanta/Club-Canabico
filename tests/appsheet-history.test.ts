@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -30,12 +30,21 @@ import { pendingMappingFingerprintPayload, reconcileAppSheetPendingRows } from "
 import { appSheetHistoryPreviewDestinationIdentity, parseAppSheetHistoryCliArgs, privateAppSheetChildPath, runAppSheetHistoryCli } from "../scripts/appsheet-history.js";
 
 const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+
+function syntheticHistoryDatabaseUrl(schema: string, sslmode: "require" | "disable"): URL {
+  const url = new URL("postgresql://127.0.0.1:5432/bombo_ui_history");
+  url.username = randomUUID();
+  url.password = randomBytes(32).toString("base64url");
+  url.searchParams.set("schema", schema);
+  url.searchParams.set("sslmode", sslmode);
+  return url;
+}
 const HISTORY_TEST_DESTINATION_ID = appSheetDatabaseDestinationIdentity("isolated-test",
-  new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history?schema=history&sslmode=require"));
+  syntheticHistoryDatabaseUrl("history", "require"));
 const OTHER_HISTORY_TEST_DESTINATION_ID = appSheetDatabaseDestinationIdentity("isolated-test",
-  new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history?schema=other&sslmode=require"));
+  syntheticHistoryDatabaseUrl("other", "require"));
 const PRODUCTION_TEST_DESTINATION_ID = appSheetDatabaseDestinationIdentity("production",
-  new URL("postgresql://fixture:fixture@db.example.invalid:5432/bombo?schema=public&sslmode=require"));
+  new URL("postgresql://db.example.invalid:5432/bombo?schema=public&sslmode=require"));
 const pendingCapture = {
   captureId: "appsreal-0123456789abcdef",
   manifestHash: "a".repeat(64),
@@ -186,7 +195,7 @@ test("history CLI defaults to read-only preview and rejects unsafe apply argumen
 });
 
 test("history preview destination fingerprint errors expose only a safe code", () => {
-  const unsafeUrl = new URL("postgresql://fixture:private-secret@127.0.0.1:5432/bombo_ui_history?host=private-route.example");
+  const unsafeUrl = new URL("postgresql://127.0.0.1:5432/bombo_ui_history?host=private-route.example");
   assert.throws(() => appSheetHistoryPreviewDestinationIdentity("isolated", unsafeUrl), (error) =>
     error instanceof AppSheetHistoryStageError && error.code === "database_target_identity_invalid" &&
     !error.message.includes("private-secret") && !error.message.includes("private-route.example"));
@@ -608,22 +617,22 @@ test("replaying populated history compares persisted rows independent of query o
   assert.equal(mismatchedTargetTransactions, 0, "un destino distinto se rechaza antes de abrir la transacción");
   assert.equal(memory.writes, writesAfterStage, "el rechazo no modifica el staging ya replayable");
   assert.equal(HISTORY_TEST_DESTINATION_ID, appSheetDatabaseDestinationIdentity("isolated-test",
-    new URL("postgresql://other-user:other-password@127.0.0.1:5432/bombo_ui_history?schema=history&sslmode=disable")),
-  "las credenciales y TLS no forman parte de la identidad destino");
+    syntheticHistoryDatabaseUrl("history", "disable")),
+  "credenciales sintéticas distintas y TLS no forman parte de la identidad destino");
   assert.notEqual(HISTORY_TEST_DESTINATION_ID, OTHER_HISTORY_TEST_DESTINATION_ID,
     "el schema PostgreSQL distingue destinos dentro de la misma base");
   assert.equal(appSheetDatabaseDestinationIdentity("isolated-test",
-    new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history")),
+    new URL("postgresql://127.0.0.1:5432/bombo_ui_history")),
   appSheetDatabaseDestinationIdentity("isolated-test",
-    new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history?schema=public")),
+    new URL("postgresql://127.0.0.1:5432/bombo_ui_history?schema=public")),
   "el schema omitido usa el default de Prisma `public`");
   assert.notEqual(appSheetDatabaseDestinationIdentity("isolated-test",
-    new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history?schema=public")),
+    new URL("postgresql://127.0.0.1:5432/bombo_ui_history?schema=public")),
   appSheetDatabaseDestinationIdentity("isolated-test",
-    new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history?schema=Public")),
+    new URL("postgresql://127.0.0.1:5432/bombo_ui_history?schema=Public")),
   "los nombres de schema mantienen la distinción por mayúsculas");
   assert.throws(() => appSheetDatabaseDestinationIdentity("isolated-test",
-    new URL("postgresql://fixture:fixture@127.0.0.1:5432/bombo_ui_history?schema=history&host=replica.example")),
+    new URL("postgresql://127.0.0.1:5432/bombo_ui_history?schema=history&host=replica.example")),
   /appsheet_database_target_ambiguous/);
 
 });

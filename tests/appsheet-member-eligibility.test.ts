@@ -171,10 +171,13 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
     assert.ok(canonicalMemberDestination?.type === "member" && canonicalSkuDestination?.type === "sku");
     const canonicalMember = await db.operationMember.create({ data: { id: canonicalMemberDestination.id, ...canonicalMemberDestination.data } });
     const canonicalSku = await db.catalogSku.create({ data: { id: canonicalSkuDestination.id, ...canonicalSkuDestination.data } });
+    const canonicalIdentityIds: string[] = [];
     for (const destination of [canonicalMemberDestination, canonicalSkuDestination]) {
       await db.operationObject.create({ data: { id: destination.id, kind: destination.type, version: 0, createdBy: stagerId } });
+      const identityId = `synthetic-${destination.type}-identity-${randomUUID()}`;
+      canonicalIdentityIds.push(identityId);
       await db.legacyIdentity.create({ data: {
-        id: `synthetic-${destination.type}-identity-${randomUUID()}`,
+        id: identityId,
         sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM,
         sourceTable: destination.sourceTable,
         sourceKey: destination.sourceKey,
@@ -304,7 +307,7 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
     assert.equal(canonicalReview.body.result.status, "reviewed");
     assert.equal((await db.legacyImportSnapshot.findUniqueOrThrow({ where: { id: canonicalProjection.snapshotId } })).reviewedBy, ownerId);
     assert.equal(await db.operationAudit.count({ where: { objectId: canonicalProjection.snapshotId, action: "appsheet.canonical_identities_reviewed" } }), 1);
-    assert.equal(await db.operationAudit.count({ where: { objectId: { in: [canonicalMember.id, canonicalSku.id] }, action: "appsheet.canonical_identity_reviewed" } }), 2);
+    assert.equal(await db.operationAudit.count({ where: { objectId: { in: canonicalIdentityIds }, action: "appsheet.canonical_identity_reviewed" } }), 2);
     assert.equal((await call(`/operations/members/${canonicalMember.id}`)).response.status, 200,
       "la auditoría real de revisión deja visible al socio canónico");
 

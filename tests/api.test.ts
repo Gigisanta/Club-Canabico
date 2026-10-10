@@ -1,7 +1,7 @@
 import "dotenv/config";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import bcrypt from "bcryptjs";
 import { defaults } from "../shared/domain.js";
@@ -25,7 +25,12 @@ test(
       const sql=await readFile(new URL(`${folder.name}/migration.sql`,migrationRoot),'utf8');
       for(const statement of splitSqlStatements(sql))await db.$executeRawUnsafe(statement);
     }
-    const password = await bcrypt.hash("test-password-123", 4);
+    const fixtureCredentials = {
+      seededUser: randomBytes(32).toString("base64url"),
+      invitedUser: randomBytes(32).toString("base64url"),
+      invalidAttempt: randomBytes(32).toString("base64url"),
+    };
+    const password = await bcrypt.hash(fixtureCredentials.seededUser, 4);
     for (const [id, role] of [
       ["owner", "owner"],
       ["r1", "responsible"],
@@ -78,7 +83,7 @@ test(
         },
         body: JSON.stringify({
           email: `${id}@test.local`,
-          password: "test-password-123",
+          password: fixtureCredentials.seededUser,
         }),
       });
       assert.equal(res.status, 200);
@@ -116,7 +121,7 @@ test(
         const seat = await created.json();
         assert.equal(seat.email, null);
         assert.equal((await db.user.findUnique({ where: { id: seat.id } })), null);
-        const before = await fetch(base + "/auth/login", { method: "POST", headers: { Origin: "http://test.local", "Content-Type": "application/json" }, body: JSON.stringify({ email: "camila@test.local", password: "Camila-personal-123" }) });
+        const before = await fetch(base + "/auth/login", { method: "POST", headers: { Origin: "http://test.local", "Content-Type": "application/json" }, body: JSON.stringify({ email: "camila@test.local", password: fixtureCredentials.invitedUser }) });
         assert.equal(before.status, 401);
         const prepared = await call(`/team-seats/${seat.id}/invite`, "owner", { email: "Camila@Test.Local" });
         assert.equal(prepared.status, 200);
@@ -129,29 +134,29 @@ test(
         const invitation = await publicCall("/auth/invitation", { token });
         assert.equal(invitation.status, 200);
         assert.equal((await invitation.json()).name, "Camila");
-        assert.equal((await publicCall("/auth/activate", { token: "invalid", password: "Camila-personal-123" })).status, 404);
-        assert.equal((await publicCall("/auth/activate", { token, username: " OWNER ", password: "Camila-personal-123" })).status, 409);
+        assert.equal((await publicCall("/auth/activate", { token: "invalid", password: fixtureCredentials.invitedUser })).status, 404);
+        assert.equal((await publicCall("/auth/activate", { token, username: " OWNER ", password: fixtureCredentials.invitedUser })).status, 409);
         assert.equal((await db.teamSeat.findUniqueOrThrow({ where: { id: seat.id } })).activatedAt, null);
-        const activated = await publicCall("/auth/activate", { token, username: " Camila ", password: "Camila-personal-123" });
+        const activated = await publicCall("/auth/activate", { token, username: " Camila ", password: fixtureCredentials.invitedUser });
         assert.equal(activated.status, 200);
         const activatedUser = (await activated.json()).user;
         assert.equal(activatedUser.role, "admin");
         assert.equal(activatedUser.username, "camila");
-        assert.equal((await publicCall("/auth/activate", { token, password: "Camila-personal-123" })).status, 404);
+        assert.equal((await publicCall("/auth/activate", { token, password: fixtureCredentials.invitedUser })).status, 404);
         assert.equal((await publicCall("/auth/invitation", { token })).status, 404);
-        const camila = await publicCall("/auth/login", { username: " CAMILA ", password: "Camila-personal-123" });
+        const camila = await publicCall("/auth/login", { username: " CAMILA ", password: fixtureCredentials.invitedUser });
         assert.equal(camila.status, 200);
         cookies.admin = camila.headers.get("set-cookie")!.split(";")[0];
         for (const username of ["camila", "missing-user"]) {
-          const denied = await publicCall("/auth/login", { username, password: "Wrong-local-password" });
+          const denied = await publicCall("/auth/login", { username, password: fixtureCredentials.invalidAttempt });
           assert.equal(denied.status, 401);
           assert.equal(denied.headers.get("set-cookie"), null);
           assert.equal((await denied.json()).error, "Usuario o contraseña incorrectos");
         }
-        assert.equal((await publicCall("/auth/login", { username: "camila", email: "owner@test.local", password: "Camila-personal-123" })).status, 400);
+        assert.equal((await publicCall("/auth/login", { username: "camila", email: "owner@test.local", password: fixtureCredentials.invitedUser })).status, 400);
         await db.user.update({ where: { id: seat.id }, data: { active: false } });
         try {
-          assert.equal((await publicCall("/auth/login", { username: "camila", password: "Camila-personal-123" })).status, 401);
+          assert.equal((await publicCall("/auth/login", { username: "camila", password: fixtureCredentials.invitedUser })).status, 401);
         } finally {
           await db.user.update({ where: { id: seat.id }, data: { active: true } });
         }

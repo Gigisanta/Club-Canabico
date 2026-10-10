@@ -9,7 +9,6 @@ import { canonicalJson } from "../shared/operations/exact.js";
 import { APPSHEET_HISTORY_IMPORTER_VERSION } from "../shared/operations/appsheet-history.js";
 import { appSheetDatabaseDestinationIdentity } from "../server/operations/appsheet-database-target.js";
 import { splitSqlStatements } from "./migration-sql.js";
-import { syntheticPendingHistorySource } from "./support/appsheet-pending-import-fixture.js";
 
 const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 const sha256Canonical = (value: unknown) => sha256(canonicalJson(value));
@@ -40,6 +39,10 @@ test("AppSheet pending import binds a reviewed receipt and preserves partial ARS
     ALLOWED_ORIGIN: "http://appsheet-pending.test",
   });
 
+  // The fixture imports the canonical importer, which reaches server/db.ts.
+  // Load it only after the isolated TEST_DATABASE_URL has become DATABASE_URL
+  // so the process-wide Prisma singleton captures the intended destination.
+  const { syntheticPendingHistorySource } = await import("./support/appsheet-pending-import-fixture.js");
   const { db } = await import("../server/db.js");
   const { executeCommand } = await import("../server/operations/core.js");
   const { prepareAppSheetHistoryProjection, stageAppSheetHistoryProjection } = await import("../server/operations/appsheet-history.js");
