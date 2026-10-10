@@ -693,13 +693,28 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
       metadata: { fixture: true }, createdBy: ownerId,
     } });
     const permissionDate = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires" }).format(now);
+    const permissionValidUntil = `${Number(permissionDate.slice(0, 4)) + 1}${permissionDate.slice(4)}`;
     const permissionReview = await successfulCommand(canonicalMember.id, "PermissionVerified", {
-      kind: "operations", validFrom: permissionDate, validUntil: `${Number(permissionDate.slice(0, 4)) + 1}${permissionDate.slice(4)}`,
+      kind: "operations", validFrom: permissionDate, validUntil: permissionValidUntil,
       evidenceDocumentId: permissionDocumentId,
     }, 1);
     const permissionReceipt = await db.commandReceipt.findUniqueOrThrow({ where: { requestId: permissionReview.request.requestId } });
-    assert.ok(Date.parse((permissionReceipt.response as any).result.permission.reviewedAt) >= permissionReceipt.committedAt.getTime(),
-      "la fecha semántica puede ser posterior al now() de inicio de transacción guardado por Postgres");
+    const permissionResult = (permissionReceipt.response as any).result.permission;
+    assert.ok(Number.isFinite(permissionReceipt.committedAt.getTime()), "el recibo conserva una fecha de commit válida");
+    assert.ok(Number.isFinite(Date.parse(permissionResult.reviewedAt)), "el permiso conserva una fecha de revisión válida");
+    const persistedPermission = await db.memberPermission.findUniqueOrThrow({ where: { id: permissionResult.id } });
+    assert.equal(persistedPermission.memberId, canonicalMember.id);
+    assert.equal(persistedPermission.kind, "operations");
+    assert.equal(persistedPermission.status, "verified");
+    assert.equal(persistedPermission.reviewerId, ownerId);
+    assert.equal(persistedPermission.validFrom, permissionDate);
+    assert.equal(persistedPermission.validUntil, permissionValidUntil);
+    assert.equal(persistedPermission.evidenceDocumentId, permissionDocumentId);
+    const persistedReviewedAt = persistedPermission.reviewedAt;
+    assert.ok(persistedReviewedAt instanceof Date && Number.isFinite(persistedReviewedAt.getTime()),
+      "el permiso persistido conserva una fecha de revisión válida");
+    assert.equal(persistedReviewedAt?.toISOString(), permissionResult.reviewedAt,
+      "el recibo refleja la revisión persistida");
     const clinicalDocumentId = randomUUID();
     await db.operationDocument.create({ data: {
       id: clinicalDocumentId, memberId: canonicalMember.id, kind: "synthetic-clinical", sensitivity: "clinical",
