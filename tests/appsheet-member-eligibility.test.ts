@@ -105,7 +105,7 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
     const clinicalPasswordText = randomUUID();
     await db.user.create({ data: {
       id: clinicalId, name: "Synthetic clinical reader", email: `${clinicalId}@appsheet-member.test`,
-      password: await bcrypt.hash(clinicalPasswordText, 4), role: "clinical",
+      password: await bcrypt.hash(clinicalPasswordText, 4), role: "viewer",
     } });
     await db.operationAccess.create({ data: {
       userId: clinicalId, profile: "clinical", capabilities: profileCapabilities.clinical,

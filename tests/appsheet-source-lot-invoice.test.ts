@@ -364,7 +364,7 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
     const historyTechnicalReview = {
       schemaVersion: 2, reviewKind: "independent-technical", approved: true, bindingSource: "explicit-target-and-destination",
       reviewer: "synthetic-independent-source-history-reviewer", reviewedAt: new Date(Date.now() - 1_000).toISOString(),
-      findingsCount: 0, findingsHash: digest([]), commitSha,
+      findingsCount: 0, findingsHash: digestValue([]), commitSha,
     };
     const recordsHash = digestValue(sourceRecords.map(record => ({ id: record.id, sourceTable: record.sourceTable,
       sourceKey: record.sourceKey, contentHash: record.contentHash })));
@@ -385,7 +385,7 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
       actorUserId: stagerId, actor: "codex:appsheet-history-stage", reviewedBy: null, reviewedAt: null,
       effects: { stock: false, cashLedger: false, payments: false, deliveries: false, messages: false, documents: false, numbering: "not-generated" },
       backupManifestHash: historyBackup.manifestHash, backupSnapshotAt: historyBackup.snapshotAt, technicalReview: historyTechnicalReview,
-      recordsHash, factsHash, exceptionsHash: digest([]),
+      recordsHash, factsHash, exceptionsHash: digestValue([]),
     };
     const tableCounts = new Map<string, { records: number; facts: number }>();
     for (const record of sourceRecords) tableCounts.set(record.sourceTable, {
