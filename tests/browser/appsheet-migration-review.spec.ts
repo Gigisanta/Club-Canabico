@@ -549,7 +549,7 @@ test("la revisión de destino AppSheet muestra vista previa, bloquea planes obso
   const rollbackResponse = await rollbackResponsePromise;
   expect(rollbackResponse.status()).toBeGreaterThanOrEqual(500);
   await page.unroute("**/api/operations/commands", rollbackDestinationReview);
-  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("el mismo UUID mientras esta vista siga abierta");
   await expect(submit).toBeEnabled();
   expect(rollbackRequestId).toMatch(/^[0-9a-f-]{36}$/i);
   expect(await db.commandReceipt.findUnique({ where: { requestId: rollbackRequestId } })).toBeNull();
@@ -570,9 +570,10 @@ test("la revisión de destino AppSheet muestra vista previa, bloquea planes obso
   };
   await page.route("**/api/operations/commands", loseDestinationAcknowledgement);
   await submit.click();
-  await expect(page.getByRole("alert")).toContainText("el mismo UUID mientras esta vista siga abierta");
+  await expect(page.getByRole("alert")).toContainText("Se conserva el comando exacto para volver a recuperar el comprobante");
   expect(committedResponse).toBeDefined();
   expect(commandPosts).toHaveLength(2);
+  expect(commandPosts[1]).toEqual(commandPosts[0]);
   await page.unroute("**/api/operations/commands", loseDestinationAcknowledgement);
 
   const failedRefresh = page.waitForResponse(response =>

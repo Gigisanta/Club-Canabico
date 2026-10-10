@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import "../server/operations/finance.js";
-import { appSheetLegacyFinancialBasisHash, appSheetPendingOrderCommercialBasisHash } from "../server/operations/appsheet-pending-import.js";
+import { appSheetLegacyFinancialBasisHash, appSheetPendingOrderCommercialBasisHash, AppSheetPendingImportStageError,
+  prepareAppSheetPendingImportPlan } from "../server/operations/appsheet-pending-import.js";
 import { appSheetLegacyFinancialSummariesForOrders, projectAppSheetLegacyFinancialSummary } from "../server/operations/appsheet-legacy-financial-projection.js";
 import { commandSpecs, OperationError, type CommandContext, type Tx } from "../server/operations/core.js";
 import { assertManifest, type DeliveryManifestV1 } from "../src/offline/contracts.js";
-import { APPSHEET_PENDING_MAPPING_ID, APPSHEET_PENDING_SCHEMA_VERSION } from "../shared/operations/appsheet-pending.js";
+import { APPSHEET_PENDING_MAPPING_ID, APPSHEET_PENDING_SCHEMA_VERSION, pendingMappingFingerprintPayload } from "../shared/operations/appsheet-pending.js";
+import { APPSHEET_HISTORY_IMPORTER_VERSION } from "../shared/operations/appsheet-history.js";
 import { appSheetDatabaseDestinationIdentity } from "../server/operations/appsheet-database-target.js";
+import { legacyPayloadHash } from "../server/operations/legacy-upload-contract.js";
 import { APP_SHEET_HISTORY_REVIEW_TEST_DATABASE_URL, createAppSheetHistoryReviewFixture,
   withAppSheetHistoryReviewTestEnvironment } from "./support/appsheet-history-review-fixture.js";
 import { appSheetDeliveryInvoiceReferenceMatches, appSheetLegacyAdjustedFinancialState, appSheetLegacyAdjustedOutstanding,
@@ -424,6 +427,116 @@ test("read projection hides amounts when review, invoice total, or financial bas
   assert.equal(invalidRefund.legacyPaidMinor, null);
   assert.equal(invalidRefund.outstandingMinor, null);
   assert.equal(invalidRefund.legacyFinancialProjectionReason, "financial_basis_invalid");
+});
+
+function pendingProjectionPlanFixture(options: {
+  missingProjectionRows?: number[];
+  bindingMutation?: "sourceEvidenceHash";
+  queryRecordCount?: number;
+} = {}) {
+  const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+  const canonicalHash = (value: unknown) => sha256Canonical(value, hash);
+  const history = createAppSheetHistoryReviewFixture({ snapshotId: "pending-snapshot", captureId: "capture-1",
+    manifestHash: hash("capture-manifest"), dataHash: hash("capture-data"), projectionHash: hash("history-projection"),
+    destinationIdentity: appSheetDatabaseDestinationIdentity("isolated-test", new URL(APP_SHEET_HISTORY_REVIEW_TEST_DATABASE_URL)),
+    snapshotCreatedBy: "snapshot-creator", stageActorUserId: "history-stage-actor",
+    technicalReviewer: "history-technical-reviewer", sourceReviewer: "snapshot-reviewer" });
+  const mappingHash = hash(pendingMappingFingerprintPayload());
+  const sourceCount = 2;
+  const records = Array.from({ length: sourceCount }, (_, index) => {
+    const sourceRow = index + 2;
+    const sourceTable = "C_Facturacion";
+    const sourceKey = `invoice-${index + 1}`;
+    const original = { columns: [{ coordinate: `A${sourceRow}`, header: "Id_Factura", value: sourceKey }] };
+    const normalizedColumns = [{ coordinate: `A${sourceRow}`, header: "Id_Factura", value: sourceKey }];
+    const sourceEvidenceHash = canonicalHash({ sourceTable, sourceRow, sourceKey, original, normalizedColumns });
+    const reconciliation = {
+      schemaVersion: APPSHEET_PENDING_SCHEMA_VERSION,
+      mappingId: APPSHEET_PENDING_MAPPING_ID,
+      mappingHash,
+      source: { sourceTable, sourceRow, sourceKeyHash: canonicalHash(["appsheet-pending-key-v1", sourceTable, sourceKey]), sourceEvidenceHash },
+      capture: { captureId: history.capture.captureId, manifestHash: history.capture.manifestHash, mode: "stable", provisional: false },
+      dimensions: {
+        preSale: { status: "not_applicable", reasonCodes: [], evidenceFields: [], relationships: [] },
+        receivable: { status: "not_applicable", reasonCodes: [], evidenceFields: [], relationships: [] },
+        unpaidPurchase: { status: "not_applicable", reasonCodes: [], evidenceFields: [], relationships: [] },
+        delivery: { status: "not_applicable", reasonCodes: [], evidenceFields: [], relationships: [] },
+      },
+    };
+    if (index === 1 && options.bindingMutation === "sourceEvidenceHash") reconciliation.source.sourceEvidenceHash = hash("wrong-source-evidence");
+    const normalized = { columns: normalizedColumns,
+      ...(!options.missingProjectionRows?.includes(sourceRow) ? { pendingReconciliation: reconciliation } : {}) };
+    const recordProjection = {
+      sourceTable, sourceKey, sourceRow, fileHash: history.snapshot.fileHash,
+      importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION, original, normalized,
+      treatment: index === 0 ? "fact_candidate" : "archive_only", exceptions: [],
+    };
+    return {
+      id: `source-record-${index + 1}`, snapshotId: history.snapshot.id, ...recordProjection,
+      contentHash: legacyPayloadHash(recordProjection), resolution: null,
+    };
+  });
+  const coverage = history.snapshot.coverage;
+  const capture = history.capture;
+  const metrics = history.metrics;
+  metrics.recordCount = sourceCount;
+  metrics.archiveOnlyRecordCount = 1;
+  metrics.tableCounts.C_Facturacion = sourceCount;
+  coverage.source.dataRecordCount = sourceCount;
+  coverage.sheets[0].populatedSourceRows = sourceCount;
+  coverage.sheets[0].sourceRecordCount = sourceCount;
+  coverage.sheets[0].archiveOnlyCount = 1;
+  coverage.pages[0].endRow = sourceCount + 1;
+  coverage.totals.recordCount = sourceCount;
+  coverage.totals.archiveOnlyRecordCount = 1;
+  capture.dataRecordCount = sourceCount;
+  capture.pageManifest[0].endRow = sourceCount + 1;
+  capture.pageManifest[0].counts.rowsSerialized = sourceCount;
+  history.stageAudit.details.recordCount = sourceCount;
+  history.reviewAudit.details.counts.recordCount = sourceCount;
+  const returnedRecords = options.queryRecordCount === undefined ? records : records.slice(0, options.queryRecordCount);
+  history.stage.recordsHash = canonicalHash(returnedRecords.map(({ resolution: _resolution, ...record }) => record));
+  const tx = {
+    ...history.tx,
+    legacySourceRecord: {
+      count: async ({ where }: { where?: { OR?: unknown[] } }) => where?.OR ? 0 : sourceCount,
+      groupBy: async () => [{ sourceTable: "C_Facturacion", _count: { _all: sourceCount } }],
+      findMany: async () => returnedRecords,
+    },
+    operationAccess: { findUnique: async () => null },
+    user: { findUnique: async () => ({ id: "snapshot-reviewer", role: "owner", active: true, authorizationEpoch: 1 }) },
+  } as unknown as Tx;
+  return { tx, records, history };
+}
+
+test("pending plan creates four dispositions for every fully projected persisted source row", async () => {
+  const fixture = pendingProjectionPlanFixture();
+  const plan = await withAppSheetHistoryReviewTestEnvironment(() => prepareAppSheetPendingImportPlan(fixture.tx, {
+    snapshotId: fixture.history.snapshot.id,
+  }));
+  assert.equal(plan.dispositions.length, fixture.records.length * 4);
+  assert.deepEqual(new Set(plan.dispositions.map(row => row.sourceRecordId)), new Set(fixture.records.map(row => row.id)));
+});
+
+test("pending plan rejects an omitted projection even when the source-record hash matches", async () => {
+  const fixture = pendingProjectionPlanFixture({ missingProjectionRows: [3] });
+  await assert.rejects(withAppSheetHistoryReviewTestEnvironment(() => prepareAppSheetPendingImportPlan(fixture.tx, {
+    snapshotId: fixture.history.snapshot.id,
+  })), error => error instanceof AppSheetPendingImportStageError && error.code === "pending_source_projection_incomplete");
+});
+
+test("pending plan binds the source evidence hash to the persisted row content", async () => {
+  const fixture = pendingProjectionPlanFixture({ bindingMutation: "sourceEvidenceHash" });
+  await assert.rejects(withAppSheetHistoryReviewTestEnvironment(() => prepareAppSheetPendingImportPlan(fixture.tx, {
+    snapshotId: fixture.history.snapshot.id,
+  })), error => error instanceof AppSheetPendingImportStageError && error.code === "pending_source_binding_mismatch");
+});
+
+test("pending plan rejects a source-query result that misses rows in the bound coverage census", async () => {
+  const fixture = pendingProjectionPlanFixture({ queryRecordCount: 1 });
+  await assert.rejects(withAppSheetHistoryReviewTestEnvironment(() => prepareAppSheetPendingImportPlan(fixture.tx, {
+    snapshotId: fixture.history.snapshot.id,
+  })), error => error instanceof AppSheetPendingImportStageError && error.code === "pending_source_projection_incomplete");
 });
 
 test("offline manifest accepts known reviewed balances and rejects amounts on an unknown projection", () => {

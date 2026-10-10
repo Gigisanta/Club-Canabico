@@ -4,6 +4,7 @@ import { z } from "zod";
 import { canonicalJson } from "../../shared/operations/exact.js";
 import { requireBoundAppSheetHistoryStage } from "./appsheet-history-review.js";
 import {
+  APPSHEET_PENDING_TABLES,
   APPSHEET_PENDING_MAPPING_ID,
   APPSHEET_PENDING_SCHEMA_VERSION,
   pendingMappingFingerprintPayload,
@@ -314,6 +315,32 @@ export async function prepareAppSheetPendingImportPlan(
     .map(({ resolution: _resolution, ...record }) => record);
   if (sha256Canonical(sealedRecords, sha256) !== stage.recordsHash)
     fail("history_source_projection_content_changed");
+  const coverage = asObject(snapshot.coverage);
+  const coverageSheets = Array.isArray(coverage?.sheets)
+    ? coverage.sheets.map(asObject).filter((sheet): sheet is Record<string, unknown> => sheet !== null)
+    : [];
+  for (const sourceTable of APPSHEET_PENDING_TABLES) {
+    const tableRecords = records.filter(record => record.sourceTable === sourceTable);
+    const tableCoverage = coverageSheets.filter(sheet => sheet.sourceTable === sourceTable);
+    if (tableCoverage.length > 1 || (tableCoverage.length === 0
+      ? tableRecords.length !== 0
+      : tableCoverage[0]?.sourceRecordCount !== tableRecords.length))
+      fail("pending_source_projection_incomplete");
+    for (const record of tableRecords) {
+      const normalized = asObject(record.normalized);
+      const parsed = appSheetPendingReconciliationSchema.safeParse(normalized?.pendingReconciliation);
+      const normalizedColumns = normalized?.columns;
+      if (!parsed.success || !Array.isArray(normalizedColumns)) fail("pending_source_projection_incomplete");
+      const expectedSourceKeyHash = sha256Canonical(["appsheet-pending-key-v1", record.sourceTable, record.sourceKey], sha256);
+      if (!record.sourceKey || parsed.data.source.sourceKeyHash !== expectedSourceKeyHash)
+        fail("pending_source_key_binding_mismatch");
+      if (parsed.data.source.sourceTable !== record.sourceTable || parsed.data.source.sourceRow !== record.sourceRow)
+        fail("pending_source_binding_mismatch");
+      const expectedSourceEvidenceHash = sha256Canonical({ sourceTable: record.sourceTable, sourceRow: record.sourceRow,
+        sourceKey: record.sourceKey, original: record.original, normalizedColumns }, sha256);
+      if (parsed.data.source.sourceEvidenceHash !== expectedSourceEvidenceHash) fail("pending_source_binding_mismatch");
+    }
+  }
   const normalizedRecords = records.flatMap(record => {
     const candidate = asObject(record.normalized)?.pendingReconciliation;
     const parsed = appSheetPendingReconciliationSchema.safeParse(candidate);
