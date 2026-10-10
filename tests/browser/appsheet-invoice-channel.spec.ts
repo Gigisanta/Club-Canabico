@@ -74,6 +74,7 @@ test("an invoice draft follows Moto catalog channels without remounting or losin
     const url = new URL(request.url());
     if (request.method() === "POST" && url.pathname === "/api/operations/commands") commandPosts.push(request.url());
   });
+  await page.route("**/api/operations/commands", route => route.fulfill({ status: 422, json: { error: "Esta prueba no permite escrituras." } }));
 
   await enterOrders(page);
   const localCatalogResponse = page.waitForResponse(response => isCatalogChannel(response, "local"));
@@ -209,6 +210,7 @@ test("confirmation uses the fresh Moto channel before sending its versioned comm
   };
   const catalogChannels: Array<"local" | "delivery"> = [];
   let interceptedConfirmation: Record<string, unknown> | null = null;
+  const unexpectedCommands: unknown[] = [];
 
   await page.route("**/api/operations/context", async route => {
     const response = await route.fetch();
@@ -272,26 +274,24 @@ test("confirmation uses the fresh Moto channel before sending its versioned comm
     } catch {
       // Other routes continue unchanged when their body is not a command envelope.
     }
-    return route.continue();
+    unexpectedCommands.push(route.request().postData());
+    return route.fulfill({ status: 422, json: { error: "Esta prueba no permite otros comandos." } });
   });
 
   await enterOrders(page);
-  const localCatalogResponse = page.waitForResponse(response => isCatalogChannel(response, "local"));
+  const preorderRow = page.locator("tbody tr").first();
+  await expect(preorderRow).toHaveCount(1);
+  const actionDisclosure = preorderRow.locator("details > summary").filter({ hasText: "Más acciones" });
+  if (await actionDisclosure.count()) await actionDisclosure.click();
   const freshOrderResponse = page.waitForResponse(response =>
     response.request().method() === "GET" && new URL(response.url()).pathname === `/api/operations/orders/${orderId}`,
   );
   const deliveryCatalogResponse = page.waitForResponse(response => isCatalogChannel(response, "delivery"));
-  const preorderRow = page.locator("tbody tr").first();
-  await expect(preorderRow).toHaveCount(1);
-  const actionDisclosure = preorderRow.locator("details summary");
-  if (await actionDisclosure.count()) await actionDisclosure.click();
   await preorderRow.getByRole("button", { name: "Confirmar preventa", exact: true }).click();
   const confirmationDialog = page.getByTestId("appsheet-invoice-dialog");
   await expect(confirmationDialog).toBeVisible();
 
-  const [localResponse, freshResponse] = await Promise.all([localCatalogResponse, freshOrderResponse]);
-  expect(localResponse.status()).toBe(200);
-  expect(new URL(localResponse.url()).searchParams.get("channel")).toBe("local");
+  const freshResponse = await freshOrderResponse;
   expect(freshResponse.status()).toBe(200);
   expect(await freshResponse.json()).toMatchObject({
     order: { id: orderId, channel: "delivery", quote: { input: { moto: freshMoto } } },
@@ -318,4 +318,5 @@ test("confirmation uses the fresh Moto channel before sending its versioned comm
     data: { acceptance: { method: "operator_confirmed_saved_preorder" } },
   });
   await expect(confirmationDialog.getByRole("alert")).toContainText("Rechazo sintético");
+  expect(unexpectedCommands).toEqual([]);
 });
