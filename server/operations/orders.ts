@@ -180,6 +180,7 @@ function buildAppSheetInvoiceSnapshot(input:AppSheetInvoiceInput,skuById:Map<str
    ...(ruleVersion===APPSHEET_INVOICE_RULE_VERSION&&financials.motoTransferMinor!==null?{
     Transferencia_moto:financials.motoTransferMinor.toString(),Subtotal_Cliente_Moto:financials.motoClientSubtotalMinor!.toString(),
    }:{}),
+  },
   transfer:financials.transferCalculation,
   ...(ruleVersion===APPSHEET_INVOICE_RULE_VERSION&&financials.motoTransferCalculation?{motoTransfer:financials.motoTransferCalculation}:{}),
  }:null;
