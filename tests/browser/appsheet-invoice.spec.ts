@@ -982,6 +982,16 @@ test("legacy invoice keeps the not-NO catalog rule and positive sub-gram quantit
 });
 
 test("saving an AppSheet preorder stays pending until the separate confirmation command", async ({ page }) => {
+  await page.route("**/api/operations/context", async route => {
+    const response = await route.fetch();
+    if (response.status() !== 200) return route.fulfill({ response });
+    const context = await response.json();
+    return route.fulfill({ response, json: {
+      ...context,
+      authority: { ...context.authority, cutoverProfile: "appsheet-replacement" },
+    } });
+  });
+  // Client-only replacement preview exercises draft attention; it is not canonical proof or an authority activation.
   let skuCAvailability = "Sí";
   let catalogReads = 0;
   await page.route("**/api/operations/catalog**", async route => {
@@ -1256,7 +1266,8 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
   expect(refreshedOrders.items.filter((item: { id: string }) => item.id === shellId)).toHaveLength(1);
   await expect(editor).toHaveCount(0);
   const pending = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
-  expect(pending.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "preorder", quoteFrozen: false });
+  expect(pending.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "preorder" });
+  expect(pending.order.quote).toMatchObject({ note, input: { note, preorder: true } });
   expect(pending.order.quote.lines).toHaveLength(1);
   expect(pending.order.quote.input.lines[0]).toMatchObject({ totalMinor: "1201", pricePerGramMinor: "400" });
   expect(pending.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201" });
@@ -1614,7 +1625,8 @@ test("an empty AppSheet preorder shell saves as pending, rejects failed writes, 
   expect(refreshedOrders.items.filter((item: { id: string }) => item.id === shellId)).toHaveLength(1);
   await expect(editor).toHaveCount(0);
   const pending = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
-  expect(pending.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "preorder", quoteFrozen: false, note });
+  expect(pending.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "preorder" });
+  expect(pending.order.quote).toMatchObject({ note, input: { note, preorder: true } });
   expect(pending.order.quote.lines).toHaveLength(1);
   expect(pending.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201" });
   expect(Object.hasOwn(pending.order.quote.input.lines[0], "sourceLotId")).toBe(false);
