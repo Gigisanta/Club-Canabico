@@ -56,12 +56,22 @@ async function authorizeExistingOrderMember(ctx:CommandContext){
 // when canonicalizing because the exact-money serializer accepts strings only.
 const pendingAppSheetMinorFields=new Set(["subtotalMinor","productTransferMinor","totalMinor","transferMinor"]);
 function appSheetQuoteCanonical(value:unknown):string{
- const omitPendingAmounts=(current:unknown):unknown=>{
-  if(Array.isArray(current))return current.map(omitPendingAmounts);
+ const omitPendingAmounts=(current:unknown,path:string[]=[]):unknown=>{
+  if(Array.isArray(current))return current.map(entry=>omitPendingAmounts(entry,path));
   if(!current||typeof current!=="object")return current;
-  return Object.fromEntries(Object.entries(current as Record<string,unknown>)
+  // This source field describes a rule, rather than a calculated amount. Keep
+  // its original name and full definition in the hash without relaxing money
+  // validation elsewhere. v1 snapshots do not contain this metadata field.
+  const entries=Object.entries(current as Record<string,unknown>);
+  if(path.join(".")==="appSheetFormula.sourceExpressions"&&entries.some(([key])=>key==="motoClientSubtotal")){
+   if(entries.some(([key])=>key==="motoClientSubtotalDefinition"))throw new TypeError("duplicate Moto source formula definition");
+   return Object.fromEntries(entries.map(([key,entry])=>key==="motoClientSubtotal"
+    ?["motoClientSubtotalDefinition",{sourceName:key,definition:omitPendingAmounts(entry,[...path,key])}]
+    :[key,omitPendingAmounts(entry,[...path,key])]));
+  }
+  return Object.fromEntries(entries
    .filter(([key,entry])=>!(entry===null&&pendingAppSheetMinorFields.has(key)))
-   .map(([key,entry])=>[key,omitPendingAmounts(entry)]));
+   .map(([key,entry])=>[key,omitPendingAmounts(entry,[...path,key])]));
  };
  return canonicalJson(omitPendingAmounts(value));
 }
