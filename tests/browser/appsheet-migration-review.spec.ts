@@ -383,7 +383,7 @@ async function destinationState(batchId: string, snapshotId: string, orderId: st
     batchObject: await db.operationObject.findUniqueOrThrow({ where: { id: batchId }, select: { kind: true, version: true } }),
     settlements: await db.appSheetLegacySettlement.findMany({
       where: { batchId }, orderBy: { id: "asc" },
-      select: { id: true, status: true, dueMinor: true, legacyPaidMinor: true, remainingMinor: true, currency: true },
+      select: { id: true, status: true, reviewedBy: true, dueMinor: true, legacyPaidMinor: true, remainingMinor: true, currency: true },
     }),
     assignments: await db.deliveryAssignment.findMany({
       where: { orderId }, orderBy: { id: "asc" },
@@ -609,13 +609,15 @@ test("la revisión de destino AppSheet muestra vista previa, bloquea planes obso
   })).toBe(1);
   const finalState = await destinationState(scenario.batchId, scenario.snapshotId, scenario.orderId);
   expect(finalState.snapshot.status).toBe("reviewed");
-  expect(finalState.snapshot.reviewedBy).toBe(scenario.actorIds.destinationReviewer);
+  expect(finalState.snapshot.reviewedBy).toBe(scenario.actorIds.sourceReviewer);
+  expect(finalState.snapshot).toEqual(stateBefore.snapshot);
   expect(finalState.batch.status).toBe("reviewed");
   expect(finalState.batch.reviewedBy).toBe(scenario.actorIds.destinationReviewer);
   expect(finalState.batchObject).toEqual({ kind: "legacyImport", version: 2 });
   expect(finalState.settlements).toHaveLength(1);
   expect(finalState.settlements[0]).toMatchObject({
     status: "reviewed",
+    reviewedBy: scenario.actorIds.destinationReviewer,
     dueMinor: 10_000n,
     legacyPaidMinor: 4_000n,
     remainingMinor: 6_000n,
