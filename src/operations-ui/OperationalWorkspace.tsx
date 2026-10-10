@@ -25,7 +25,13 @@ import { ManualReferenceData } from "./ManualReferenceData";
 import { ManualStockTools } from "./ManualStockTools";
 
 type Row = Record<string, unknown>;
+type InvoiceCatalogueChannel = "local" | "delivery";
+type InvoiceEditorState = { mode: "invoice" | "preorder" | "edit-preorder" | "confirm-preorder"; order?: Row; expectedVersion?: number; memberName?: string };
 function objectValue(value: unknown): Row { return value && typeof value === "object" && !Array.isArray(value) ? value as Row : {}; }
+function invoiceCatalogueChannelForOrder(order?: Row): InvoiceCatalogueChannel {
+  const input = objectValue(objectValue(order?.quote).input);
+  return Object.keys(objectValue(input.moto)).length > 0 ? "delivery" : "local";
+}
 type InvoiceTotalTrace = {
   currency: string;
   productsTotalMinor: unknown;
@@ -761,11 +767,20 @@ export function OperationalWorkspace(props: Props) {
   const [reconciliationAccountId, setReconciliationAccountId] = useState("");
   const [selectedMemberId, setSelectedMemberId] = useState("");
   const [selectedProductId, setSelectedProductId] = useState("");
-  const [invoiceEditor, setInvoiceEditor] = useState<{ mode: "invoice" | "preorder" | "edit-preorder" | "confirm-preorder"; order?: Row; expectedVersion?: number; memberName?: string } | null>(null);
+  const [invoiceEditor, setInvoiceEditor] = useState<InvoiceEditorState | null>(null);
+  const [invoiceCatalogueChannel, setInvoiceCatalogueChannel] = useState<InvoiceCatalogueChannel>("local");
   const [invoiceTotalTrace, setInvoiceTotalTrace] = useState<InvoiceTotalTrace | null>(null);
   const [memberSearch, setMemberSearch] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
-  useEffect(() => { if (pageId !== "orders") { setInvoiceEditor(null); setInvoiceTotalTrace(null); } }, [pageId]);
+  useEffect(() => { if (pageId !== "orders") { setInvoiceEditor(null); setInvoiceCatalogueChannel("local"); setInvoiceTotalTrace(null); } }, [pageId]);
+  const openInvoiceEditor = (editor: InvoiceEditorState) => {
+    setInvoiceCatalogueChannel(invoiceCatalogueChannelForOrder(editor.order));
+    setInvoiceEditor(editor);
+  };
+  const closeInvoiceEditor = () => {
+    setInvoiceEditor(null);
+    setInvoiceCatalogueChannel("local");
+  };
   const listSearchKey = `q-${pageId}`;
   const tableSearch = pageId === "members" ? "" : searchParams.get(listSearchKey) ?? "";
   const updateTableSearch = (value: string) => {
@@ -797,6 +812,10 @@ export function OperationalWorkspace(props: Props) {
   const members = useRemote<Record<string, unknown>>(hasCapability(context, "members.read") && ["orders", "collections", "payables"].includes(pageId) ? "/api/operations/members?limit=200" : null, refreshKey);
   const needsCatalogChoices = (hasCapability(context, "stock.read") || hasCapability(context, "orders.write")) && ["orders", "purchases"].includes(pageId);
   const catalogChoices = useCursorResource(needsCatalogChoices ? "/api/operations/catalog" : null, refreshKey, "cursor", "nextCursor", "hasMore", ["items"]);
+  const invoiceCataloguePath = invoiceEditor && pageId === "orders"
+    ? `/api/operations/catalog?channel=${invoiceCatalogueChannel}`
+    : null;
+  const invoiceCatalogue = useCursorResource(invoiceCataloguePath, refreshKey, "cursor", "nextCursor", "hasMore", ["items"]);
   const catalogReference = useRemote<Record<string, unknown>>((hasCapability(context, "stock.read") || hasCapability(context, "orders.write")) && ["commercial", "routes", "members"].includes(pageId) ? "/api/operations/catalog" : null, refreshKey);
   const accounts = useRemote<Record<string, unknown>>(hasCapability(context, "finance.read") && ["orders", "collections", "routes", "settlements", "payables"].includes(pageId) ? "/api/operations/accounts" : null, refreshKey);
   const people = useRemote<Record<string, unknown>>(hasCapability(context, "operations.read") && ["routes", "accounts", "collections", "settlements", "payables"].includes(pageId) ? "/api/operations/people" : null, refreshKey);
@@ -876,6 +895,7 @@ export function OperationalWorkspace(props: Props) {
   const memberRows = pageId === "members" ? rowsOf(query.data) : rowsOf(members.data);
   const accountRows = rowsOf(pageId === "accounts" ? query.data : accounts.data);
   const catalogRows = rowsOf(pageId === "catalog" ? query.data : needsCatalogChoices ? catalogChoices.data : catalogReference.data);
+  const invoiceCatalogueRows = rowsOf(invoiceCatalogue.data, "items");
   const purchaseCatalogReady = needsCatalogChoices && Boolean(catalogChoices.data) && !catalogChoices.loading && !catalogChoices.error;
   const stockReferencesUsable = hasCapability(context, "stock.read") && Boolean(stockReference.data) && !stockReference.error;
   const manualReferencesUsable = Boolean(manualReferenceDataPath) && Boolean(manualReferenceData.data) && !manualReferenceData.error;
@@ -1497,13 +1517,13 @@ export function OperationalWorkspace(props: Props) {
       const expectedVersion = versionFor(query.data, row, Number.NaN);
       if (!Number.isSafeInteger(expectedVersion)) { onNotice("No se pudo confirmar la versión de la preventa. Actualizá Pedidos antes de editarla."); return; }
       const memberName = textValue(memberRows.find(member => idOf(member) === String(row.memberId ?? ""))?.name, "");
-      setInvoiceEditor({ mode: "edit-preorder", order: row, expectedVersion, memberName });
+      openInvoiceEditor({ mode: "edit-preorder", order: row, expectedVersion, memberName });
     } });
     const invoiceLines = Array.isArray(recordValue(quote, "lines")) ? recordValue(quote, "lines") as unknown[] : [];
     if (pageId === "orders" && isAppSheetInvoice && row.commercialState === "preorder" && invoiceLines.length > 0 && hasCommand(context, "InvoiceConfirmed")) buttons.push({ label: "Confirmar preventa", onClick: () => {
       const expectedVersion = versionFor(query.data, row, Number.NaN);
       if (!Number.isSafeInteger(expectedVersion)) { onNotice("No se pudo confirmar la versión de la preventa. Actualizá Pedidos antes de confirmarla."); return; }
-      setInvoiceEditor({ mode: "confirm-preorder", order: row, expectedVersion });
+      openInvoiceEditor({ mode: "confirm-preorder", order: row, expectedVersion });
     } });
     if (pageId === "orders" && isConfirmedAppSheetInvoice && recordValue(quote, "totalCalculationState") === "pending_definition" && hasCommand(context, "InvoiceTotalsConfirmed")) buttons.push({ label: "Confirmar total facturado", onClick: () => {
       const currencyValue = recordValue(quote, "currency") ?? row.currency;
@@ -1800,8 +1820,8 @@ export function OperationalWorkspace(props: Props) {
   const headerActions = <div className="ops-header-actions">
     <button type="button" className="ops-button ops-button-quiet" onClick={onRefresh}>↻ Actualizar</button>
     {pageId === "orders" && hasCommand(context, "InvoiceSaved") && hasCapability(context, "members.read") && <>
-      <button type="button" className="ops-button ops-button-primary" data-testid="appsheet-invoice-open" onClick={() => setInvoiceEditor({ mode: "invoice" })}>＋ Nueva factura</button>
-      <button type="button" className="ops-button ops-button-quiet" data-testid="appsheet-preorder-open" onClick={() => setInvoiceEditor({ mode: "preorder" })}>＋ Nueva preventa</button>
+      <button type="button" className="ops-button ops-button-primary" data-testid="appsheet-invoice-open" onClick={() => openInvoiceEditor({ mode: "invoice" })}>＋ Nueva factura</button>
+      <button type="button" className="ops-button ops-button-quiet" data-testid="appsheet-preorder-open" onClick={() => openInvoiceEditor({ mode: "preorder" })}>＋ Nueva preventa</button>
     </>}
     {create.map(button => <button type="button" className="ops-button ops-button-primary" key={button.label} disabled={button.disabled} onClick={button.onClick}>{button.label}</button>)}
   </div>;
@@ -1926,7 +1946,7 @@ export function OperationalWorkspace(props: Props) {
     {pageId === "routes" && (orders.error || people.error) && <InfoBand tone="warning" title="Faltan referencias de apoyo para la vista de rutas"><p>Los turnos siguen visibles, pero algunas referencias de pedidos o repartidores pueden estar incompletas.</p>{orders.error && <ErrorState message={orders.error} retry={orders.retry} />}{people.error && <ErrorState message={people.error} retry={people.retry} />}</InfoBand>}
     {pageId === "routes" && <RoutesDetails data={query.data} context={context} runAction={runAction} deliveryPeople={deliveryPeople} catalog={catalogRows} orders={orderRows} actionsBlocked={query.loading || Boolean(query.error)} hasMore={query.hasMore} />}
     {pageId === "settlements" && <InfoBand title="Custodia y rendición"><p>Una rendición debe explicar el bruto como dinero entregado más remuneración. El pago de remuneración requiere una obligación verificada y se registra con cuentas de custodia conciliadas.</p></InfoBand>}
-    {pageId === "orders" && invoiceEditor && <AppSheetInvoiceForm key={`${invoiceEditor.mode}-${idOf(invoiceEditor.order ?? {}) || "new"}`} open mode={invoiceEditor.mode} order={invoiceEditor.order} expectedVersion={invoiceEditor.expectedVersion} memberName={invoiceEditor.memberName} context={context} catalog={catalogRows} catalogLoading={catalogChoices.loading} catalogError={catalogChoices.error ?? undefined} retryCatalog={catalogChoices.retry} loadMoreCatalog={catalogChoices.loadMore} hasMoreCatalog={catalogChoices.hasMore} runCommand={runCommand} onClose={() => setInvoiceEditor(null)} onSaved={(_orderId, message) => { setInvoiceEditor(null); onRefresh(); onNotice(message); }} />}
+    {pageId === "orders" && invoiceEditor && <AppSheetInvoiceForm key={`${invoiceEditor.mode}-${idOf(invoiceEditor.order ?? {}) || "new"}`} open mode={invoiceEditor.mode} order={invoiceEditor.order} expectedVersion={invoiceEditor.expectedVersion} memberName={invoiceEditor.memberName} context={context} catalog={invoiceCatalogueRows} catalogChannel={invoiceCatalogueChannel} onCatalogChannelChange={setInvoiceCatalogueChannel} catalogLoading={invoiceCatalogue.loading} catalogError={invoiceCatalogue.error ?? undefined} retryCatalog={invoiceCatalogue.retry} loadMoreCatalog={invoiceCatalogue.loadMore} hasMoreCatalog={invoiceCatalogue.hasMore} runCommand={runCommand} onClose={closeInvoiceEditor} onSaved={(_orderId, message) => { closeInvoiceEditor(); onRefresh(); onNotice(message); }} />}
     {pageId === "orders" && invoiceTotalTrace && <InvoiceTotalTraceDialog trace={invoiceTotalTrace} onClose={() => setInvoiceTotalTrace(null)} />}
   </div>;
 }

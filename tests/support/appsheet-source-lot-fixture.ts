@@ -315,8 +315,8 @@ export function appSheetSourceLotCaptureFixture(revision: string) {
   const catalogue = capturePage({ spreadsheetId, sheetId: 12, title: "D_Catalogo_Mercaderia",
     headers: ["CatalogoID", "Codigo_Detalle", "Variedad_Cann", "Descripcion", "Estado", "Segmento_Descuento", "Precio_5_Gramos"],
     rows: [["source-sku", "source-sku", "Fixture", "Synthetic catalog product", true, "Estandar", 5]] });
-  const lotRows = sourceRows.sourceLots.map((lot) => [lot.sourceLotId, "source-sku", lot.sourceLotId, lot.sourceDeliveryDate,
-    excelSerial(lot.sourceDeliveryDate)] as Array<string | number | boolean>);
+  const lotRows = sourceRows.sourceLots.map((lot) => [lot.sourceLotId, "source-sku", lot.purchaseLotId, lot.sourceDeliveryDate,
+    excelSerial(lot.sourceDeliveryDate), "source-sku", "Synthetic catalog product"] as Array<string | number | boolean>);
   const merchandise = capturePage({ spreadsheetId, sheetId: 13, title: "C_Mercaderia",
     headers: sourceRows.physicalHeaders.C_Mercaderia, rows: lotRows, dateColumns: ["Fecha_Entrega"] });
   const movementRows = sourceRows.movements.map((movement) => {
@@ -328,7 +328,7 @@ export function appSheetSourceLotCaptureFixture(revision: string) {
     headers: sourceRows.physicalHeaders.Mov_Stock1, rows: movementRows });
   const openings = capturePage({ spreadsheetId, sheetId: 16, title: "D_Stock",
     headers: ["ID_Stock", "Codigo_Detalle", "Cantidad", "Unidad", "Id_Lote"],
-    rows: sourceRows.sourceLots.map((lot) => [`opening-${lot.sourceLotId}`, "source-sku", Number(lot.sourceStockActual), "g", lot.sourceLotId]) });
+    rows: sourceRows.sourceLots.map((lot) => [`opening-${lot.sourceLotId}`, "source-sku", Number(lot.sourceStockActual), "g", lot.purchaseLotId]) });
   const refs = [member.ref, catalogue.ref, merchandise.ref, movements.ref, openings.ref];
   const pageManifest = refs;
   const pageRefs = pageManifest.map((ref) => ({ path: ref.path, sheetId: ref.sheetId, pageIndex: ref.pageIndex, startRow: ref.startRow,
@@ -462,8 +462,8 @@ export function appSheetSourceLotRows(input: {
       { header: "Zona", value: "Centro" }, { header: "Email", value: "source-member@example.test" }],
   });
   const sourceLots = [
-    { sourceLotId: firstSourceLotId, delivered: firstDeliveryDate, entry: "100", sale: "12", waste: "2" },
-    { sourceLotId: selectedSourceLotId, delivered: selectedDeliveryDate, entry: "50", sale: "10", waste: "1" },
+    { sourceLotId: firstSourceLotId, purchaseLotId: `purchase-${firstSourceLotId}`, delivered: firstDeliveryDate, entry: "100", sale: "12", waste: "2" },
+    { sourceLotId: selectedSourceLotId, purchaseLotId: `purchase-${selectedSourceLotId}`, delivered: selectedDeliveryDate, entry: "50", sale: "10", waste: "1" },
   ];
   const lots = sourceLots.map((lot, index) => sourceRecord({
     snapshotId: input.snapshotId,
@@ -474,9 +474,11 @@ export function appSheetSourceLotRows(input: {
     columns: [
       { header: "ID_Mercaderia", value: lot.sourceLotId },
       { header: "Codigo_Detalle", value: input.skuSourceId },
-      { header: "Id_Compra_Lote", value: lot.sourceLotId },
+      { header: "Id_Compra_Lote", value: lot.purchaseLotId },
       { header: "Fecha_Compra", value: lot.delivered },
       { header: "Fecha_Entrega", value: String(excelSerial(lot.delivered)), exactDecimal: String(excelSerial(lot.delivered)) },
+      { header: "Variedad_Cann", value: input.skuSourceId },
+      { header: "Descripcion", value: "Synthetic catalog product" },
     ],
     dateColumn: { header: "Fecha_Entrega", serial: excelSerial(lot.delivered) },
   }));
@@ -498,7 +500,7 @@ export function appSheetSourceLotRows(input: {
     sourceRow: index + 2,
     columns: [{ header: "ID_Stock", value: `opening-${lot.sourceLotId}` }, { header: "Codigo_Detalle", value: input.skuSourceId },
       { header: "Cantidad", value: String(Number(lot.entry) - Number(lot.sale) - Number(lot.waste)), exactDecimal: String(Number(lot.entry) - Number(lot.sale) - Number(lot.waste)) },
-      { header: "Unidad", value: "g" }, { header: "Id_Lote", value: lot.sourceLotId }],
+      { header: "Unidad", value: "g" }, { header: "Id_Lote", value: lot.purchaseLotId }],
   }));
   const movements = sourceLots.flatMap((lot, index) => [
     { type: "Entrada", quantity: lot.entry },
@@ -513,7 +515,7 @@ export function appSheetSourceLotRows(input: {
     columns: [
       { header: "ID_Mov_Stock_Total", value: `movement-${lot.sourceLotId}-${movement.type.toLowerCase()}` },
       { header: "Codigo_Detalle", value: input.skuSourceId },
-      { header: "Id_Lote", value: lot.sourceLotId },
+      { header: "Id_Lote", value: lot.purchaseLotId },
       { header: "Tipo_Registro_Mercaderia", value: movement.type },
       { header: "Cantidad_Gr", value: movement.quantity, exactDecimal: movement.quantity },
     ],
@@ -545,7 +547,9 @@ export function appSheetSourceLotRows(input: {
       unitState: classification || isOpening ? "known" : "absent",
       attributes: {
         ...(isLot || classification || isOpening ? { relationships: [{ targetTable: "D_Catalogo_Mercaderia", status: "unique",
-          targetSourceKey: input.skuSourceId, sourceField: "Codigo_Detalle", targetField: "Codigo_Detalle", targetSourceRecordId: sku.id }] } : {}),
+          targetSourceKey: input.skuSourceId, sourceField: "Codigo_Detalle", targetField: "Codigo_Detalle", targetSourceRecordId: sku.id },
+          ...(isLot ? [{ targetTable: "D_Catalogo_Mercaderia", status: "unique", sourceValue: input.skuSourceId,
+            targetSourceKey: input.skuSourceId, sourceField: "Variedad_Cann", targetField: "CatalogoID", targetSourceRecordId: sku.id }] : [])] } : {}),
         ...(classification ? { sourceClassification: { field: "Tipo_Registro_Mercaderia", state: "known", value: classification } } : {}),
       },
       correctionOf: null,
@@ -553,13 +557,14 @@ export function appSheetSourceLotRows(input: {
   });
   return {
     physicalHeaders: {
-      C_Mercaderia: ["ID_Mercaderia", "Codigo_Detalle", "Id_Compra_Lote", "Fecha_Compra", "Fecha_Entrega"],
+      C_Mercaderia: ["ID_Mercaderia", "Codigo_Detalle", "Id_Compra_Lote", "Fecha_Compra", "Fecha_Entrega", "Variedad_Cann", "Descripcion"],
       Mov_Stock1: ["ID_Mov_Stock_Total", "Codigo_Detalle", "Id_Lote", "Tipo_Registro_Mercaderia", "Cantidad_Gr"],
     },
     records,
     facts,
     sourceLots: sourceLots.map((lot, index) => ({
       sourceLotId: lot.sourceLotId,
+      purchaseLotId: lot.purchaseLotId,
       sourceRecord: lots[index]!,
       sourceStockActual: String(Number(lot.entry) - Number(lot.sale) - Number(lot.waste)),
       sourceDeliveryDate: lot.delivered,

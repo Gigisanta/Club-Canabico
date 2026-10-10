@@ -589,7 +589,7 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
     } });
 
     const catalogResponse = await call("/operations/catalog?channel=local");
-    assert.equal(catalogResponse.status, 200, await catalogResponse.text());
+    assert.equal(catalogResponse.status, 200, await catalogResponse.clone().text());
     const catalog = await catalogResponse.json() as { items: Array<{ id: string; appSheetSourceLots?: Array<any> }> };
     const catalogSku = catalog.items.find(item => item.id === sourceSku.id);
     assert.ok(catalogSku);
@@ -600,6 +600,9 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
     const selectedOption = sourceLotOptions.find(item => item.sourceLotId === selectedSourceLot.sourceLotId);
     assert.ok(selectedOption);
     assert.equal(selectedOption.inventoryLotId, internalLots.get(selectedSourceLot.sourceLotId)!.id);
+    assert.deepEqual(selectedOption.sourceLabelIdentity, {
+      variety: "Fixture", description: "Synthetic catalog product", purchaseLotId: "purchase-source-lot-explicit-selection",
+    }, "catalogue returns the exact captured label components, including the dereferenced variety");
 
     const invoiceTargetId = `appsheet-source-lot-invoice-${randomUUID()}`;
     const invoice = invoiceData({ preorder: false, quantity: "3", lineId: `source-lot-invoice-line-${randomUUID()}` });

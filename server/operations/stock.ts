@@ -96,7 +96,14 @@ type StockObjectScope = Awaited<ReturnType<typeof objectScope>>;
 type Preparation = Prisma.PreparationAllocationGetPayload<object>;
 type PreparationLimitCoverage = "approved" | "demo_missing_approved_rule";
 export type AppSheetSourceLotCandidate = Pick<Prisma.InventoryLotGetPayload<object>, "id" | "skuId" | "unit" | "receivedAt" | "sourceSystem" | "sourceId">;
-export type AppSheetSourceLotOption = { sourceLotId: string; inventoryLotId: string; receivedDate: string; availableQuantity: string };
+export type AppSheetSourceLotLabelIdentity = { variety: string; description: string; purchaseLotId: string };
+export type AppSheetSourceLotOption = {
+  sourceLotId: string;
+  inventoryLotId: string;
+  receivedDate: string;
+  availableQuantity: string;
+  sourceLabelIdentity: AppSheetSourceLotLabelIdentity | null;
+};
 
 const ZERO = 0n;
 const DELIVERY_QUANTITY_AUDIT = "order_delivery_quantities_reported";
@@ -1485,12 +1492,16 @@ type AppSheetSourceLotReviewPreparation = {
   lot: AppSheetSourceLotCandidate;
   sku: StockOpeningSku;
   source: AppSheetSourceLotSource;
+  sourceLabelIdentity: AppSheetSourceLotLabelIdentity | null;
   proof: Omit<SourceLotReviewProof, "targetLotVersion">;
   openingFactId: string;
   identity: Prisma.LegacyIdentityGetPayload<object> | null;
 };
 
-function sourceRelationSku(attributes: unknown): { sourceKey: string; sourceRecordId: string } {
+type SourceCatalogVarietyRelationship = { status: unknown; sourceValue: unknown; targetSourceRecordId: unknown } | null;
+type SourceCatalogSkuRelationship = { sourceKey: string; sourceRecordId: string; variety: SourceCatalogVarietyRelationship };
+
+function sourceRelationSku(attributes: unknown): SourceCatalogSkuRelationship {
   const relationships = jsonRecord(attributes)?.relationships;
   if (!Array.isArray(relationships)) return sourceLotFailure("source_catalog_relationship_missing");
   const relationship = (sourceField: string) => relationships.map(jsonRecord).filter((item) => item?.sourceField === sourceField &&
@@ -1506,7 +1517,56 @@ function sourceRelationSku(attributes: unknown): { sourceKey: string; sourceReco
     if (variety.status !== "not_provided" && (variety.status !== "unique" || variety.targetSourceRecordId !== codeLinks[0]!.targetSourceRecordId))
       return sourceLotFailure("source_catalog_variety_relationship_not_unique");
   }
-  return { sourceKey: codeLinks[0]!.targetSourceKey, sourceRecordId: codeLinks[0]!.targetSourceRecordId };
+  const variety = varietyLinks[0];
+  return {
+    sourceKey: codeLinks[0]!.targetSourceKey,
+    sourceRecordId: codeLinks[0]!.targetSourceRecordId,
+    variety: variety ? {
+      status: variety.status,
+      sourceValue: variety.sourceValue,
+      targetSourceRecordId: variety.targetSourceRecordId,
+    } : null,
+  };
+}
+
+/** Read a single verbatim string from a normalized, capture-bound source payload. */
+function normalizedSourceText(normalized: unknown, header: string): string | null {
+  const columns = jsonRecord(normalized)?.columns;
+  if (!Array.isArray(columns)) return null;
+  const matches = columns.filter((column) => jsonRecord(column)?.header === header);
+  if (matches.length !== 1) return null;
+  const value = jsonRecord(matches[0])?.value;
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * The AppSheet label is assembled from the dereferenced catalogue variety,
+ * the captured App formula result, and the captured Initial value. Do not
+ * recreate any of those values from a Bombo SKU or a current stock balance.
+ */
+function appSheetSourceLotLabelIdentity(
+  sourceNormalized: unknown,
+  varietyRelationship: SourceCatalogVarietyRelationship,
+  catalogueNormalized: unknown,
+): AppSheetSourceLotLabelIdentity | null {
+  const sourceReference = normalizedSourceText(sourceNormalized, "Variedad_Cann");
+  const description = normalizedSourceText(sourceNormalized, "Descripcion");
+  const purchaseLotId = normalizedSourceText(sourceNormalized, "Id_Compra_Lote");
+  if (sourceReference === null || description === null || purchaseLotId === null || !varietyRelationship) return null;
+
+  if (sourceReference === "") {
+    if (varietyRelationship.status !== "not_provided" ||
+        (varietyRelationship.sourceValue !== null && varietyRelationship.sourceValue !== "") || description !== "") return null;
+    return { variety: "", description, purchaseLotId };
+  }
+
+  if (varietyRelationship.status !== "unique" || varietyRelationship.sourceValue !== sourceReference ||
+      typeof varietyRelationship.targetSourceRecordId !== "string" || !varietyRelationship.targetSourceRecordId)
+    return null;
+  const variety = normalizedSourceText(catalogueNormalized, "Variedad_Cann");
+  const catalogueDescription = normalizedSourceText(catalogueNormalized, "Descripcion");
+  if (variety === null || catalogueDescription === null || description !== catalogueDescription) return null;
+  return { variety, description, purchaseLotId };
 }
 
 async function prepareAppSheetSourceLotReview(
@@ -1524,7 +1584,7 @@ async function prepareAppSheetSourceLotReview(
     ctx.tx.legacyImportSnapshot.findMany({ where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, captureManifestId: capture.captureId,
       fileHash: capture.manifestHash, importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION }, take: 2 }),
     ctx.tx.legacySourceRecord.findUnique({ where: { id: input.sourceRecordId }, select: { id: true, snapshotId: true, sourceTable: true, sourceKey: true,
-      fileHash: true, contentHash: true, treatment: true } }),
+      fileHash: true, contentHash: true, treatment: true, normalized: true } }),
     ctx.tx.inventoryLot.findUnique({ where: { id: ctx.envelope.targetId } }),
   ]);
   if (historySnapshots.length !== 1) sourceLotFailure("source_history_snapshot_missing_or_ambiguous");
@@ -1576,9 +1636,12 @@ async function prepareAppSheetSourceLotReview(
     sourceLotFailure("stock_opening_does_not_match_source_lot");
   const sourceSku = sourceRelationSku(facts[0]!.attributes);
   const skuSourceId = sourceSku.sourceKey;
-  const targetSourceRow = await ctx.tx.legacySourceRecord.findUnique({ where: { id: sourceSku.sourceRecordId }, select: { id: true, snapshotId: true, sourceTable: true, sourceKey: true } });
+  const targetSourceRow = await ctx.tx.legacySourceRecord.findUnique({ where: { id: sourceSku.sourceRecordId }, select: {
+    id: true, snapshotId: true, sourceTable: true, sourceKey: true, normalized: true,
+  } });
   if (!targetSourceRow || targetSourceRow.snapshotId !== history.id || targetSourceRow.sourceTable !== "D_Catalogo_Mercaderia" || targetSourceRow.sourceKey !== skuSourceId)
     sourceLotFailure("source_catalog_relationship_target_missing_or_stale");
+  const sourceLabelIdentity = appSheetSourceLotLabelIdentity(sourceMetadata.normalized, sourceSku.variety, targetSourceRow.normalized);
   const sku = await ctx.tx.catalogSku.findFirst({ where: { id: lot.skuId, sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM, sourceId: skuSourceId, unit: "g" },
     select: { id: true, unit: true, sourceId: true, sourceSystem: true, active: true } });
   if (!sku) sourceLotFailure("source_catalog_relationship_does_not_match_canonical_sku");
@@ -1611,6 +1674,7 @@ async function prepareAppSheetSourceLotReview(
     sku,
     source: { id: source.id, sourceKey: source.sourceKey, sourceTable: source.sourceTable, sourceSystem: history.sourceSystem,
       snapshotId: source.snapshotId, fileHash: source.fileHash, contentHash: source.contentHash, treatment: source.treatment },
+    sourceLabelIdentity,
     proof: { schemaVersion: 2, captureId: capture.captureId, historySnapshotId: history.id, manifestHash: capture.manifestHash,
       sourceRecordId: source.id, sourceKey: source.sourceKey, sourceContentHash: source.contentHash, sourceStockActual, sourceDeliveryDate,
       sourceDataHash: derivation.dataHash, sourceRowHash: derivation.sourceRowHash, sourceDerivationHash: derivation.derivationHash,
@@ -1719,7 +1783,8 @@ export async function resolveAppSheetSourceLot(ctx: CommandContext, skuId: strin
   if (auditSourceLot?.sourceLotId !== sourceLotId || auditSourceLot.inventoryLotId !== lot.id ||
       auditSourceLot.receivedDate !== selected.proof.sourceDeliveryDate)
     return sourceLotFailure("source_lot_review_result_mismatch");
-  return { sourceLotId, inventoryLotId: lot.id, receivedDate: selected.proof.sourceDeliveryDate, availableQuantity: "0" };
+  return { sourceLotId, inventoryLotId: lot.id, receivedDate: selected.proof.sourceDeliveryDate, availableQuantity: "0",
+    sourceLabelIdentity: prepared.sourceLabelIdentity };
 }
 
 export type AppSheetSourceLotAvailabilityCandidate = {

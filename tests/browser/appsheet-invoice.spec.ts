@@ -1381,7 +1381,8 @@ test("an AppSheet source-lot invoice choice transports the explicit non-FIFO SKU
         requiresAppSheetSourceLot: true,
         appSheetSourceLots: [
           { sourceLotId: "source-lot-older-fifo", receivedDate: "2026-10-01", availableQuantity: "30" },
-          { sourceLotId: selectedLotId, receivedDate: "2026-10-08", availableQuantity: "18" },
+          { sourceLotId: selectedLotId, receivedDate: "2026-10-08", availableQuantity: "18",
+            sourceLabelIdentity: { variety: "Variedad fuente", description: "Descripción capturada", purchaseLotId: "COMPRA-2026-77" } },
           { sourceLotId: "source-lot-unavailable", receivedDate: "2026-10-09", availableQuantity: "0" },
         ],
       };
@@ -1409,6 +1410,7 @@ test("an AppSheet source-lot invoice choice transports the explicit non-FIFO SKU
   await expect(field(product, "line-sourceLotId")).toHaveCount(0);
   const selectedOption = combinedChoice.locator(`option[data-sku-id="ops-sku-c"][data-source-lot-id="${selectedLotId}"]`);
   await expect(selectedOption).toHaveCount(1);
+  await expect(selectedOption).toHaveText("Variedad fuente |Descripción capturada - COMPRA-2026-77 (18 gr)");
   await expect(combinedChoice.locator('option[data-source-lot-id="source-lot-unavailable"]')).toHaveCount(0);
   const selectedOptionValue = await selectedOption.getAttribute("value");
   if (selectedOptionValue === null) throw new Error("La opción combinada de variedad y lote no tiene valor.");

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { apiGet, hasCapability, hasCommand, isUncertainCommandOutcome } from "./api";
 import { amountFormToMinor, formatMinor } from "./money";
+import { parseQuantity } from "../../shared/operations/exact";
 import { calculateAppSheetInvoiceFinancials } from "../../shared/operations/appsheet-invoice-rules";
 import { appsheetInvoiceLine } from "../../shared/operations/appsheet";
 import { appSheetCatalogueStoredSchema } from "../../shared/operations/appsheet-catalogue";
@@ -10,6 +11,7 @@ import type { OperationsContext, RunCommand } from "./types";
 import "./appsheet-invoice-form.css";
 
 type Row = Record<string, unknown>;
+type SourceLotLabelIdentity = { variety: string; description: string; purchaseLotId: string };
 type EditorMode = "invoice" | "preorder" | "edit-preorder" | "confirm-preorder";
 type Payment = "cash" | "transfer" | "mercado_pago" | "card";
 type NewMemberDraft = { name: string; email: string; phone: string; address: string };
@@ -48,6 +50,8 @@ interface Props {
   memberName?: string;
   context: OperationsContext;
   catalog: Row[];
+  catalogChannel: "local" | "delivery";
+  onCatalogChannelChange: (channel: "local" | "delivery") => void;
   catalogLoading: boolean;
   catalogError?: string;
   retryCatalog: () => void;
@@ -65,9 +69,37 @@ function civilDate(timeZone: string) {
 }
 
 function objectValue(value: unknown): Row { return value && typeof value === "object" && !Array.isArray(value) ? value as Row : {}; }
+function readSourceLotLabelIdentity(value: unknown): SourceLotLabelIdentity | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const identity = value as Record<string, unknown>;
+  if (typeof identity.variety !== "string") return null;
+  if (typeof identity.description !== "string") return null;
+  if (typeof identity.purchaseLotId !== "string") return null;
+  return { variety: identity.variety, description: identity.description, purchaseLotId: identity.purchaseLotId };
+}
 function sourceLotOptions(item: Row | undefined): Row[] {
   const value = item?.appSheetSourceLots;
-  return Array.isArray(value) ? value.filter((row): row is Row => Boolean(row) && typeof row === "object" && !Array.isArray(row)) : [];
+  return Array.isArray(value) ? value.filter((row): row is Row => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+    const option = row as Row;
+    if (typeof option.sourceLotId !== "string" || !option.sourceLotId.trim()) return false;
+    if (typeof option.availableQuantity !== "string") return false;
+    try { return parseQuantity(option.availableQuantity, "g") > 0n; }
+    catch { return false; }
+  }) : [];
+}
+function sourceLotChoicePrefixes(nativeSkuIds: readonly string[]) {
+  for (let suffix = 0; ; suffix += 1) {
+    const sourceLot = `appsheet-source-lot:${suffix}:`;
+    const pending = `appsheet-source-lot-pending:${suffix}:`;
+    if (!nativeSkuIds.some(id => id.startsWith(sourceLot) || id.startsWith(pending))) return { sourceLot, pending };
+  }
+}
+function sourceLotChoice(prefix: string, skuId: string, sourceLotId: string) {
+  return `${prefix}${encodeURIComponent(JSON.stringify([skuId, sourceLotId]))}`;
+}
+function pendingSourceLotChoice(prefix: string, skuId: string) {
+  return `${prefix}${encodeURIComponent(skuId)}`;
 }
 function stringValue(value: unknown, fallback = "") { return typeof value === "string" ? value : fallback; }
 function minorToForm(value: unknown) {
@@ -210,8 +242,9 @@ const observedServiceTypes = ["CABA", "Zona Norte 1", "Zona Norte 2", "CABA - EN
 const MAX_INVOICE_MINOR = 9223372036854775807n;
 
 export function AppSheetInvoiceForm(props: Props) {
-  const { open, mode, order, expectedVersion, memberName, context, catalog, catalogLoading, catalogError, retryCatalog, loadMoreCatalog, hasMoreCatalog, runCommand, onClose, onSaved } = props;
+  const { open, mode, order, expectedVersion, memberName, context, catalog, catalogChannel, onCatalogChannelChange, catalogLoading, catalogError, retryCatalog, loadMoreCatalog, hasMoreCatalog, runCommand, onClose, onSaved } = props;
   const replacementProfile = context.authority.cutoverProfile === "appsheet-replacement";
+  const activeReplacement = replacementProfile && context.authority.mode === "active";
   const dialog = useRef<HTMLDialogElement>(null);
   const productDialog = useRef<HTMLDialogElement>(null);
   const motoDialog = useRef<HTMLDialogElement>(null);
@@ -251,6 +284,25 @@ export function AppSheetInvoiceForm(props: Props) {
   const [confirmationError, setConfirmationError] = useState("");
   const [confirmationEvidence, setConfirmationEvidence] = useState("");
   const [confirmationVersion, setConfirmationVersion] = useState<number | undefined>(expectedVersion);
+  const confirmationInput = objectValue(objectValue((confirmation ?? order)?.quote).input);
+  const confirmationMoto = objectValue(confirmationInput.moto);
+  const desiredCatalogChannel = mode === "confirm-preorder"
+    ? Object.keys(confirmationMoto).length > 0 ? "delivery" : "local"
+    : draft.moto ? "delivery" : "local";
+  const catalogChannelMatches = catalogChannel === desiredCatalogChannel;
+  const catalogChannelReady = catalogChannelMatches && !catalogLoading && !catalogError;
+  const catalogChannelWaitMessage = !catalogChannelMatches
+    ? `Actualizando el catálogo de ${desiredCatalogChannel === "delivery" ? "reparto" : "retiro"}; esperá a que termine antes de continuar.`
+    : catalogLoading
+      ? `Cargando el catálogo de ${desiredCatalogChannel === "delivery" ? "reparto" : "retiro"} para verificar la disponibilidad.`
+      : catalogError
+        ? "No se pudo verificar el catálogo de este canal. Reintentá la carga antes de continuar."
+        : "";
+
+  useEffect(() => {
+    if (!open || catalogChannelMatches) return;
+    onCatalogChannelChange(desiredCatalogChannel);
+  }, [open, catalogChannelMatches, desiredCatalogChannel, onCatalogChannelChange]);
 
   useEffect(() => {
     const element = dialog.current;
@@ -365,15 +417,37 @@ export function AppSheetInvoiceForm(props: Props) {
       return updated;
     });
   }
+  function selectProductChoice(value: string) {
+    if (value === "") {
+      setProductDraft(current => current ? maybeSetInitialPricePerGram({ ...current, skuId: "", sourceLotId: "" }) : current);
+      return;
+    }
+    const matchingChoices = productChoices.filter(choice => choice.value === value);
+    if (matchingChoices.length !== 1) {
+      setError("La opción elegida ya no es única o vigente. Elegí nuevamente un artículo del catálogo.");
+      setProductDraft(current => current ? maybeSetInitialPricePerGram({ ...current, skuId: "", sourceLotId: "" }) : current);
+      return;
+    }
+    const choice = matchingChoices[0];
+    setProductDraft(current => {
+      if (!current) return current;
+      return maybeSetInitialPricePerGram({ ...current, skuId: choice.skuId, sourceLotId: choice.sourceLotId });
+    });
+  }
   function cancelProduct() {
     if (busy || uncertain) return;
     productDialog.current?.close(); setProductDraft(null); setProductIndex(null); setStage("main");
   }
   function saveProduct(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (activeReplacement && !catalogChannelReady) {
+      setError(catalogChannelWaitMessage);
+      return;
+    }
     if (!productDraft) return;
     const submittedDraft = maybeSetInitialPricePerGram(productDraft);
-    const selected = catalog.find(item => String(item.id) === submittedDraft.skuId && invoiceSkuSelectable(item, replacementProfile));
+    const selectedCatalogProduct = catalog.find(item => String(item.id) === submittedDraft.skuId);
+    const selected = selectedCatalogProduct && invoiceSkuSelectable(selectedCatalogProduct, replacementProfile) ? selectedCatalogProduct : undefined;
     const retainedHistoricalSku = replacementProfile && mode === "edit-preorder" && productIndex !== null && initial.lines.some(line => line.id === submittedDraft.id && line.skuId === submittedDraft.skuId);
     if (!selected && !retainedHistoricalSku) {
       setError("La variedad seleccionada ya no está disponible para nuevas líneas. Conservamos el borrador; elegí otra o verificá el catálogo antes de continuar.");
@@ -385,12 +459,10 @@ export function AppSheetInvoiceForm(props: Props) {
       setError("Elegí un lote de origen con disponibilidad actual para cada producto antes de guardar la factura.");
       return;
     }
-    if (activeReplacement && submittedDraft.sourceLotId && selected?.requiresAppSheetSourceLot !== true) {
-      setError("Los productos nativos no usan lotes de origen AppSheet. Volvé a seleccionar el producto para limpiar esa referencia.");
-      return;
-    }
-    if (activeReplacement && selected?.requiresAppSheetSourceLot === true && mode === "preorder" && submittedDraft.sourceLotId && !sourceLotOptionsForLine.some(option => stringValue(option.sourceLotId) === submittedDraft.sourceLotId)) {
-      setError("El lote guardado ya no tiene disponibilidad actual. Elegí otro o dejá la selección vacía para resolverlo al editar la preventa.");
+    if (activeReplacement && submittedDraft.sourceLotId && (selectedCatalogProduct?.requiresAppSheetSourceLot !== true || !sourceLotOptions(selectedCatalogProduct).some(option => stringValue(option.sourceLotId) === submittedDraft.sourceLotId))) {
+      setError(selectedCatalogProduct?.requiresAppSheetSourceLot === true
+        ? "El lote guardado ya no tiene disponibilidad actual. Elegí otro o dejá la selección vacía para resolverlo al editar la preventa."
+        : "La referencia de lote no está disponible para esta variedad. Volvé a elegir una opción vigente.");
       return;
     }
     if (!submittedDraft.date) { setError("Completá la fecha del producto."); return; }
@@ -549,6 +621,10 @@ export function AppSheetInvoiceForm(props: Props) {
   }
   async function saveInvoice(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (activeReplacement && !uncertain && !catalogChannelReady) {
+      setError(catalogChannelWaitMessage);
+      return;
+    }
     if (submitting.current || memberSubmitting.current || newMemberUncertain || !draft.memberId || busy) return;
     setError("");
     if (mode === "invoice" && !draft.lines.length) { setError("Agregá al menos un producto antes de guardar la factura."); return; }
@@ -632,6 +708,14 @@ export function AppSheetInvoiceForm(props: Props) {
 
   async function confirmPreorder(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (activeReplacement && !uncertain && !catalogChannelReady) {
+      setConfirmationError(catalogChannelWaitMessage);
+      return;
+    }
+    if (!uncertain && unboundConfirmedSourceLot) {
+      setConfirmationError("Verificá el artículo y su lote en el catálogo de este canal antes de confirmar.");
+      return;
+    }
     const id = String(order?.id ?? "");
     const quote = objectValue(confirmation?.quote);
     const savedLines = Array.isArray(quote.lines) ? quote.lines : [];
@@ -676,10 +760,49 @@ export function AppSheetInvoiceForm(props: Props) {
   };
   const canCreateMember = mode !== "edit-preorder" && mode !== "confirm-preorder" && hasCommand(context, "MemberCreated") && hasCapability(context, "members.write") && hasCapability(context, "members.read");
   const saleProducts = catalog.filter(item => invoiceSkuSelectable(item, replacementProfile));
-  const activeReplacement = replacementProfile && context.authority.mode === "active";
   const selectedProduct = productDraft ? catalog.find(item => String(item.id) === productDraft.skuId) : undefined;
-  const selectedSourceLots = sourceLotOptions(selectedProduct);
   const retainedProductIsHistorical = Boolean(productDraft && replacementProfile && mode === "edit-preorder" && initial.lines.some(line => line.id === productDraft.id && line.skuId === productDraft.skuId));
+  const allowPendingSourceLot = mode === "preorder" || mode === "edit-preorder";
+  const nativeSkuIds = catalog
+    .filter(item => !activeReplacement || item.requiresAppSheetSourceLot !== true)
+    .map(item => String(item.id));
+  if (productDraft?.skuId) nativeSkuIds.push(productDraft.skuId);
+  const sourceLotPrefixes = sourceLotChoicePrefixes(nativeSkuIds);
+  const productChoices = saleProducts.flatMap(item => {
+    const skuId = String(item.id);
+    if (!activeReplacement || item.requiresAppSheetSourceLot !== true) return [{ value: skuId, skuId, sourceLotId: "", label: stringValue(item.name, stringValue(item.code, skuId)), pending: false }];
+    const name = stringValue(item.name, stringValue(item.code, skuId));
+    const lots = sourceLotOptions(item).map(option => {
+      const sourceLotId = stringValue(option.sourceLotId);
+      const sourceLabelIdentity = readSourceLotLabelIdentity(option.sourceLabelIdentity);
+      const receivedDate = stringValue(option.receivedDate).trim();
+      const availableQuantity = stringValue(option.availableQuantity);
+      return {
+        value: sourceLotChoice(sourceLotPrefixes.sourceLot, skuId, sourceLotId), skuId, sourceLotId,
+        label: sourceLabelIdentity
+          ? `${sourceLabelIdentity.variety} |${sourceLabelIdentity.description} - ${sourceLabelIdentity.purchaseLotId} (${availableQuantity} gr)`
+          : `${name} · ${receivedDate || "fecha de ingreso sin dato"} · ${availableQuantity} g disponibles · ID interno ${sourceLotId}`,
+        pending: false,
+      };
+    });
+    return allowPendingSourceLot
+      ? [...lots, { value: pendingSourceLotChoice(sourceLotPrefixes.pending, skuId), skuId, sourceLotId: "", label: `${name} · lote pendiente de resolver`, pending: true }]
+      : lots;
+  });
+  const selectedProductChoiceValue = !productDraft?.skuId ? ""
+    : productDraft.sourceLotId ? sourceLotChoice(sourceLotPrefixes.sourceLot, productDraft.skuId, productDraft.sourceLotId)
+      : activeReplacement && selectedProduct?.requiresAppSheetSourceLot === true && allowPendingSourceLot
+        ? pendingSourceLotChoice(sourceLotPrefixes.pending, productDraft.skuId)
+        : productDraft.skuId;
+  const retainedProductChoice = productDraft?.skuId && !productChoices.some(choice => choice.value === selectedProductChoiceValue)
+    ? {
+      value: selectedProductChoiceValue || productDraft.skuId,
+      skuId: productDraft.skuId,
+      sourceLotId: productDraft.sourceLotId,
+      pending: false,
+      label: `${stringValue(selectedProduct?.name, productDraft.skuId)} · ${productDraft.sourceLotId ? `${productDraft.sourceLotId} · no disponible; borrador conservado` : retainedProductIsHistorical ? "guardada en la preventa" : "no disponible; borrador conservado"}`,
+    }
+    : null;
   const isRetainedHistoricalLine = (line: InvoiceLineDraft) =>
     replacementProfile && mode === "edit-preorder" && initial.lines.some(original => original.id === line.id && original.skuId === line.skuId);
   const lineSkuNeedsAttention = (line: InvoiceLineDraft) =>
@@ -720,9 +843,10 @@ export function AppSheetInvoiceForm(props: Props) {
   const savedInputLines = Array.isArray(savedInput.lines)
     ? savedInput.lines.filter((item): item is Row => Boolean(item) && typeof item === "object")
     : savedLines;
-  const unboundConfirmedSourceLot = activeReplacement && !catalogLoading && !catalogError
+  const unboundConfirmedSourceLot = activeReplacement && !uncertain && catalogChannelReady
     ? savedInputLines.find(line => {
       const product = catalog.find(item => String(item.id) === stringValue(line.skuId));
+      if (!product) return true;
       if (product?.requiresAppSheetSourceLot !== true) return false;
       const sourceLotId = stringValue(line.sourceLotId);
       const options = sourceLotOptions(product);
@@ -755,11 +879,11 @@ export function AppSheetInvoiceForm(props: Props) {
         </section>}
         {unboundConfirmedSourceLot && <p className="ops-inline-error" role="alert">Esta preventa no tiene un lote de origen con disponibilidad actual para cada producto. Abrí «Formulario de venta», elegí un lote vigente y guardá los cambios antes de confirmar.</p>}
         {unboundConfirmedSourceLot && hasMoreCatalog && !catalog.some(item => String(item.id) === stringValue(unboundConfirmedSourceLot.skuId)) && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={loadMoreCatalog} disabled={catalogLoading}>Cargar más variedades para verificar el lote</button>}
-        {activeReplacement && catalogLoading && <p role="status">Verificando la disponibilidad de lotes de origen…</p>}
-        {activeReplacement && catalogError && <p className="ops-inline-error" role="alert">No se pudo verificar la disponibilidad de lotes. Reintentá cargar el catálogo antes de confirmar.</p>}
+        {activeReplacement && catalogChannelWaitMessage && <p className={catalogError && catalogChannelMatches ? "ops-inline-error" : undefined} role={catalogError && catalogChannelMatches ? "alert" : "status"}>{catalogChannelWaitMessage}</p>}
+        {activeReplacement && catalogError && catalogChannelMatches && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={retryCatalog} disabled={catalogLoading}>Reintentar catálogo</button>}
         {confirmation && !blankPreorder && <label className="ops-field appsheet-field" htmlFor="appsheet-acceptance"><span>Nota de confirmación · opcional</span><textarea id="appsheet-acceptance" name="acceptance" value={confirmationEvidence} onChange={event => setConfirmationEvidence(event.target.value)} maxLength={2000} disabled={busy || uncertain} /><small>Se registra quién confirma y la versión guardada.</small></label>}
         {uncertain && <p className="appsheet-pending" role="alert">Confirmación pendiente: se pudo confirmar la preventa. Conservá la evidencia y reintentá exactamente la misma acción.</p>}
-        <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={close} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" data-testid={uncertain ? "appsheet-retry-confirm-preorder" : "appsheet-confirm-preorder"} disabled={busy || confirmationLoading || !confirmation || blankPreorder || Boolean(unboundConfirmedSourceLot) || (activeReplacement && (catalogLoading || Boolean(catalogError))) || !Number.isSafeInteger(confirmationVersion)}>{busy ? "Confirmando…" : uncertain ? "Reintentar confirmación" : "Confirmar preventa"}</button></footer>
+        <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={close} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" data-testid={uncertain ? "appsheet-retry-confirm-preorder" : "appsheet-confirm-preorder"} disabled={busy || confirmationLoading || !confirmation || blankPreorder || Boolean(unboundConfirmedSourceLot) || (activeReplacement && !uncertain && !catalogChannelReady) || !Number.isSafeInteger(confirmationVersion)}>{busy ? "Confirmando…" : uncertain ? "Reintentar confirmación" : "Confirmar preventa"}</button></footer>
       </form> : <form className="appsheet-invoice-body" onSubmit={event => void saveInvoice(event)} aria-busy={busy}>
         {creatingShell ? <div className="appsheet-shell-grid">
           <label className="ops-field appsheet-field"><span>Fecha</span><input name="invoiceDate" data-testid="invoiceDate" aria-label="Fecha" type="date" value={draft.invoiceDate} disabled /></label>
@@ -846,7 +970,9 @@ export function AppSheetInvoiceForm(props: Props) {
           {mode === "invoice" && <p className="appsheet-footnote">Guardar confirma la factura y su envío cuando hay moto. El cobro queda pendiente y no afecta cajas.</p>}
         </>}
         {error && <p className={uncertain ? "appsheet-pending" : "ops-inline-error"} role="alert">{error}</p>}
-        <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={close} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" data-testid={uncertain ? "appsheet-retry-invoice" : "appsheet-save-invoice"} disabled={busy || (!uncertain && (!draft.memberId || ((mode === "invoice" || mode === "edit-preorder") && !draft.lines.length) || (mode === "edit-preorder" && !Number.isSafeInteger(expectedVersion))))}>{busy ? "Guardando…" : uncertain ? mode === "edit-preorder" ? "Reintentar guardado" : "Reintentar confirmación" : creatingShell || mode === "edit-preorder" ? "Guardar preventa" : "Guardar"}</button></footer>
+        {activeReplacement && catalogChannelWaitMessage && <p className={catalogError && catalogChannelMatches ? "ops-inline-error" : undefined} role={catalogError && catalogChannelMatches ? "alert" : "status"}>{catalogChannelWaitMessage}</p>}
+        {activeReplacement && catalogError && catalogChannelMatches && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={retryCatalog} disabled={catalogLoading}>Reintentar catálogo</button>}
+        <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={close} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" data-testid={uncertain ? "appsheet-retry-invoice" : "appsheet-save-invoice"} disabled={busy || (activeReplacement && !uncertain && !catalogChannelReady) || (!uncertain && (!draft.memberId || ((mode === "invoice" || mode === "edit-preorder") && !draft.lines.length) || (mode === "edit-preorder" && !Number.isSafeInteger(expectedVersion))))}>{busy ? "Guardando…" : uncertain ? mode === "edit-preorder" ? "Reintentar guardado" : "Reintentar confirmación" : creatingShell || mode === "edit-preorder" ? "Guardar preventa" : "Guardar"}</button></footer>
       </form>}
 
       {stage === "member" && <dialog className="ops-dialog appsheet-child-dialog" ref={memberDialog} data-testid="appsheet-member-dialog" aria-labelledby="appsheet-member-title" onCancel={event => { event.preventDefault(); cancelMemberCreate(); }}>
@@ -871,8 +997,7 @@ export function AppSheetInvoiceForm(props: Props) {
             <label className="ops-field appsheet-field"><span>Id_Detalle</span><input name="line-id" data-testid="line-id" value={productDraft.id} onChange={event => updateProductField("id", event.target.value)} maxLength={100} required /></label>
             <label className="ops-field appsheet-field"><span>ID. Factura</span><input aria-label="ID. Factura" value={draft.invoiceNumber || "Se asigna al guardar"} readOnly /></label>
             <label className="ops-field appsheet-field"><span>Fecha</span><input name="line-date" data-testid="line-date" aria-label="Fecha del producto" type="date" value={productDraft.date} onChange={event => updateProductField("date", event.target.value)} required /></label>
-            <label className="ops-field appsheet-field"><span>Variedad</span><select name="line-skuId" data-testid="line-skuId" aria-label="Variedad" value={productDraft.skuId} onChange={event => updateProductField("skuId", event.target.value)} required><option value="">Elegí variedad</option>{productDraft.skuId && !saleProducts.some(item => String(item.id) === productDraft.skuId) && <option value={productDraft.skuId}>{stringValue(catalog.find(item => String(item.id) === productDraft.skuId)?.name, productDraft.skuId)} · {retainedProductIsHistorical ? "guardada en la preventa" : "no disponible; borrador conservado"}</option>}{saleProducts.map(item => <option key={String(item.id)} value={String(item.id)}>{stringValue(item.name, stringValue(item.code, String(item.id)))}</option>)}</select>{catalogLoading && <small role="status">Cargando variedades…</small>}{catalogError && <small className="appsheet-subtle-error">No se pudo cargar catálogo. <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={retryCatalog}>Reintentar</button></small>}{!catalogLoading && !catalogError && !saleProducts.length && <small>No hay variedades activas disponibles para factura.</small>}{hasMoreCatalog && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={loadMoreCatalog} disabled={catalogLoading}>Cargar más variedades</button>}</label>
-            {activeReplacement && selectedProduct?.requiresAppSheetSourceLot === true && <label className="ops-field appsheet-field"><span>Lote de origen</span><select name="line-sourceLotId" data-testid="line-sourceLotId" aria-label="Lote de origen" value={productDraft.sourceLotId} onChange={event => updateProductField("sourceLotId", event.target.value)} required={mode !== "preorder" && mode !== "edit-preorder"}><option value="">{mode === "preorder" || mode === "edit-preorder" ? "Resolver al confirmar" : "Elegí un lote disponible"}</option>{productDraft.sourceLotId && !selectedSourceLots.some(option => stringValue(option.sourceLotId) === productDraft.sourceLotId) && <option value={productDraft.sourceLotId}>{productDraft.sourceLotId} · no disponible; elegí otro</option>}{selectedSourceLots.map(option => <option key={stringValue(option.sourceLotId)} value={stringValue(option.sourceLotId)}>{stringValue(option.receivedDate)} · {stringValue(option.availableQuantity)} g disponibles · {stringValue(option.sourceLotId).slice(0, 18)}</option>)}</select><small>{mode === "preorder" || mode === "edit-preorder" ? "La preventa puede guardarse sin lote. Elegilo antes de confirmar; su disponibilidad se verificará de nuevo." : "La confirmación reserva únicamente el lote elegido y vuelve a comprobar su disponibilidad."}</small></label>}
+            <label className="ops-field appsheet-field"><span>{activeReplacement && mode === "invoice" ? "Artículo" : "Variedad"}</span><select name="line-skuId" data-testid="line-skuId" aria-label={activeReplacement && mode === "invoice" ? "Artículo" : "Variedad"} value={selectedProductChoiceValue} onChange={event => selectProductChoice(event.target.value)} disabled={activeReplacement && !catalogChannelReady} required><option value="">{activeReplacement && mode === "invoice" ? "Elegí artículo" : "Elegí variedad"}</option>{retainedProductChoice && <option value={retainedProductChoice.value} data-sku-id={retainedProductChoice.skuId} data-source-lot-id={retainedProductChoice.sourceLotId || undefined} disabled={Boolean(retainedProductChoice.sourceLotId)}>{retainedProductChoice.label}</option>}{productChoices.map(choice => <option key={choice.value} value={choice.value} data-sku-id={choice.skuId} data-source-lot-id={choice.sourceLotId || undefined} data-source-lot-pending={choice.pending ? "true" : undefined}>{choice.label}</option>)}</select>{catalogLoading && <small role="status">Cargando variedades…</small>}{catalogError && <small className="appsheet-subtle-error">No se pudo cargar catálogo. <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={retryCatalog}>Reintentar</button></small>}{activeReplacement && !catalogChannelMatches && <small role="status">Actualizando el catálogo para {desiredCatalogChannel === "delivery" ? "reparto" : "retiro"}…</small>}{!catalogLoading && !catalogError && !saleProducts.length && <small>No hay variedades activas disponibles para factura.</small>}{hasMoreCatalog && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={loadMoreCatalog} disabled={catalogLoading}>Cargar más variedades</button>}{activeReplacement && selectedProduct?.requiresAppSheetSourceLot === true && <small>{allowPendingSourceLot ? "Elegí el lote de cada producto o dejalo pendiente para resolverlo al confirmar la preventa. La disponibilidad se verificará de nuevo." : "La confirmación reserva únicamente el lote elegido y vuelve a comprobar su disponibilidad."}</small>}</label>
             <label className="ops-field appsheet-field"><span>Escala_Tarifaria</span><select name="line-scale" data-testid="line-scale" aria-label="Escala tarifaria" value={productDraft.scale} onChange={event => updateProductField("scale", event.target.value)}><option value="">Elegí una escala</option>{productDraft.scale && !observedScales.includes(productDraft.scale) && <option value={productDraft.scale}>{productDraft.scale}</option>}{observedScales.map(scale => <option key={scale} value={scale}>{scale}</option>)}</select><small>Se conserva la escala elegida; el precio sugerido sólo se propone cuando coincide exactamente el campo del catálogo y la moneda.</small></label>
             <label className="ops-field appsheet-field"><span>Gramos pedidos</span><input name="line-quantity" data-testid="line-quantity" aria-label="Gramos pedidos" type={replacementProfile ? "number" : "text"} inputMode="decimal" {...(replacementProfile ? { min: 1, max: 99, step: "any", "aria-describedby": "appsheet-quantity-guidance" } : {})} onInvalid={() => { if (replacementProfile) setError("Ingresá entre 1 y 99 gramos, con hasta tres decimales."); }} value={productDraft.quantity} onChange={event => updateProductField("quantity", event.target.value)} required placeholder="Ej.: 3,5" />{replacementProfile && <small id="appsheet-quantity-guidance">1–99 gramos, hasta tres decimales.</small>}</label>
             <label className="ops-field appsheet-field"><span>Valor total</span><input name="line-total" data-testid="line-total" aria-label="Valor total" inputMode="decimal" value={productDraft.total} onChange={event => updateProductField("total", event.target.value)} required placeholder="Importe editable" /><small>El total editable se propone si el cálculo es exacto y se actualiza hasta que ingreses un valor.</small></label>
@@ -884,7 +1009,8 @@ export function AppSheetInvoiceForm(props: Props) {
             <label className="ops-field appsheet-field"><span>N_Factura_Virtual</span><input aria-label="N_Factura_Virtual" value="Se asigna al guardar" disabled /></label>
           </fieldset>
           {error && <p className="ops-inline-error" role="alert">{error}</p>}
-          <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={cancelProduct} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" disabled={busy || uncertain}>{productIndex === null ? "Añadir producto" : "Guardar cambios"}</button></footer>
+          {activeReplacement && catalogChannelWaitMessage && <p className={catalogError && catalogChannelMatches ? "ops-inline-error" : undefined} role={catalogError && catalogChannelMatches ? "alert" : "status"}>{catalogChannelWaitMessage}</p>}
+          <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={cancelProduct} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" disabled={busy || uncertain || (activeReplacement && !catalogChannelReady)}>{productIndex === null ? "Añadir producto" : "Guardar cambios"}</button></footer>
         </form>
       </dialog>}
 
