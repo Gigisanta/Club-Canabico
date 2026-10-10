@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { apiGet, hasCapability, hasCommand, isUncertainCommandOutcome } from "./api";
 import { amountFormToMinor, formatMinor } from "./money";
 import { calculateAppSheetInvoiceFinancials } from "../../shared/operations/appsheet-invoice-rules";
+import { appsheetInvoiceLine } from "../../shared/operations/appsheet";
 import { appSheetCatalogueStoredSchema } from "../../shared/operations/appsheet-catalogue";
 import { proposeAppSheetLinePricingInitialValue, proposeAppSheetLineSubtotal } from "../../shared/operations/appsheet-line-pricing";
 import { RemoteSelect } from "./RemoteSelect";
@@ -37,7 +38,7 @@ type InvoiceDraft = {
 };
 type SnapshotDraft =
   | { status: "valid"; draft: InvoiceDraft }
-  | { status: "unavailable" | "invalid-currency"; error: string };
+  | { status: "unavailable" | "invalid-currency" | "invalid-lines"; error: string };
 
 interface Props {
   open: boolean;
@@ -101,11 +102,36 @@ function fromSnapshot(order: Row | undefined, fallbackDate: string): SnapshotDra
     status: "invalid-currency",
     error: "La preventa original no tiene una moneda admitida (ARS o USD). La versión guardada se conserva; revisá el dato de origen antes de editar.",
   };
-  const lines = Array.isArray(input.lines) ? input.lines.filter((item): item is Row => Boolean(item) && typeof item === "object").map(line => ({
-    id: stringValue(line.id, crypto.randomUUID()), skuId: stringValue(line.skuId), sourceLotId: stringValue(line.sourceLotId), date: stringValue(line.date, stringValue(input.invoiceDate, fallbackDate)),
+  const invalidLines: SnapshotDraft = {
+    status: "invalid-lines",
+    error: "La preventa original no conserva todos sus renglones e identidades válidos. La versión guardada se conserva; revisá el detalle de origen antes de editar.",
+  };
+  if (!Array.isArray(input.lines) || !Array.isArray(quote.lines) || input.lines.length !== quote.lines.length) return invalidLines;
+  const originalLines = [];
+  const lineIds = new Set<string>();
+  const storedLines = new Map<string, Row>();
+  for (const value of quote.lines) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return invalidLines;
+    const line = value as Row;
+    if (typeof line.id !== "string" || !line.id.trim() || storedLines.has(line.id)) return invalidLines;
+    storedLines.set(line.id, line);
+  }
+  for (const value of input.lines) {
+    const parsed = appsheetInvoiceLine.safeParse(value);
+    if (!parsed.success || !parsed.data.id.trim() || lineIds.has(parsed.data.id)) return invalidLines;
+    const stored = storedLines.get(parsed.data.id);
+    if (!stored || stored.skuId !== parsed.data.skuId || stored.unit !== "g" || stored.requested !== parsed.data.quantity ||
+        stored.date !== parsed.data.date || stored.scale !== parsed.data.scale || stored.explicitTotalMinor !== parsed.data.totalMinor ||
+        stored.referenceMinor !== parsed.data.totalMinor || stored.revenueMinor !== parsed.data.totalMinor ||
+        stored.pricePerGramMinor !== parsed.data.pricePerGramMinor) return invalidLines;
+    lineIds.add(parsed.data.id);
+    originalLines.push(parsed.data);
+  }
+  const lines = originalLines.map(line => ({
+    id: line.id, skuId: line.skuId, sourceLotId: stringValue(line.sourceLotId), date: line.date,
     scale: stringValue(line.scale), quantity: stringValue(line.quantity), total: minorToForm(line.totalMinor),
     pricePerGram: minorToForm(line.pricePerGramMinor), priceManual: true, totalManual: true,
-  })) : [];
+  }));
   const motoValue = objectValue(input.moto);
   const payment = (value: unknown): Payment => value === "transfer" || value === "mercado_pago" || value === "card" ? value : "cash";
   const addressObject = objectValue(input.address);
@@ -609,15 +635,17 @@ export function AppSheetInvoiceForm(props: Props) {
     const id = String(order?.id ?? "");
     const quote = objectValue(confirmation?.quote);
     const savedLines = Array.isArray(quote.lines) ? quote.lines : [];
-    if (!id || !savedLines.length || !confirmationEvidence.trim() || !Number.isSafeInteger(confirmationVersion)) {
-      setConfirmationError(!savedLines.length ? "La preventa todavía no tiene productos guardados. Abrí «Formulario de venta» antes de confirmar." : "Cargá la evidencia informada y actualizá la versión del registro.");
+    if (!id || !savedLines.length || !Number.isSafeInteger(confirmationVersion)) {
+      setConfirmationError(!savedLines.length ? "La preventa todavía no tiene productos guardados. Abrí «Formulario de venta» antes de confirmar." : "Actualizá la versión del registro antes de confirmar.");
       return;
     }
     if (submitting.current) return;
     submitting.current = true; setBusy(true); setConfirmationError("");
     try {
-      await runCommand("InvoiceConfirmed", id, confirmationVersion!, { acceptance: { note: confirmationEvidence.trim() } });
-      dialog.current?.close(); onSaved(id, "Preventa confirmada con la versión guardada y la evidencia aportada por el operador. Se reservó stock y se creó el envío si incluye servicio de moto; no se registró un cobro."); onClose();
+      await runCommand("InvoiceConfirmed", id, confirmationVersion!, { acceptance: confirmationEvidence.trim()
+        ? { note: confirmationEvidence.trim() }
+        : { method: "operator_confirmed_saved_preorder" } });
+      dialog.current?.close(); onSaved(id, "Preventa confirmada con la versión guardada. Se reservó stock y se creó el envío si incluye servicio de moto; no se registró un cobro."); onClose();
     } catch (cause) {
       setUncertain(isUncertainCommandOutcome(cause));
       setConfirmationError(isUncertainCommandOutcome(cause)
@@ -729,9 +757,9 @@ export function AppSheetInvoiceForm(props: Props) {
         {unboundConfirmedSourceLot && hasMoreCatalog && !catalog.some(item => String(item.id) === stringValue(unboundConfirmedSourceLot.skuId)) && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={loadMoreCatalog} disabled={catalogLoading}>Cargar más variedades para verificar el lote</button>}
         {activeReplacement && catalogLoading && <p role="status">Verificando la disponibilidad de lotes de origen…</p>}
         {activeReplacement && catalogError && <p className="ops-inline-error" role="alert">No se pudo verificar la disponibilidad de lotes. Reintentá cargar el catálogo antes de confirmar.</p>}
-        {confirmation && !blankPreorder && <label className="ops-field appsheet-field" htmlFor="appsheet-acceptance"><span>Evidencia aportada por el operador</span><textarea id="appsheet-acceptance" name="acceptance" value={confirmationEvidence} onChange={event => setConfirmationEvidence(event.target.value)} maxLength={2000} required disabled={busy || uncertain} /><small>El sistema registra esta evidencia, pero no verifica el consentimiento del cliente.</small></label>}
+        {confirmation && !blankPreorder && <label className="ops-field appsheet-field" htmlFor="appsheet-acceptance"><span>Nota de confirmación · opcional</span><textarea id="appsheet-acceptance" name="acceptance" value={confirmationEvidence} onChange={event => setConfirmationEvidence(event.target.value)} maxLength={2000} disabled={busy || uncertain} /><small>Se registra quién confirma y la versión guardada.</small></label>}
         {uncertain && <p className="appsheet-pending" role="alert">Confirmación pendiente: se pudo confirmar la preventa. Conservá la evidencia y reintentá exactamente la misma acción.</p>}
-        <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={close} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" data-testid={uncertain ? "appsheet-retry-confirm-preorder" : "appsheet-confirm-preorder"} disabled={busy || confirmationLoading || !confirmation || blankPreorder || Boolean(unboundConfirmedSourceLot) || (activeReplacement && (catalogLoading || Boolean(catalogError))) || !Number.isSafeInteger(confirmationVersion) || !confirmationEvidence.trim()}>{busy ? "Confirmando…" : uncertain ? "Reintentar confirmación" : "Confirmar preventa"}</button></footer>
+        <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={close} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" data-testid={uncertain ? "appsheet-retry-confirm-preorder" : "appsheet-confirm-preorder"} disabled={busy || confirmationLoading || !confirmation || blankPreorder || Boolean(unboundConfirmedSourceLot) || (activeReplacement && (catalogLoading || Boolean(catalogError))) || !Number.isSafeInteger(confirmationVersion)}>{busy ? "Confirmando…" : uncertain ? "Reintentar confirmación" : "Confirmar preventa"}</button></footer>
       </form> : <form className="appsheet-invoice-body" onSubmit={event => void saveInvoice(event)} aria-busy={busy}>
         {creatingShell ? <div className="appsheet-shell-grid">
           <label className="ops-field appsheet-field"><span>Fecha</span><input name="invoiceDate" data-testid="invoiceDate" aria-label="Fecha" type="date" value={draft.invoiceDate} disabled /></label>

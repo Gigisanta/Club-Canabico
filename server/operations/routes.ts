@@ -11,6 +11,7 @@ import "./commercial.js";
 import "./finance.js";
 import "./period-coverage.js";
 import "./orders.js";
+import "./appsheet-pending-import.js";
 import { memberHistory } from "./member-history.js";
 import { productHistory } from "./product-history.js";
 import { resolveStockAvailability } from "./stock-availability.js";

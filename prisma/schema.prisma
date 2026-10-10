@@ -1151,6 +1151,7 @@ model OperationOrder {
   sourceSystem String?
   sourceId String?
   lines OperationOrderLine[]
+  legacySettlements AppSheetLegacySettlement[]
   invoiceNumberReservation AppSheetInvoiceNumberReservation?
   @@unique([sourceSystem, sourceId])
   @@index([commercialState, createdAt])
@@ -1379,6 +1380,7 @@ model LegacyImportSnapshot {
   captureManifestId String?
   captureManifest AppSheetCaptureManifest? @relation(fields: [captureManifestId], references: [captureId], onDelete: Restrict)
   sourceRecords LegacySourceRecord[]
+  appSheetPendingBatches AppSheetPendingImportBatch[]
   invoiceSequences AppSheetInvoiceSequence[]
   createdAt DateTime @default(now())
   upload LegacyImportUpload?
@@ -1420,6 +1422,7 @@ model AppSheetCaptureManifest {
   snapshots LegacyImportSnapshot[]
   authorityRows OperationAuthority[] @relation("ActiveAuthorityCapture")
   reviewedGates CutoverGate[] @relation("CutoverGateCapture")
+  pendingImports AppSheetPendingImportBatch[]
   invoiceSequences AppSheetInvoiceSequence[]
   @@unique([sourceSystem, sourceId, manifestHash])
   @@index([sourceSystem, sourceId, cutoffAt])
@@ -1510,6 +1513,8 @@ model LegacySourceRecord {
   resolution Json?
   cashOpeningEvents LedgerEvent[] @relation("LegacyCashOpeningSource")
   stockOpeningFacts StockFact[] @relation("LegacyStockOpeningSource")
+  appSheetPendingDispositions AppSheetPendingImportDisposition[]
+  appSheetLegacySettlements AppSheetLegacySettlement[]
   @@unique([snapshotId, sourceTable, sourceRow])
   @@index([sourceTable, sourceKey])
   @@index([snapshotId, sourceTable, sourceKey])
@@ -1574,6 +1579,111 @@ model LegacyException {
   resolvedBy String?
   resolvedAt DateTime?
   @@index([snapshotId, status])
+}
+
+model AppSheetPendingImportBatch {
+  id String @id
+  snapshotId String
+  captureId String
+  projectionHash String
+  manifestHash String
+  dataHash String
+  historyRecordsHash String
+  mappingId String
+  mappingHash String
+  sourceSpecHash String
+  sourceCoverageHash String
+  dispositionHash String
+  destinationHash String
+  destinationVersion Int @default(1)
+  target String
+  destinationIdentity String
+  commitSha String
+  backupManifestHash String
+  backupSnapshotAt DateTime
+  stageReview Json?
+  sourceRecordCount Int
+  dispositionCount Int
+  status String @default("staged")
+  createdBy String
+  reviewedBy String?
+  reviewedAt DateTime?
+  reviewedObjectVersion Int?
+  reviewEvidence Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  snapshot LegacyImportSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Restrict)
+  captureManifest AppSheetCaptureManifest @relation(fields: [captureId], references: [captureId], onDelete: Restrict)
+  dispositions AppSheetPendingImportDisposition[]
+  settlements AppSheetLegacySettlement[]
+  @@unique([snapshotId, mappingId, mappingHash, sourceSpecHash])
+  @@unique([captureId, manifestHash, mappingId, mappingHash, sourceSpecHash])
+  @@index([captureId, status])
+}
+
+model AppSheetPendingImportDisposition {
+  id String @id
+  batchId String
+  sourceRecordId String
+  sourceTable String
+  sourceRow Int
+  sourceRecordHash String
+  reconciliationHash String
+  mappingHash String
+  dimension String
+  sourceStatus String
+  state String
+  reason String?
+  destinationType String?
+  destinationId String?
+  destinationVersion Int?
+  destinationHash String?
+  createdAt DateTime @default(now())
+  batch AppSheetPendingImportBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  sourceRecord LegacySourceRecord @relation(fields: [sourceRecordId], references: [id], onDelete: Restrict)
+  settlement AppSheetLegacySettlement?
+  @@unique([batchId, sourceRecordId, dimension])
+  @@index([sourceRecordId, dimension, state])
+}
+
+model AppSheetLegacySettlement {
+  id String @id
+  batchId String
+  dispositionId String @unique
+  sourceRecordId String
+  sourceRecordHash String
+  reconciliationHash String
+  mappingHash String
+  captureId String
+  sourceKeyHash String
+  operationOrderId String
+  operationOrderMemberId String
+  financialBasisHash String
+  operationOrderVersion Int
+  operationOrderHash String
+  orderMappingReviewerId String
+  orderMappingEvidenceHash String
+  currency String
+  dueMinor BigInt
+  legacyPaidMinor BigInt
+  remainingMinor BigInt
+  paymentRowsHash String
+  paymentReferences Json
+  destinationHash String
+  destinationVersion Int @default(1)
+  status String @default("staged")
+  reviewedBy String?
+  reviewedAt DateTime?
+  createdBy String
+  createdAt DateTime @default(now())
+  batch AppSheetPendingImportBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  disposition AppSheetPendingImportDisposition @relation(fields: [dispositionId], references: [id], onDelete: Restrict)
+  sourceRecord LegacySourceRecord @relation(fields: [sourceRecordId], references: [id], onDelete: Restrict)
+  operationOrder OperationOrder @relation(fields: [operationOrderId], references: [id], onDelete: Restrict)
+  @@unique([sourceRecordId])
+  @@unique([operationOrderId])
+  @@index([operationOrderId, status])
+  @@index([captureId, status])
 }
 model CutoverGate {
   id String @id

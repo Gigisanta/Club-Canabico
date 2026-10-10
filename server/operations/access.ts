@@ -10,6 +10,7 @@ import { APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM, APPSHEET_H
 import { appSheetDefinitionInventorySchema } from "../../shared/operations/appsheet-definition.js";
 import { APPSHEET_EXPECTED_LIVE_APP_ID, appSheetAppliedDefinitionHash, appSheetCanonicalCurrentDestinationHash } from "./appsheet-canonical.js";
 import { appSheetDatabaseDestinationIdentity } from "./appsheet-database-target.js";
+import { requireReviewedAppSheetPendingImport } from "./appsheet-pending-import.js";
 import { legacyPayloadHash } from "./legacy-upload-contract.js";
 import { registerCommand, OperationError, json, audit, capabilities, requireCapability, requireCanonicalAppSheetReplacementProfile, objectId, evidence, civilDate, requireMemberScope, requireDocumentScope, objectScope, type CommandContext, type Tx } from "./core.js";
 import { commercialAddress, commercialPreferences } from "./member-fields.js";
@@ -1305,8 +1306,11 @@ async function requireGateHumanReview(ctx:CommandContext,v:CutoverGateReview){
  if(v.cutoverProfile==="legacy")return {captureId:null as string|null,proof:null as AppSheetReplacementProof|null,gateProof:null as Record<string,unknown>|null};
  if(v.gateId==="legacy-writes-disabled")throw appSheetReadinessError("legacy_writes_remain_enabled_by_cutover_decision");
  const proof=await requireVerifiedAppSheetReplacement(ctx,v.captureId!,{allowPendingObjects:true});
- if(v.gateId==="open-objects-approved")throw appSheetReadinessError("pending_objects_checkpoint_unavailable");
  let gateProof:Record<string,unknown>|null=null;
+ if(v.gateId==="open-objects-approved"){
+  try{gateProof=await requireReviewedAppSheetPendingImport(ctx.tx,v.captureId!);}
+  catch(error){throw appSheetReadinessError(error instanceof Error?error.message:"pending_import_review_incomplete");}
+ }
  if(v.gateId==="final-delta-reconciled"){
   const finalDeltaInput=finalDeltaReviewInputSchema.parse({manualPauseStartedAt:v.manualPauseStartedAt,manualPauseEndedAt:v.manualPauseEndedAt,
    manualPauseEvidenceRef:v.manualPauseEvidenceRef,expectedHandoffChangesRef:v.expectedHandoffChangesRef});
@@ -1371,6 +1375,15 @@ async function requireApprovedCutoverGates(ctx:CommandContext,cutoverProfile:Cut
  });
  if(missing.length)throw new OperationError(422,"CUTOVER_GATES_PENDING","Faltan controles para el cambio de autoridad",{missing});
  if(cutoverProfile==="appsheet-replacement"&&proof){
+  const openObjectsGate=gatesById.get("open-objects-approved"),openObjectsEnvelope=openObjectsGate&&asJsonObject(openObjectsGate.evidence),
+   openObjectsBinding=openObjectsEnvelope&&asJsonObject(openObjectsEnvelope.appSheetReplacement),
+   sealedPendingImportProof=openObjectsBinding&&asJsonObject(openObjectsBinding.gateProof);
+  if(!captureId||!sealedPendingImportProof)throw appSheetReadinessError("open_objects_pending_import_gate_proof_missing",{captureId});
+  let currentPendingImportProof:Awaited<ReturnType<typeof requireReviewedAppSheetPendingImport>>;
+  try{currentPendingImportProof=await requireReviewedAppSheetPendingImport(ctx.tx,captureId);}
+  catch(error){throw appSheetReadinessError(error instanceof Error?error.message:"pending_import_review_incomplete",{captureId});}
+  if(hashJson(sealedPendingImportProof)!==hashJson(currentPendingImportProof))
+   throw appSheetReadinessError("open_objects_pending_import_gate_stale",{captureId});
   const gate=gatesById.get("final-delta-reconciled"),envelope=gate&&asJsonObject(gate.evidence),binding=envelope&&asJsonObject(envelope.appSheetReplacement);
   const gateProof=binding&&asJsonObject(binding.gateProof),stored=gateProof&&asJsonObject(gateProof.finalDelta);
   const savedInput=stored?finalDeltaReviewInputSchema.safeParse({manualPauseStartedAt:stored.manualPauseStartedAt,

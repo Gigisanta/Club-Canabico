@@ -4,6 +4,8 @@ import { registerCommand, OperationError, json, objectId, currency, minor, posit
 import { parseDecimal, roundHalfUp } from "../../shared/operations/exact.js";
 import { isAppSheetInvoiceTotalPending } from "../../shared/operations/appsheet.js";
 import { requireAppSheetOpeningSourceRecord } from "./access.js";
+import { reviewedAppSheetLegacyPaidForOrder } from "./appsheet-pending-import.js";
+import { appSheetLegacyAdjustedFinancialState, appSheetLegacyAdjustedOutstanding } from "../../shared/operations/appsheet-pending-import.js";
 import "./period-coverage.js";
 const signedMinor=z.string().regex(/^(0|-?[1-9]\d{0,18})$/).refine(v=>BigInt(v)>=-9223372036854775808n&&BigInt(v)<=9223372036854775807n);
 function equivalentMinor(amount:bigint,fromCurrency:string,toCurrency:string,rate?:string){
@@ -14,10 +16,6 @@ function equivalentMinor(amount:bigint,fromCurrency:string,toCurrency:string,rat
  if(equivalent===0n)throw new OperationError(422,"CROSS_CURRENCY_EQUIVALENT_ZERO","La equivalencia no alcanza una unidad mínima de la moneda de la deuda; revisá el importe o la tasa");
  if(!minor.safeParse(equivalent.toString()).success)throw new OperationError(422,"CROSS_CURRENCY_EQUIVALENT_RANGE","La equivalencia supera la precisión monetaria admitida; revisá el importe o la tasa");
  return equivalent;
-}
-function orderFinancialState(total:bigint,verified:bigint,refunded:bigint){
- if(refunded>0n)return refunded===verified?"refunded":"partially_refunded";
- return verified>=total?"paid":verified>0n?"partially_paid":"unpaid";
 }
 const businessDateFormatter=new Intl.DateTimeFormat("en-CA",{timeZone:"America/Argentina/Buenos_Aires"});
 const businessDate=(instant:Date)=>businessDateFormatter.format(instant);
@@ -147,14 +145,17 @@ registerCommand("CollectionVerified",{kind:"collection",capability:"collections.
  const equivalent=equivalentMinor(c.amountMinor,c.currency,order.currency,ctx.envelope.data.exchangeRate as string|undefined);
  // The frozen quote remains historical evidence after cancellation. A late
  // receipt still records real cash, but cannot pay cancelled demand.
- const outstanding=order.commercialState==="cancelled"||order.verifiedMinor>=order.totalMinor?0n:order.totalMinor-order.verifiedMinor;
+ const legacyPaid=await reviewedAppSheetLegacyPaidForOrder(ctx.tx,order);
+ const outstanding=appSheetLegacyAdjustedOutstanding({totalMinor:order.totalMinor,bomboVerifiedMinor:order.verifiedMinor,
+  legacyPaidMinor:legacyPaid,cancelled:order.commercialState==="cancelled"});
  const requested=ctx.envelope.data.appliedMinor===undefined?equivalent:BigInt(ctx.envelope.data.appliedMinor as string);
  if(requested>equivalent)throw new OperationError(422,"APPLICATION_EXCEEDS_RECEIPT","La aplicación supera el dinero verificado");
  const applied=requested<outstanding?requested:outstanding;const excess=equivalent-applied;
  await postLedger(ctx,"collection",c.id,[{accountId:a.id,currency:c.currency,amountMinor:c.amountMinor}],{orderId:order.id,appliedMinor:applied.toString(),appliedCurrency:order.currency,exchangeRate:ctx.envelope.data.exchangeRate??null,evidence:ctx.envelope.data.evidence});
  await ctx.tx.collectionReport.update({where:{id:c.id},data:{status:"verified",verifiedBy:ctx.actor.id,verifiedAt:ctx.now,accountId:a.id,appliedMinor:applied,excessMinor:excess,exchangeRate:ctx.envelope.data.exchangeRate as string|undefined}});
  const paid=order.verifiedMinor+applied;
- await ctx.tx.operationOrder.update({where:{id:order.id},data:{verifiedMinor:paid,financialState:orderFinancialState(order.totalMinor,paid,order.refundedMinor)}});
+ await ctx.tx.operationOrder.update({where:{id:order.id},data:{verifiedMinor:paid,financialState:appSheetLegacyAdjustedFinancialState({
+  totalMinor:order.totalMinor,bomboVerifiedMinor:paid,legacyPaidMinor:legacyPaid,refundedMinor:order.refundedMinor})}});
  await touchAggregate(ctx,order.id);
  let creditId:string|null=null;
  if(excess>0n){creditId=randomUUID();await ctx.tx.memberCredit.create({data:{id:creditId,memberId:order.memberId,collectionId:c.id,currency:order.currency,amountMinor:excess,treatment:ctx.envelope.data.excessTreatment as string}});await ctx.tx.operationObject.create({data:{id:creditId,kind:"credit",version:1,createdBy:ctx.actor.id}});}
@@ -171,11 +172,13 @@ registerCommand("CollectionVerificationReversed",{kind:"collection",capability:"
  const [order,events,credits]=await Promise.all([ctx.tx.operationOrder.findUniqueOrThrow({where:{id:report.orderId}}),ctx.tx.ledgerEvent.findMany({where:{sourceObjectId:report.id,kind:"collection"},include:{legs:true}}),ctx.tx.memberCredit.findMany({where:{collectionId:report.id}})]);
  if(events.length!==1||events[0]!.legs.length!==1||events[0]!.legs[0]!.amountMinor!==report.amountMinor)throw new OperationError(409,"COLLECTION_REVERSAL_EVIDENCE","No pudo verificarse el asiento original completo");
  if(credits.some(c=>c.resolvedMinor!==0n)||order.verifiedMinor-report.appliedMinor<order.refundedMinor)throw new OperationError(409,"COLLECTION_REVERSAL_DEPENDENCIES","Hay crédito utilizado o reintegros posteriores; resolvé sus efectos antes de corregir el cobro");
+ const legacyPaid=await reviewedAppSheetLegacyPaidForOrder(ctx.tx,order);
  const original=events[0]!,leg=original.legs[0]!;
  if(await accountBalance(ctx.tx,leg.accountId)<leg.amountMinor)throw new OperationError(409,"COLLECTION_REVERSAL_LOCATION","El dinero ya salió de la cuenta original; conciliá su ubicación antes de corregir");
  const event=await postLedger(ctx,"collection_reversal",report.id,[{accountId:leg.accountId,currency:leg.currency,amountMinor:-leg.amountMinor}],{originalEventId:original.id,appliedMinor:report.appliedMinor.toString(),excessMinor:report.excessMinor.toString(),...ctx.envelope.data});
  const verified=order.verifiedMinor-report.appliedMinor;
- await ctx.tx.operationOrder.update({where:{id:order.id},data:{verifiedMinor:verified,financialState:orderFinancialState(order.totalMinor,verified,order.refundedMinor)}});
+ await ctx.tx.operationOrder.update({where:{id:order.id},data:{verifiedMinor:verified,financialState:appSheetLegacyAdjustedFinancialState({
+  totalMinor:order.totalMinor,bomboVerifiedMinor:verified,legacyPaidMinor:legacyPaid,refundedMinor:order.refundedMinor})}});
  for(const c of credits){await ctx.tx.memberCredit.update({where:{id:c.id},data:{treatment:"reversed"}});await touchAggregate(ctx,c.id);}
  await ctx.tx.collectionReport.update({where:{id:report.id},data:{status:"reversed"}});await touchAggregate(ctx,order.id);
  return {collectionId:report.id,event,appliedMinorReversed:report.appliedMinor,excessMinorReversed:report.excessMinor,effect:"exact_forward_correction"};
@@ -249,9 +252,13 @@ registerCommand("MemberCreditApplied",{kind:"credit",capability:"collections.ver
  const c=await ctx.tx.memberCredit.findUniqueOrThrow({where:{id:ctx.envelope.targetId}}),o=await ctx.tx.operationOrder.findUniqueOrThrow({where:{id:ctx.envelope.data.orderId as string}}),amount=BigInt(ctx.envelope.data.amountMinor as string);
  if(isAppSheetInvoiceTotalPending(o.quote))throw new OperationError(423,"INVOICE_TOTAL_DEFINITION_PENDING","No se puede aplicar un crédito hasta cotejar el total facturado de AppSheet");
  if(c.treatment!=="member_credit"||o.memberId!==c.memberId||o.currency!==c.currency||o.commercialState!=="confirmed")throw new OperationError(422,"CREDIT_APPLICATION_SCOPE","Aplicá el crédito al mismo socio, moneda y pedido confirmado");
- if(amount>c.amountMinor-c.resolvedMinor||amount>o.totalMinor-o.verifiedMinor)throw new OperationError(422,"CREDIT_APPLICATION_LIMIT","La aplicación supera el crédito o la deuda pendientes");
+ const legacyPaid=await reviewedAppSheetLegacyPaidForOrder(ctx.tx,o);
+ const outstanding=appSheetLegacyAdjustedOutstanding({totalMinor:o.totalMinor,bomboVerifiedMinor:o.verifiedMinor,
+  legacyPaidMinor:legacyPaid,cancelled:o.commercialState==="cancelled"});
+ if(amount>c.amountMinor-c.resolvedMinor||amount>outstanding)throw new OperationError(422,"CREDIT_APPLICATION_LIMIT","La aplicación supera el crédito o la deuda pendientes");
  await ctx.tx.memberCredit.update({where:{id:c.id},data:{resolvedMinor:{increment:amount}}});
- const paid=o.verifiedMinor+amount;await ctx.tx.operationOrder.update({where:{id:o.id},data:{verifiedMinor:paid,financialState:orderFinancialState(o.totalMinor,paid,o.refundedMinor)}});
+ const paid=o.verifiedMinor+amount;await ctx.tx.operationOrder.update({where:{id:o.id},data:{verifiedMinor:paid,financialState:appSheetLegacyAdjustedFinancialState({
+  totalMinor:o.totalMinor,bomboVerifiedMinor:paid,legacyPaidMinor:legacyPaid,refundedMinor:o.refundedMinor})}});
  await ctx.tx.operationObject.update({where:{id:o.id},data:{version:{increment:1}}});
  return {creditId:c.id,orderId:o.id,appliedMinor:amount,effect:"existing_credit_applied_without_new_receipt",evidence:ctx.envelope.data.evidence};
 }});

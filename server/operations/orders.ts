@@ -346,11 +346,9 @@ registerCommand("InvoiceUpdated",{kind:"order",capability:"orders.write",schema:
  if(replacement){
   if(!authority?.captureManifestId)throw new OperationError(423,"APP_SHEET_INVOICE_SEQUENCE_CAPTURE_REQUIRED","La numeración requiere una captura verificada vinculada a la autoridad actual.");
  }
- if(!v.preorder){
-  // Verify the persisted quote before replacing it. Historical v1 Moto transfers
-  // may only be converted by this edit when replacement recalculates them as v2.
-  await verifiedAppSheetSnapshot(ctx,order,previousQuote,{allowIncompleteHistoricalMotoForEdit:replacement});
- }
+ // Verify the persisted quote before replacing any pending details. Historical
+ // v1 Moto transfers may be converted by an edit that recalculates them as v2.
+ await verifiedAppSheetSnapshot(ctx,order,previousQuote,{allowIncompleteHistoricalMotoForEdit:replacement});
  const effectiveInput=invoiceNumberLocked?{...v,invoiceNumber:storedInvoiceNumber??undefined}:v;
  const skuIds=[...new Set(v.lines.map(line=>line.skuId))],skus=skuIds.length?await ctx.tx.catalogSku.findMany({where:{id:{in:skuIds}}}):[];
  if(replacement)await requireEligibleAppSheetReplacementSkus(ctx.tx,skuIds);
