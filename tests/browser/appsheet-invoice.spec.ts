@@ -938,7 +938,7 @@ test("a catalog SKU that disappears after selection stays in the invoice draft a
   await expect(invoice.locator(".appsheet-subtle-error[role='alert']")).toContainText("ya no está disponible");
 
   await invoice.getByTestId("appsheet-save-invoice").click();
-  await expect(invoice.locator(".ops-inline-error[role='alert']")).toContainText("eligí una variedad disponible");
+  await expect(invoice.locator(".ops-inline-error[role='alert']")).toContainText("elegí una variedad disponible");
   await expect(invoice.locator(".appsheet-dialog-lines li")).toHaveCount(1);
   await expect(invoice.locator(".appsheet-dialog-lines li")).toContainText("3 g");
   expect(commandPosts).toHaveLength(0);
