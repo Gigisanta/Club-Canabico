@@ -660,6 +660,8 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
     assert.deepEqual(await countFinancialEffects(), financialEffectsBefore);
 
     const acceptedInput = { ...inputWithoutOptionalDefaults({ quantity: "1", preorder: false }), acceptance: { note: "Aceptación sintética de la cotización mostrada" } };
+    // The earlier direct InvoiceConfirmed already reserved 1 g from this shared balance.
+    const beforeAcceptedUpdate = await readReservationCounters();
     const acceptedRequest = envelope(preorderId, "InvoiceUpdated", acceptedInput, 1);
     const accepted = await call(acceptedRequest);
     assert.equal(accepted.response.status, 200, JSON.stringify(accepted.body));
@@ -671,7 +673,9 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
     assert.equal(confirmedState.order.commercialState, "confirmed");
     assert.equal(confirmedState.order.totalMinor, "11550");
     assert.equal(confirmedState.objectVersion, 2);
-    assert.equal(confirmedState.reserved, "1");
+    assert.ok(new Prisma.Decimal(confirmedState.reserved).minus(beforeAcceptedUpdate.reserved).eq("1"),
+      "la aceptación agrega exactamente 1 g a las reservas del saldo compartido");
+    assert.equal(confirmedState.stockQuantity, beforeAcceptedUpdate.stockQuantity, "la reserva no cambia la cantidad física del saldo");
     assert.equal(confirmedState.reservations, 1);
     assert.equal(confirmedState.deliveries, 1);
     assert.deepEqual(confirmedQuote.acceptance.note, "Aceptación sintética de la cotización mostrada");
