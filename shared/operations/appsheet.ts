@@ -43,6 +43,8 @@ export const appsheetInvoiceLine = z.strictObject({
   quantity: z.string().regex(/^(0|[1-9]\d{0,25})(\.\d{1,3})?$/),
   /** Explicit AppSheet `Valor total`; never recompute this from quantity and a unit price. */
   totalMinor: amountMinor.refine(value => BigInt(value) > 0n, "El total explícito de la línea debe ser positivo"),
+  /** Optional explicit `Precio por gramo`; informational and independent from `totalMinor`. */
+  pricePerGramMinor: amountMinor.optional(),
 });
 
 export const appsheetMoto = z.strictObject({

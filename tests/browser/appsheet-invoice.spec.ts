@@ -1018,6 +1018,8 @@ test("a retained AppSheet preorder line requires current availability before Inv
   await expect(preorderRow).toHaveCount(1);
   const shellDetail = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
   expect(shellDetail.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "preorder" });
+  expect(Object.hasOwn(shellDetail.order.quote.input.lines[0], "pricePerGramMinor")).toBe(false);
+  expect(Object.hasOwn(shellDetail.order.quote.lines[0], "pricePerGramMinor")).toBe(false);
   expect(shellDetail.order.quote.lines).toHaveLength(1);
   expect(shellDetail.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201" });
   expect(shellDetail.reservations).toHaveLength(0);
@@ -1106,6 +1108,8 @@ test("a retained AppSheet preorder line requires current availability before Inv
     acceptance: { note: acceptanceNote },
     lines: [{ skuId: "ops-sku-c", scale: "Precio_5_Gramos", quantity: "3", totalMinor: "1201" }],
   });
+  const updatedLines = updatedEnvelope.data.lines as Array<Record<string, unknown>>;
+  expect(Object.hasOwn(updatedLines[0]!, "pricePerGramMinor")).toBe(false);
   expect(updatedBody.result).toMatchObject({ orderId: shellId, commercialState: "confirmed", quoteFrozen: true });
 
   const refreshedOrders = await (await updateRefresh).json();
@@ -1115,6 +1119,8 @@ test("a retained AppSheet preorder line requires current availability before Inv
   expect(confirmed.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "confirmed", totalMinor: null, capturedBaseMinor: "1201", quote: { acceptance: { note: acceptanceNote } } });
   expect(confirmed.order.quote.lines).toHaveLength(1);
   expect(confirmed.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201" });
+  expect(Object.hasOwn(confirmed.order.quote.input.lines[0], "pricePerGramMinor")).toBe(false);
+  expect(Object.hasOwn(confirmed.order.quote.lines[0], "pricePerGramMinor")).toBe(false);
   expect(confirmed.reservations).toHaveLength(1);
   expect(confirmed.reservations[0]).toMatchObject({ quantity: "3" });
   expect(confirmed.deliveries).toHaveLength(0);
@@ -1327,6 +1333,136 @@ test("an empty AppSheet preorder shell can be completed and reserved through one
   expect(confirmed.reservations[0]).toMatchObject({ quantity: "3" });
   expect(confirmed.deliveries).toHaveLength(0);
   expect(await financeSnapshot(page)).toEqual(financeBefore);
+});
+
+test("an invoice line keeps its optional price-per-gram separate through draft editing and save", async ({ page }) => {
+  await page.route("**/api/operations/context", async route => {
+    const response = await route.fetch();
+    if (response.status() !== 200) return route.fulfill({ response });
+    const context = await response.json() as { authority?: Record<string, unknown> };
+    return route.fulfill({ response, json: {
+      ...context,
+      authority: { ...context.authority, cutoverProfile: "appsheet-replacement" },
+    } });
+  });
+  await page.route("**/api/operations/catalog**", async route => {
+    const response = await route.fetch();
+    if (response.status() !== 200) return route.fulfill({ response });
+    const body = await response.json() as { items?: Array<Record<string, unknown>> };
+    const items = (body.items ?? []).map(item => {
+      if (item.id !== "ops-sku-a" && item.id !== "ops-sku-c" && item.id !== "ops-sku-b") return item;
+      const appSheet = item.appSheet && typeof item.appSheet === "object" && !Array.isArray(item.appSheet)
+        ? item.appSheet as Record<string, unknown>
+        : {};
+      return {
+        ...item,
+        appSheet: {
+          ...appSheet,
+          availability: "Sí",
+          price5Grams: item.id === "ops-sku-a"
+            ? { amountMinor: "1200", currency: "ARS" }
+            : item.id === "ops-sku-c"
+              ? { amountMinor: "1200", currency: "USD" }
+              : { amountMinor: "720" },
+        },
+      };
+    });
+    return route.fulfill({ response, json: { ...body, items } });
+  });
+
+  await enterOrders(page);
+  const invoice = await openInvoice(page);
+  const invoiceDate = await field(invoice, "invoiceDate").inputValue();
+  await selectMember(invoice, "ops-member", "Socio de ensayo");
+
+  await invoice.getByTestId("appsheet-add-product").click();
+  const product = page.getByTestId("appsheet-product-dialog");
+  await expect(product).toBeVisible();
+  await field(product, "line-date").fill(invoiceDate);
+  await field(product, "line-skuId").selectOption("ops-sku-a");
+  await field(product, "line-scale").selectOption("Precio_5_Gramos");
+  await field(product, "line-quantity").fill("3");
+  const priceDetails = product.getByTestId("appsheet-line-price-details");
+  await expect(priceDetails).toHaveJSProperty("open", false);
+  await priceDetails.locator("summary").click();
+  const priceField = field(product, "line-pricePerGram");
+  await expect(priceField).toHaveValue("12.00");
+  await priceField.fill("9.85");
+  await field(product, "line-total").fill("12.01");
+  await product.getByRole("button", { name: "Añadir producto", exact: true }).click();
+  await expect(product).toHaveCount(0);
+
+  const lineRows = invoice.locator(".appsheet-dialog-lines li");
+  await expect(lineRows).toHaveCount(1);
+  await lineRows.nth(0).locator("[data-testid^='appsheet-edit-product-']").click();
+  const reopenedProduct = page.getByTestId("appsheet-product-dialog");
+  await expect(reopenedProduct).toBeVisible();
+  const reopenedPriceDetails = reopenedProduct.getByTestId("appsheet-line-price-details");
+  await expect(reopenedPriceDetails).toHaveJSProperty("open", false);
+  await reopenedPriceDetails.locator("summary").click();
+  await expect(field(reopenedProduct, "line-pricePerGram")).toHaveValue("9.85");
+  await expect(field(reopenedProduct, "line-total")).toHaveValue("12.01");
+  await field(reopenedProduct, "line-date").fill("2026-10-06");
+  await expect(field(reopenedProduct, "line-pricePerGram")).toHaveValue("9.85");
+  await expect(field(reopenedProduct, "line-total")).toHaveValue("12.01");
+  await reopenedProduct.getByRole("button", { name: "Guardar cambios", exact: true }).click();
+  await expect(reopenedProduct).toHaveCount(0);
+
+  await invoice.getByTestId("appsheet-add-product").click();
+  const productWithCurrencyMismatch = page.getByTestId("appsheet-product-dialog");
+  await expect(productWithCurrencyMismatch).toBeVisible();
+  await field(productWithCurrencyMismatch, "line-date").fill(invoiceDate);
+  await field(productWithCurrencyMismatch, "line-skuId").selectOption("ops-sku-c");
+  await field(productWithCurrencyMismatch, "line-scale").selectOption("Precio_5_Gramos");
+  await field(productWithCurrencyMismatch, "line-quantity").fill("1");
+  const mismatchDetails = productWithCurrencyMismatch.getByTestId("appsheet-line-price-details");
+  await expect(mismatchDetails).toHaveJSProperty("open", false);
+  await mismatchDetails.locator("summary").click();
+  await expect(field(productWithCurrencyMismatch, "line-pricePerGram")).toHaveValue("");
+  await field(productWithCurrencyMismatch, "line-total").fill("7.20");
+  await productWithCurrencyMismatch.getByRole("button", { name: "Añadir producto", exact: true }).click();
+  await expect(productWithCurrencyMismatch).toHaveCount(0);
+
+  await invoice.getByTestId("appsheet-add-product").click();
+  const productWithoutSourceCurrency = page.getByTestId("appsheet-product-dialog");
+  await expect(productWithoutSourceCurrency).toBeVisible();
+  await field(productWithoutSourceCurrency, "line-date").fill(invoiceDate);
+  await field(productWithoutSourceCurrency, "line-skuId").selectOption("ops-sku-b");
+  await field(productWithoutSourceCurrency, "line-scale").selectOption("Precio_5_Gramos");
+  await field(productWithoutSourceCurrency, "line-quantity").fill("1");
+  const missingCurrencyDetails = productWithoutSourceCurrency.getByTestId("appsheet-line-price-details");
+  await expect(missingCurrencyDetails).toHaveJSProperty("open", false);
+  await missingCurrencyDetails.locator("summary").click();
+  await expect(field(productWithoutSourceCurrency, "line-pricePerGram")).toHaveValue("");
+  await field(productWithoutSourceCurrency, "line-total").fill("5.00");
+  await productWithoutSourceCurrency.getByRole("button", { name: "Añadir producto", exact: true }).click();
+  await expect(productWithoutSourceCurrency).toHaveCount(0);
+
+  const savedPromise = saveResponse(page, "InvoiceSaved");
+  await invoice.getByTestId("appsheet-save-invoice").click();
+  const saved = await savedPromise;
+  expect(saved.status()).toBe(200);
+  const savedBody = await saved.json();
+  const savedEnvelope = saved.request().postDataJSON() as CommandEnvelope;
+  expect(savedEnvelope.data).toMatchObject({
+    currency: "ARS",
+    preorder: false,
+    lines: [
+      { skuId: "ops-sku-a", date: "2026-10-06", scale: "Precio_5_Gramos", quantity: "3", totalMinor: "1201", pricePerGramMinor: "985" },
+      { skuId: "ops-sku-c", scale: "Precio_5_Gramos", quantity: "1", totalMinor: "720" },
+      { skuId: "ops-sku-b", scale: "Precio_5_Gramos", quantity: "1", totalMinor: "500" },
+    ],
+  });
+  const orderId = savedBody.targetId as string;
+  const detail = await getJson(page, `orders/${encodeURIComponent(orderId)}`);
+  expect(detail.order.quote.input.lines[0]).toMatchObject({ totalMinor: "1201", pricePerGramMinor: "985" });
+  expect(detail.order.quote.lines[0]).toMatchObject({ date: "2026-10-06", requested: "3", explicitTotalMinor: "1201", pricePerGramMinor: "985" });
+  for (const [index, totalMinor] of [[1, "720"], [2, "500"]] as const) {
+    expect(detail.order.quote.input.lines[index]).toMatchObject({ totalMinor });
+    expect(Object.hasOwn(detail.order.quote.input.lines[index], "pricePerGramMinor")).toBe(false);
+    expect(Object.hasOwn(detail.order.quote.lines[index], "pricePerGramMinor")).toBe(false);
+  }
+  expect(detail.order.lines[0].revenueMinor).toBe("1201");
 });
 
 function mockedCataloguePage(prefix: string, count: number, nextCursor: string | null) {

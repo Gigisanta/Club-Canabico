@@ -139,7 +139,7 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
     await login(driverId);
 
     const invoiceDate = today;
-    const invoiceData = (options: { preorder?: boolean; lineTotal?: string; quantity?: string; withMoto?: boolean; lineId?: string } = {}) => ({
+    const invoiceData = (options: { preorder?: boolean; lineTotal?: string; quantity?: string; withMoto?: boolean; lineId?: string; pricePerGramMinor?: string } = {}) => ({
       memberId,
       invoiceNumber: "APP-2026-1042",
       invoiceDate,
@@ -149,7 +149,11 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       productPaymentMethod: "cash",
       lines: options.lineTotal === undefined && options.quantity === undefined && options.preorder
         ? []
-        : [{ id: options.lineId ?? `appsheet-line-${randomUUID()}`, skuId, date: "2026-10-04", scale: "escala-3", quantity: options.quantity ?? "3", totalMinor: options.lineTotal ?? "1201" }],
+        : [{
+          id: options.lineId ?? `appsheet-line-${randomUUID()}`, skuId, date: "2026-10-04", scale: "escala-3",
+          quantity: options.quantity ?? "3", totalMinor: options.lineTotal ?? "1201",
+          ...(options.pricePerGramMinor === undefined ? {} : { pricePerGramMinor: options.pricePerGramMinor }),
+        }],
       ...(options.withMoto ? {
         moto: {
           deliveryDate: "2026-10-06",
@@ -654,6 +658,8 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       assert.equal(detail.order.quote.lines[0].date, "2026-10-04");
       assert.equal(detail.order.quote.lines[0].scale, "escala-3");
       assert.equal(detail.order.quote.lines[0].explicitTotalMinor, "1201");
+      assert.equal(Object.hasOwn(detail.order.quote.lines[0], "pricePerGramMinor"), false, "un snapshot legado no debe inventar el precio por gramo desde el total o unitPrice técnico");
+      assert.equal(Object.hasOwn(detail.order.quote.input.lines[0], "pricePerGramMinor"), false);
       assert.equal(detail.order.lines[0].revenueMinor, "1201");
       assert.equal(detail.order.lines[0].referenceMinor, "1201");
       assert.equal(detail.order.quote.paymentComponents.products.paymentMethod, "cash");
@@ -937,9 +943,57 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       assert.deepEqual(sideEffectsBeforeInvoiceReplay, [ledgerEventsBeforeReport + 2, ledgerLegsBefore + 2, collectionsBefore + 2, cashBefore]);
     });
 
+    await t.test("a confirmed invoice preserves its explicit price per gram separately from the captured line total", async () => {
+      const targetId = `appsheet-price-per-gram-${randomUUID()}`;
+      const pricePerGramMinor = "98765";
+      const input = invoiceData({ preorder: false, lineTotal: "1201", quantity: "3", pricePerGramMinor });
+      const saved = await command(envelope(targetId, "InvoiceSaved", input));
+      assert.equal(saved.body.result.commercialState, "confirmed");
+
+      const detail = await (await call(`/operations/orders/${targetId}`)).json() as any;
+      assert.equal(detail.order.quote.input.lines[0].pricePerGramMinor, pricePerGramMinor);
+      assert.equal(detail.order.quote.lines[0].pricePerGramMinor, pricePerGramMinor);
+      assert.equal(detail.order.quote.lines[0].explicitTotalMinor, "1201");
+      assert.equal(detail.order.lines[0].revenueMinor, "1201");
+      assert.equal(detail.order.lines[0].referenceMinor, "1201");
+      assert.equal(detail.order.quote.input.lines[0].totalMinor, "1201");
+      assert.equal(detail.order.capturedProductMinor, "1201");
+      assert.equal(detail.reservations.length, 1);
+      assert.equal(detail.deliveries.length, 0);
+    });
+
+    await t.test("a negative explicit price per gram rejects before creating invoice state", async () => {
+      const targetId = `appsheet-invalid-price-per-gram-${randomUUID()}`;
+      const input = invoiceData({ lineTotal: "1201", quantity: "3" });
+      const line = (input.lines as Array<Record<string, unknown>>)[0]!;
+      const request = envelope(targetId, "InvoiceSaved", { ...input, lines: [{ ...line, pricePerGramMinor: "-1" }] });
+      const before = {
+        orders: await db.operationOrder.count(),
+        lines: await db.operationOrderLine.count(),
+        reservations: await db.stockReservation.count(),
+        deliveries: await db.deliveryAssignment.count(),
+      };
+
+      const response = await call("/operations/commands", ownerId, request);
+      const body = await response.json() as { error?: string };
+      assert.equal(response.status, 400, JSON.stringify(body));
+      assert.match(body.error ?? "", /pricePerGramMinor/);
+      assert.deepEqual({
+        orders: await db.operationOrder.count(),
+        lines: await db.operationOrderLine.count(),
+        reservations: await db.stockReservation.count(),
+        deliveries: await db.deliveryAssignment.count(),
+      }, before);
+      assert.equal(await db.operationOrder.findUnique({ where: { id: targetId } }), null);
+      assert.equal(await db.operationObject.findUnique({ where: { id: targetId } }), null);
+      assert.equal(await db.commandReceipt.count({ where: { requestId: request.requestId } }), 0);
+      assert.equal(await db.operationAudit.count({ where: { requestId: request.requestId } }), 0);
+      assert.equal(await db.operationOutbox.count({ where: { requestId: request.requestId } }), 0);
+    });
+
     await t.test("stock shortage rolls invoice, reservation and moto delivery back together", async () => {
       const targetId = `appsheet-shortage-${randomUUID()}`;
-      const request = envelope(targetId, "InvoiceSaved", invoiceData({ quantity: "101", lineTotal: "40400", withMoto: true }));
+      const request = envelope(targetId, "InvoiceSaved", invoiceData({ quantity: "101", lineTotal: "40400", withMoto: true, pricePerGramMinor: "98765" }));
       const before = {
         orders: await db.operationOrder.count(),
         lines: await db.operationOrderLine.count(),
@@ -990,6 +1044,11 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       assert.equal(updated.body.result.quoteVersion, 2);
       assert.equal(await db.stockReservation.count({ where: { orderId: targetId } }), 0);
       assert.equal(await db.deliveryAssignment.count({ where: { orderId: targetId } }), 0);
+      const editedPreorder = await (await call(`/operations/orders/${targetId}`)).json() as any;
+      assert.equal(Object.hasOwn(editedPreorder.order.quote.input.lines[0], "pricePerGramMinor"), false);
+      assert.equal(Object.hasOwn(editedPreorder.order.quote.lines[0], "pricePerGramMinor"), false);
+      assert.equal(editedPreorder.order.quote.lines[0].explicitTotalMinor, "1001");
+      assert.equal(editedPreorder.order.lines[0].revenueMinor, "1001");
 
       const genericQuote = envelope(targetId, "OrderQuoted", {
         items: [{ id: `generic-line-${randomUUID()}`, skuId, quantity: "2", manualUnitPrice: "1", manualReason: "No reemplazar el total explícito AppSheet" }],
@@ -1059,6 +1118,8 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       assert.equal(confirmed.body.result.deliveryId, null);
       const detail = await (await call(`/operations/orders/${targetId}`)).json() as any;
       assert.equal(detail.order.quote.lines[0].explicitTotalMinor, "1001");
+      assert.equal(Object.hasOwn(detail.order.quote.input.lines[0], "pricePerGramMinor"), false);
+      assert.equal(Object.hasOwn(detail.order.quote.lines[0], "pricePerGramMinor"), false);
       assert.equal(detail.order.lines[0].revenueMinor, "1001");
       assert.equal(detail.order.lines[0].requested, "2");
       assert.equal(detail.reservations.length, 1);
