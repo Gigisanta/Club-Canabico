@@ -20,8 +20,10 @@ import { resolveStockAvailability } from "./stock-availability.js";
 import { listAppSheetNativeLotOptions, listAppSheetSourceLotOptions } from "./stock.js";
 import { manualReferenceDataRoutes } from "./reference-data.js";
 import { buildOperationAccessSnapshot } from "./access-snapshot.js";
+import { appSheetPreorderRoutes } from "./appsheet-preorder.js";
 export const operationsRoutes=Router();
 operationsRoutes.use(manualReferenceDataRoutes);
+operationsRoutes.use("/appsheet-preorders", appSheetPreorderRoutes);
 const areas:Record<string,string[]>={members:["member"],policies:["pricePolicy","pack","promotion"],packs:["pack"],promotions:["promotion"],tasks:["task"],accounts:["account","accountBootstrap","fx"],collections:["collection"],settlements:["rendition"],payables:["payable"],purchases:["purchase"],receipts:["receipt"],stock:["sku","stock","stockCount","lot"],orders:["order"],deliveries:["delivery"],routes:["route"],access:["access","device"],authority:["authority","cutover"],documents:["document","template"]};
 operationsRoutes.get("/context",async(req,res)=>{
  const [grant,authority]=await Promise.all([

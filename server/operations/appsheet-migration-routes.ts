@@ -7,6 +7,7 @@ import { requireFullLegacySourceScope } from "./legacy-source-policy.js";
 import { APPSHEET_HISTORY_SOURCE_SYSTEM } from "../../shared/operations/appsheet-history.js";
 import type { AppSheetMigrationSummary } from "../../shared/operations/appsheet-migration.js";
 import { appSheetPendingReconciliationSchema, APPSHEET_PENDING_SCHEMA_VERSION } from "../../shared/operations/appsheet-pending.js";
+import { appSheetPreorderSourceRoutes } from "./appsheet-preorder-source.js";
 
 export const appSheetMigrationRoutes = Router();
 appSheetMigrationRoutes.use(async (req, _res, next) => {
@@ -14,6 +15,7 @@ appSheetMigrationRoutes.use(async (req, _res, next) => {
   await requireFullLegacySourceScope(db, req.user);
   next();
 });
+appSheetMigrationRoutes.use(appSheetPreorderSourceRoutes);
 
 appSheetMigrationRoutes.get("/", async (_req, res) => {
   const captures = await db.appSheetCaptureManifest.findMany({

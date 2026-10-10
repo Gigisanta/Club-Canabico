@@ -164,6 +164,104 @@ test("local pre-order keeps its approved price while physical extra and partial 
   expect((await get(page, "orders/ops-local-draft")).order.financialState).toBe("paid");
 });
 
+test("order-row collection reporting stays linked to its order, requires received currency, and replays one report only", async ({ page }) => {
+  await login(page);
+  const [accountsBefore, orderBefore, collectionsBefore, cashLedgerBefore] = await Promise.all([
+    get(page, "accounts"),
+    get(page, "orders/ops-delivery-order"),
+    get(page, "collections"),
+    get(page, "accounts/ops-cash-ARS/ledger"),
+  ]);
+  expect(orderBefore.order.commercialState).toBe("confirmed");
+  expect(orderBefore.order.financialState).not.toBe("paid");
+
+  await page.getByRole("button", { name: "Pedidos", exact: true }).click();
+  const row = page.locator("tbody tr").filter({ hasText: "ops-delivery-order" });
+  await expect(row).toBeVisible();
+  await row.getByRole("button", { name: "＋ Reportar cobro", exact: true }).click();
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "Reportar un cobro", exact: true })).toBeVisible();
+  await expect(dialog).toContainText("Pedido fijado: Pedido #ops-delivery-order");
+  await expect(dialog.getByLabel("Pedido confirmado")).toHaveCount(0);
+  const currency = dialog.getByLabel("Moneda", { exact: true });
+  await expect(currency).toHaveValue("");
+  await expect(currency).toHaveAttribute("required", "");
+  await expect(dialog.getByText(/no se toma del pedido/i)).toBeVisible();
+
+  const submittedEnvelopes: unknown[] = [];
+  const observeReport = (request: Request) => {
+    if (request.method() !== "POST" || new URL(request.url()).pathname !== "/api/operations/commands") return;
+    const envelope = request.postDataJSON();
+    if (envelope.command === "CollectionReported") submittedEnvelopes.push(envelope);
+  };
+  page.on("request", observeReport);
+  let replay: { replay?: boolean } | undefined;
+  try {
+    await dialog.getByLabel("Medio recibido").selectOption("cash");
+    await dialog.getByLabel("Importe recibido", { exact: true }).fill("125,50");
+    await dialog.getByLabel("Nota del reporte").fill("Evidencia sintética del aviso, pendiente de verificar.");
+
+    await dialog.getByRole("button", { name: "Revisar y registrar", exact: true }).click();
+    await expect(dialog.getByRole("alert").last()).toContainText("Revisá los campos marcados");
+    await expect(currency).toHaveAttribute("aria-invalid", "true");
+    expect(submittedEnvelopes).toHaveLength(0);
+
+    await currency.selectOption("ARS");
+    replay = await submitAfterLostAcknowledgement(page, "CollectionReported");
+  } finally {
+    page.off("request", observeReport);
+  }
+
+  if (!replay) throw new Error("El reintento no devolvió un comprobante.");
+  expect(replay.replay).toBe(true);
+  expect(submittedEnvelopes).toHaveLength(2);
+  const [first, retry] = submittedEnvelopes as Array<{
+    requestId: string;
+    targetId: string;
+    command: string;
+    data: Record<string, unknown>;
+  }>;
+  expect(first).toBeDefined();
+  expect(retry).toEqual(first);
+  expect(first!.command).toBe("CollectionReported");
+  expect(first!.requestId).toBe(first!.targetId);
+  expect(first!.data).toMatchObject({
+    orderId: "ops-delivery-order",
+    method: "cash",
+    currency: "ARS",
+    amountMinor: "12550",
+    evidence: { note: "Evidencia sintética del aviso, pendiente de verificar." },
+  });
+  expect((collectionsBefore.items as Array<{ id: string }>).some(item => item.id === first!.targetId)).toBe(false);
+
+  const [accountsAfter, orderAfter, collectionsAfter, cashLedgerAfter] = await Promise.all([
+    get(page, "accounts"),
+    get(page, "orders/ops-delivery-order"),
+    get(page, "collections"),
+    get(page, "accounts/ops-cash-ARS/ledger"),
+  ]);
+  const reportRows = (collectionsAfter.items as Array<Record<string, unknown>>).filter(item => item.id === first!.targetId);
+  expect(reportRows).toHaveLength(1);
+  expect(reportRows[0]).toMatchObject({
+    id: first!.targetId,
+    orderId: "ops-delivery-order",
+    status: "reported",
+    method: "cash",
+    currency: "ARS",
+    amountMinor: "12550",
+  });
+  expect(orderAfter.order).toEqual(orderBefore.order);
+  expect(orderAfter.order.financialState).toBe(orderBefore.order.financialState);
+  expect(orderAfter.order.financialState).not.toBe("paid");
+  const balances = (response: { items: Array<{ id: string; balanceMinor: string | null }> }) => response.items
+    .map(({ id, balanceMinor }) => ({ id, balanceMinor }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  expect(balances(accountsAfter)).toEqual(balances(accountsBefore));
+  expect((cashLedgerAfter.items as Array<{ id: string }>).map(item => item.id))
+    .toEqual((cashLedgerBefore.items as Array<{ id: string }>).map(item => item.id));
+});
+
 test("finance UI verifies courier custody and accepts a gross rendition without applying the collection twice", async ({ page }) => {
   await login(page);
   const before = await get(page, "accounts");

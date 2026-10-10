@@ -763,6 +763,7 @@ model OperationObject {
   createdBy String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  appSheetPreorderDraft AppSheetPreorderDraft?
   @@index([kind, updatedAt])
 }
 model CommandReceipt {
@@ -886,8 +887,22 @@ model OperationMember {
   sourceSystem String?
   sourceId String?
   createdAt DateTime @default(now())
+  appSheetPreorderDrafts AppSheetPreorderDraft[]
   @@unique([sourceSystem, sourceId])
   @@index([name, id])
+}
+model AppSheetPreorderDraft {
+  id String @id
+  operationObject OperationObject @relation(fields: [id], references: [id], onDelete: Restrict)
+  memberId String
+  member OperationMember @relation(fields: [memberId], references: [id], onDelete: Restrict)
+  schemaVersion Int
+  snapshotHash String
+  payload Json
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([memberId, updatedAt, id])
 }
 model MemberClinicalRecord {
   memberId String @id

@@ -1162,6 +1162,39 @@ export function OperationalWorkspace(props: Props) {
     }
     openAction(action(command, title, fieldsIn, build, row ? idOf(row) : options.targetId, expectedVersion, options.requestIdIsTarget ?? create, actionHint ?? description));
   };
+  const reportCollection = (order?: Row) => {
+    if (order && (order.commercialState !== "confirmed" || !idOf(order))) return;
+    const orderId = order ? idOf(order) : "";
+    const orderLabel = order
+      ? textValue(order.invoiceOrOrderLabel, `Pedido #${shortReference(orderId)}`)
+      : "";
+    const memberLabel = order
+      ? textValue(order.invoiceMemberLabel, textValue(memberRows.find(member => idOf(member) === String(order.memberId ?? ""))?.name, "Socio sin nombre disponible"))
+      : "";
+    const orderContext = order
+      ? `Pedido fijado: ${orderLabel} · ${memberLabel} · ${order.channel === "local" ? "Retiro" : "Reparto"}. `
+      : "";
+    const reportOnlyGuidance = "El aviso conserva quién informó el cobro. No confirma el pago ni modifica el pedido o la caja; la recepción se verifica desde Cobros.";
+
+    runAction("CollectionReported", "Reportar un cobro", fields(
+      ...(order ? [] : [select("orderId", "Pedido confirmado", orderRows.filter(candidate => candidate.commercialState === "confirmed").map(candidate => ({
+        value: idOf(candidate),
+        label: `${labelOf(memberRows.find(member => idOf(member) === String(candidate.memberId ?? "")) ?? candidate, ["name", "id"])} · ${candidate.channel === "local" ? "Retiro" : "Reparto"} · ${formatMinor(candidate.totalMinor, candidate.currency)} · ${idOf(candidate)}`,
+      })))]),
+      select("method", "Medio recibido", [{ value: "cash", label: "Efectivo" }, { value: "transfer", label: "Transferencia" }, { value: "mercado_pago", label: "Mercado Pago" }, { value: "card", label: "Tarjeta" }]),
+      select("currency", "Moneda", ["ARS", "USD"].map(value => ({ value, label: value })), true, "Indicá la moneda realmente recibida; no se toma del pedido."),
+      field("amount", "Importe recibido", "amount", { required: true }),
+      select("custodianId", "Custodia del efectivo (opcional)", accountRows.filter(account => account.kind === "custody" && account.custodianId).map(account => ({ value: String(account.custodianId), label: `${labelOf(account)} · ${textValue(account.currency)}` })), false, "Vacío significa recepción directa por el club. Indicá custodia sólo para efectivo; la verificación determina la cuenta real."),
+      evidenceField("Nota del reporte"),
+    ), values => ({
+      orderId: orderId || str(values, "orderId"),
+      method: str(values, "method"),
+      currency: str(values, "currency"),
+      amountMinor: amountFormToMinor(str(values, "amount")),
+      ...(str(values, "custodianId") ? { custodianId: str(values, "custodianId") } : {}),
+      evidence: note(values),
+    }), undefined, "", true, `${orderContext}${reportOnlyGuidance}`, { targetId: uuid(), requestIdIsTarget: true });
+  };
   const acceptRendition = () => {
     if (!canAcceptRendition) {
       onNotice(renditionReferenceBlocker ?? "Las cuentas y referencias de la rendición todavía no están listas.");
@@ -1312,11 +1345,7 @@ export function OperationalWorkspace(props: Props) {
     const contributionAccounts = accountRows.filter(account => account.kind !== "custody" && account.verified === true && typeof account.openingApprovedBy === "string");
     if (pageId === "accounts" && hasCommand(context, "OwnerContributionRecorded") && contributionAccounts.length > 0) buttons.push({ label: "＋ Registrar aporte del propietario", onClick: () => runAction("OwnerContributionRecorded", "Registrar aporte del propietario", fields(select("accountId", "Cuenta del club · moneda", contributionAccounts.map(account => ({ value: idOf(account), label: `${labelOf(account, ["name"])} · ${textValue(account.currency)}` }))), field("amount", "Importe recibido", "amount", { required: true }), field("contributor", "Titular / propietario que aporta", "text", { required: true, max: "150" }), evidenceField("Evidencia del aporte")), v => ({ accountId: str(v, "accountId"), amountMinor: checkedMinor(str(v, "amount"), "El aporte"), contributor: str(v, "contributor").trim(), evidence: note(v) }), undefined, "Este movimiento registra un aporte del propietario a una cuenta del club; no crea una venta ni una deuda.", true) });
     if (pageId === "routes" && hasCapability(context, "logistics.write") && hasCommand(context, "RouteCreated") && deliveryPeople.length > 0) buttons.push({ label: "＋ Nueva ruta", onClick: () => runAction("RouteCreated", "Programar ruta", fields(select("driverId", "Repartidor autorizado", optionsOf(deliveryPeople, ["name"])), field("shiftDate", "Fecha del turno", "date", { required: true, defaultValue: localDate() }), select("custodianAccountId", "Cuenta de custodia (opcional)", [{ value: "", label: "Sin asignar" }, ...optionsOf(accountRows.filter(a => a.kind === "custody"))], false)), v => ({ driverId: str(v, "driverId"), shiftDate: str(v, "shiftDate"), ...(str(v, "custodianAccountId") ? { custodianAccountId: str(v, "custodianAccountId") } : {}) }), undefined, "", true) });
-    if (pageId === "collections" && hasCommand(context, "CollectionReported")) buttons.push({ label: "＋ Reportar cobro", onClick: () => runAction("CollectionReported", "Reportar un cobro", fields(
-      select("orderId", "Pedido confirmado", orderRows.filter(order => order.commercialState === "confirmed").map(order => ({ value: idOf(order), label: `${labelOf(memberRows.find(member => member.id === order.memberId) ?? order, ["name", "id"])} · ${order.channel === "local" ? "Retiro" : "Reparto"} · ${formatMinor(order.totalMinor, order.currency)} · ${idOf(order)}` }))),
-      select("method", "Medio recibido", [{ value: "cash", label: "Efectivo" }, { value: "transfer", label: "Transferencia" }, { value: "mercado_pago", label: "Mercado Pago" }, { value: "card", label: "Tarjeta" }]), currencyField(), field("amount", "Importe recibido", "amount", { required: true }),
-      select("custodianId", "Custodia del efectivo (opcional)", accountRows.filter(account => account.kind === "custody" && account.custodianId).map(account => ({ value: String(account.custodianId), label: `${labelOf(account)} · ${textValue(account.currency)}` })), false, "Vacío significa recepción directa por el club. La verificación determina la cuenta real."), evidenceField("Nota del reporte"),
-    ), v => ({ orderId: str(v, "orderId"), method: str(v, "method"), currency: str(v, "currency"), amountMinor: amountFormToMinor(str(v, "amount")), ...(str(v, "custodianId") ? { custodianId: str(v, "custodianId") } : {}), evidence: note(v) }), undefined, "", true, "El reporte conserva un aviso; la deuda y las cuentas cambian sólo con la verificación.") });
+    if (pageId === "collections" && hasCommand(context, "CollectionReported")) buttons.push({ label: "＋ Reportar cobro", onClick: () => reportCollection() });
     if (pageId === "settlements" && hasCommand(context, "RenditionAccepted")) buttons.push({
       label: "＋ Aceptar rendición",
       disabled: !canAcceptRendition || query.loading || Boolean(query.error),
@@ -1469,6 +1498,7 @@ export function OperationalWorkspace(props: Props) {
     const quote = recordValue(row, "quote");
     const isAppSheetInvoice = recordValue(quote, "source") === "appsheet-invoice";
     const isConfirmedAppSheetInvoice = isAppSheetInvoice && row.commercialState === "confirmed";
+    if (pageId === "orders" && row.commercialState === "confirmed" && hasCommand(context, "CollectionReported")) buttons.push({ label: "＋ Reportar cobro", onClick: () => reportCollection(row) });
     if (pageId === "catalog" && hasCapability(context, "stock.read")) buttons.push({ label: "Historia del producto", onClick: () => setSelectedProductId(id) });
     if (pageId === "purchases" && row.status === "draft" && hasCommand(context, "PurchaseOrderApproved")) buttons.push({ label: "Aprobar compra", onClick: () => runAction("PurchaseOrderApproved", "Revisar y aprobar la compra", fields(evidenceField("Motivo de aprobación")), v => ({ evidence: note(v) }), row, "La persona que aprobó debe ser distinta de quien creó el acuerdo.") });
     if (pageId === "purchases" && ["approved", "partially_received"].includes(String(row.status)) && hasCommand(context, "GoodsReceived") && locationReferencesReady && purchaseReceiptLinesAreValid(row)) {

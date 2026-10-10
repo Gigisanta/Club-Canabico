@@ -251,8 +251,8 @@ function assertWellFormedUnicode(value: string): void {
   }
 }
 
-function canonicalize(value: unknown, key: string | undefined, ancestors: Set<object>): string {
-  if (key !== undefined && isExactAmountField(key)) assertAmountString(key, value);
+function canonicalize(value: unknown, key: string | undefined, ancestors: Set<object>, validateAmounts: boolean): string {
+  if (validateAmounts && key !== undefined && isExactAmountField(key)) assertAmountString(key, value);
   if (value === null) return "null";
   if (typeof value === "string") {
     assertWellFormedUnicode(value);
@@ -281,7 +281,7 @@ function canonicalize(value: unknown, key: string | undefined, ancestors: Set<ob
         if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
           throw new TypeError("canonical JSON arrays must contain ordinary data values");
         }
-        items.push(canonicalize(descriptor.value, undefined, ancestors));
+        items.push(canonicalize(descriptor.value, undefined, ancestors, validateAmounts));
       }
       return `[${items.join(",")}]`;
     }
@@ -300,7 +300,7 @@ function canonicalize(value: unknown, key: string | undefined, ancestors: Set<ob
       assertWellFormedUnicode(property);
       const descriptor = Object.getOwnPropertyDescriptor(value, property);
       if (!descriptor || !("value" in descriptor)) throw new TypeError("canonical JSON objects cannot contain accessors");
-      return `${JSON.stringify(property)}:${canonicalize(descriptor.value, property, ancestors)}`;
+      return `${JSON.stringify(property)}:${canonicalize(descriptor.value, property, ancestors, validateAmounts)}`;
     });
     return `{${entries.join(",")}}`;
   } finally {
@@ -310,5 +310,10 @@ function canonicalize(value: unknown, key: string | undefined, ancestors: Set<ob
 
 /** RFC 8785 JSON serialization, with exact amount-like fields required to be validated strings. */
 export function canonicalJson(value: unknown): string {
-  return canonicalize(value, undefined, new Set<object>());
+  return canonicalize(value, undefined, new Set<object>(), true);
+}
+
+/** Canonical JSON for validated raw snapshots whose named fields are not monetary projections. */
+export function canonicalJsonData(value: unknown): string {
+  return canonicalize(value, undefined, new Set<object>(), false);
 }
