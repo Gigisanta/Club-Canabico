@@ -119,7 +119,9 @@ export interface AppSheetPendingImportPlan {
     invoiceRecordId: string;
     invoiceRecordHash: string;
     invoiceKeyHash: string;
+    motoKeyCell: AppSheetPendingImportSourceCell;
     invoiceReferenceCell: AppSheetPendingImportSourceCell;
+    invoiceKeyCell: AppSheetPendingImportSourceCell;
     invoiceAddressCell: AppSheetPendingImportSourceCell;
     operationOrderId: string;
     operationOrderVersion: number;
@@ -221,11 +223,6 @@ function reviewedSourceCell(
       sha256Canonical(originals[0]!.value, sha256) !== reference.valueHash || typeof normalized[0]!.value !== "string") return null;
   const value = (normalized[0]!.value as string).trim();
   return value ? value : null;
-}
-
-function resolutionEvidenceReviewer(value: unknown): string | null {
-  const resolution = asObject(value);
-  return typeof resolution?.approvedBy === "string" ? resolution.approvedBy : null;
 }
 
 function validateReviewedHistory(snapshot: {
@@ -452,15 +449,15 @@ export async function prepareAppSheetPendingImportPlan(
     const invoice = sourceRecordById.get(resolution.invoiceRecordId);
     if (!invoice || invoice.sourceTable !== "C_Facturacion" || !invoice.sourceKey || invoice.sourceKey.startsWith("synthetic:") ||
         invoice.contentHash !== resolution.invoiceRecordHash) continue;
-    const motoKey = reviewedSourceCell(row as CapturedSourceRow, resolution.motoKeyCell,
+    const moto = sourceRecordById.get(row.sourceRecordId);
+    if (!moto || moto.sourceTable !== "C_Moto" || moto.contentHash !== row.sourceRecordHash) continue;
+    const motoKey = reviewedSourceCell(moto, resolution.motoKeyCell,
       APPSHEET_PENDING_IMPORT_SOURCE_SPEC.delivery.key);
-    const invoiceReference = reviewedSourceCell(row as CapturedSourceRow, resolution.invoiceReferenceCell,
+    const invoiceReference = reviewedSourceCell(moto, resolution.invoiceReferenceCell,
       APPSHEET_PENDING_IMPORT_SOURCE_SPEC.delivery.invoiceRef.field);
-    const invoiceKey = reviewedSourceCell(invoice as CapturedSourceRow, {
-      sourceRecordId: invoice.id, sourceRecordHash: invoice.contentHash,
-      ...resolution.invoiceKeyCell,
-    }, APPSHEET_PENDING_IMPORT_SOURCE_SPEC.delivery.invoiceRef.key);
-    const invoiceAddress = reviewedSourceCell(invoice as CapturedSourceRow, resolution.invoiceAddressCell,
+    const invoiceKey = reviewedSourceCell(invoice, resolution.invoiceKeyCell,
+      APPSHEET_PENDING_IMPORT_SOURCE_SPEC.delivery.invoiceRef.key);
+    const invoiceAddress = reviewedSourceCell(invoice, resolution.invoiceAddressCell,
       APPSHEET_PENDING_IMPORT_SOURCE_SPEC.delivery.address.sourceField);
     if (!motoKey || motoKey !== row.sourceKey || !invoiceReference || !invoiceKey || !invoiceAddress ||
         !appSheetDeliveryInvoiceReferenceMatches(invoiceReference, invoiceKey))
@@ -472,7 +469,7 @@ export async function prepareAppSheetPendingImportPlan(
     if (identityRows.length !== 1 || !identityRows[0]?.approvedBy || identityRows[0].destinationId !== resolution.operationOrderId)
       continue;
     const orderMappingReviewer = await tx.user.findFirst({ where: { id: identityRows[0].approvedBy, active: true }, select: { id: true } });
-    const resolutionReviewer = await tx.user.findFirst({ where: { id: resolutionEvidenceReviewer(row.resolution), active: true }, select: { id: true } });
+    const resolutionReviewer = await tx.user.findFirst({ where: { id: resolution.approvedBy, active: true }, select: { id: true } });
     if (!orderMappingReviewer || !resolutionReviewer || orderMappingReviewer.id === resolutionReviewer.id ||
         resolutionReviewer.id !== resolution.approvedBy || resolutionReviewer.id === snapshot.createdBy || resolutionReviewer.id === snapshot.reviewedBy ||
         orderMappingReviewer.id === snapshot.createdBy || orderMappingReviewer.id === snapshot.reviewedBy) continue;
@@ -932,7 +929,7 @@ registerCommand("AppSheetPendingImportPlanReviewed", {
       ...plan.materializedSettlements.map(item => item.orderMappingReviewerId),
       ...plan.materializedDeliveries.flatMap(item => [item.orderMappingReviewerId, item.resolutionReviewerId])].includes(ctx.actor.id))
       fail("pending_technical_reviewer_not_independent");
-    return { batchId: plan.batchId, review, projectionHash: plan.projectionHash,
+    return { batchId: plan.batchId, review, projectionHash: plan.projectionHash, sourceSpecHash: plan.sourceSpecHash,
       destinationHash: plan.destinationHash, reviewedBy: ctx.actor.id };
   },
 });
@@ -964,14 +961,14 @@ registerCommand("AppSheetPendingImportStaged", {
     } });
     const reviewObject = await ctx.tx.operationObject.findUnique({ where: { id: planReviewObjectId(plan.batchId) }, select: { kind: true, version: true } });
     const response = asObject(reviewReceipt?.response);
-    const result = asObject(response?.result);
+    const reviewResult = asObject(response?.result);
     if (!reviewReceipt || reviewReceipt.command !== "AppSheetPendingImportPlanReviewed" ||
         reviewReceipt.targetId !== planReviewObjectId(plan.batchId) || !reviewObject || reviewObject.kind !== "legacyImport" ||
-        reviewReceipt.resultingVersion !== reviewObject.version || !result || result.batchId !== plan.batchId ||
-        result.projectionHash !== plan.projectionHash || result.destinationHash !== plan.destinationHash || result.sourceSpecHash !== plan.sourceSpecHash ||
-        result.reviewedBy !== reviewReceipt.actorId)
+        reviewReceipt.resultingVersion !== reviewObject.version || !reviewResult || reviewResult.batchId !== plan.batchId ||
+        reviewResult.projectionHash !== plan.projectionHash || reviewResult.destinationHash !== plan.destinationHash || reviewResult.sourceSpecHash !== plan.sourceSpecHash ||
+        reviewResult.reviewedBy !== reviewReceipt.actorId)
       fail("pending_plan_review_receipt_missing_or_stale");
-    const review = assertAppSheetPendingImportReview({ review: result.review, reviewKind: "independent-pending-import-plan",
+    const review = assertAppSheetPendingImportReview({ review: reviewResult.review, reviewKind: "independent-pending-import-plan",
       expected: expectedReviewBinding(plan), importerId: ctx.actor.id, reviewerId: reviewReceipt.actorId });
     const reviewUser = await ctx.tx.user.findUnique({ where: { id: review.reviewer } });
     if (!reviewUser?.active) throw new OperationError(409, "PENDING_REVIEWER_INACTIVE", "La persona revisora técnica debe estar activa.");
@@ -1175,13 +1172,19 @@ export async function reviewedAppSheetLegacyPaidForOrder(tx: Tx, order: {
       !settlement.reviewedAt || settlement.reviewedAt.getTime() !== batch.reviewedAt.getTime() ||
       settlement.destinationVersion !== 1 || batch.destinationVersion !== 1 || !batch.reviewedObjectVersion)
     throw new OperationError(423, "APPSHEET_LEGACY_SETTLEMENT_UNREVIEWED", "El cobro histórico necesita revisión independiente antes de afectar el saldo pendiente.");
-  const [batchObject, disposition] = await Promise.all([
+  const [batchObject, disposition, capture] = await Promise.all([
     tx.operationObject.findUnique({ where: { id: batch.id }, select: { kind: true, version: true } }),
     tx.appSheetPendingImportDisposition.findUnique({ where: { id: settlement.dispositionId }, select: {
       batchId: true, sourceRecordHash: true, reconciliationHash: true, mappingHash: true, dimension: true,
       state: true, destinationType: true, destinationId: true, destinationHash: true, destinationVersion: true,
     } }),
+    tx.appSheetCaptureManifest.findUnique({ where: { captureId: settlement.captureId }, select: {
+      captureId: true, sourceSystem: true, manifestHash: true, dataHash: true, stability: true,
+    } }),
   ]);
+  if (!capture || capture.sourceSystem !== APPSHEET_HISTORY_SOURCE_SYSTEM || capture.captureId !== batch.captureId ||
+      capture.manifestHash !== batch.manifestHash || capture.dataHash !== batch.dataHash || asObject(capture.stability)?.stable !== true)
+    throw new OperationError(423, "APPSHEET_LEGACY_SETTLEMENT_SOURCE_INVALID", "La captura estable del cobro histórico ya no coincide con la revisión aprobada.");
   if (!batchObject || batchObject.kind !== "legacyImport" || batchObject.version !== batch.reviewedObjectVersion ||
       !disposition || disposition.batchId !== batch.id || disposition.dimension !== "receivable" ||
       disposition.state !== "materialized" || disposition.destinationType !== "legacy_settlement" ||
@@ -1246,7 +1249,8 @@ export async function reviewedAppSheetLegacyPaidForOrder(tx: Tx, order: {
   const reconciliation = appSheetPendingReconciliationSchema.safeParse(asObject(source.normalized)?.pendingReconciliation);
   if (!reconciliation.success || sha256Canonical(reconciliation.data, sha256) !== settlement.reconciliationHash ||
       reconciliation.data.capture.captureId !== settlement.captureId || reconciliation.data.mappingHash !== settlement.mappingHash ||
-      reconciliation.data.capture.manifestHash !== batch.manifestHash || reconciliation.data.capture.dataHash !== batch.dataHash ||
+      reconciliation.data.capture.manifestHash !== batch.manifestHash || reconciliation.data.capture.mode !== "stable" ||
+      reconciliation.data.capture.provisional !== false ||
       sha256Canonical(["appsheet-pending-key-v1", source.sourceTable, source.sourceKey], sha256) !== settlement.sourceKeyHash)
     throw new OperationError(423, "APPSHEET_LEGACY_SETTLEMENT_SOURCE_INVALID", "El recibo histórico no conserva la captura, clave o conciliación aprobadas.");
   let amounts: ReturnType<typeof validatedLegacySettlement>;

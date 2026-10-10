@@ -254,7 +254,7 @@ registerCommand("MemberCreditApplied",{kind:"credit",capability:"collections.ver
  if(c.treatment!=="member_credit"||o.memberId!==c.memberId||o.currency!==c.currency||o.commercialState!=="confirmed")throw new OperationError(422,"CREDIT_APPLICATION_SCOPE","Aplicá el crédito al mismo socio, moneda y pedido confirmado");
  const legacyPaid=await reviewedAppSheetLegacyPaidForOrder(ctx.tx,o);
  const outstanding=appSheetLegacyAdjustedOutstanding({totalMinor:o.totalMinor,bomboVerifiedMinor:o.verifiedMinor,
-  legacyPaidMinor:legacyPaid,cancelled:o.commercialState==="cancelled"});
+  legacyPaidMinor:legacyPaid,cancelled:false});
  if(amount>c.amountMinor-c.resolvedMinor||amount>outstanding)throw new OperationError(422,"CREDIT_APPLICATION_LIMIT","La aplicación supera el crédito o la deuda pendientes");
  await ctx.tx.memberCredit.update({where:{id:c.id},data:{resolvedMinor:{increment:amount}}});
  const paid=o.verifiedMinor+amount;await ctx.tx.operationOrder.update({where:{id:o.id},data:{verifiedMinor:paid,financialState:appSheetLegacyAdjustedFinancialState({

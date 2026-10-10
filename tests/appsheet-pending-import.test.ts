@@ -5,6 +5,7 @@ import "../server/operations/finance.js";
 import { appSheetLegacyFinancialBasisHash, appSheetPendingOrderCommercialBasisHash } from "../server/operations/appsheet-pending-import.js";
 import { commandSpecs, OperationError, type CommandContext, type Tx } from "../server/operations/core.js";
 import { APPSHEET_PENDING_MAPPING_ID, APPSHEET_PENDING_SCHEMA_VERSION } from "../shared/operations/appsheet-pending.js";
+import { APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
 import { appSheetDeliveryInvoiceReferenceMatches, appSheetLegacyAdjustedFinancialState, appSheetLegacyAdjustedOutstanding,
   appSheetPendingDeliveryCardinalityAmbiguities, appSheetPendingDeliveryInvoiceCardinalityAmbiguities,
   sha256Canonical } from "../shared/operations/appsheet-pending-import.js";
@@ -79,7 +80,7 @@ test("legacy commercial basis binds same-gross quote revisions and AppSheet meta
     "legitimate receipt counters and aggregate version do not alter the commercial basis");
 });
 
-function reviewedSettlementFixture(order = commercialOrder()) {
+function reviewedSettlementFixture(order = commercialOrder(), capturedOrder = commercialOrder()) {
   const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
   const canonicalHash = (value: unknown) => sha256Canonical(value, hash);
   const captureId = "capture-1", manifestHash = hash("capture-manifest"), dataHash = hash("capture-data");
@@ -101,18 +102,18 @@ function reviewedSettlementFixture(order = commercialOrder()) {
   const reconciliationHash = canonicalHash(reconciliation);
   const mappingReviewerId = "mapping-reviewer", mappingEvidence = "reviewed exact invoice mapping";
   const mappingEvidenceHash = hash(mappingEvidence), operationOrderVersion = 1, operationOrderHash = hash("mapped order version");
-  const commercialBasisHash = appSheetPendingOrderCommercialBasisHash(order);
+  const commercialBasisHash = appSheetPendingOrderCommercialBasisHash(capturedOrder);
   assert.ok(commercialBasisHash);
-  const financialBasisHash = appSheetLegacyFinancialBasisHash({ orderId: order.id, memberId: order.memberId,
-    currency: order.currency, totalMinor: order.totalMinor, commercialBasisHash, captureId,
+  const financialBasisHash = appSheetLegacyFinancialBasisHash({ orderId: capturedOrder.id, memberId: capturedOrder.memberId,
+    currency: capturedOrder.currency, totalMinor: capturedOrder.totalMinor, commercialBasisHash, captureId,
     sourceRecordId, sourceRecordHash, sourceKeyHash, reconciliationHash, mappingHash,
     mappingReviewerId, mappingEvidenceHash, mappedOrderVersion: operationOrderVersion, mappedOrderHash: operationOrderHash });
   const destinationHash = canonicalHash({ kind: "legacy-settlement", captureId, manifestHash,
     sourceRecordId, sourceRecordHash, reconciliationHash, mappingHash,
-    operationOrderId: order.id, operationOrderMemberId: order.memberId, financialBasisHash,
+    operationOrderId: capturedOrder.id, operationOrderMemberId: capturedOrder.memberId, financialBasisHash,
     operationOrderVersion, operationOrderHash, orderMappingReviewerId: mappingReviewerId,
-    orderMappingEvidenceHash: mappingEvidenceHash, operationOrderCurrency: order.currency,
-    operationOrderTotalMinor: order.totalMinor.toString(), dueMinor: "10000", legacyPaidMinor: "4000",
+    orderMappingEvidenceHash: mappingEvidenceHash, operationOrderCurrency: capturedOrder.currency,
+    operationOrderTotalMinor: capturedOrder.totalMinor.toString(), dueMinor: "10000", legacyPaidMinor: "4000",
     remainingMinor: "6000", paymentRowsHash, paymentReferences: [] });
   const settlementId = "legacy-settlement-1", dispositionId = "disposition-1";
   const reviewedAt = new Date("2026-10-08T12:00:00.000Z");
@@ -150,6 +151,7 @@ function reviewedSettlementFixture(order = commercialOrder()) {
   const source = { sourceTable: "C_Facturacion", sourceKey, contentHash: sourceRecordHash,
     normalized: { pendingReconciliation: reconciliation }, resolution };
   const snapshot = { status: "reviewed", createdBy: "snapshot-creator", reviewedBy: "snapshot-reviewer" };
+  const capture = { captureId, sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, manifestHash, dataHash, stability: { stable: true } };
   const users = ["importer", "destination-reviewer", "stage-reviewer", mappingReviewerId,
     snapshot.createdBy, snapshot.reviewedBy].map(id => ({ id, active: true, role: "owner", authorizationEpoch: 1 }));
   const writes: string[] = [];
@@ -187,6 +189,7 @@ function reviewedSettlementFixture(order = commercialOrder()) {
     },
     operationAccess: { findUnique: async () => null },
     appSheetLegacySettlement: { findUnique: async () => settlement },
+    appSheetCaptureManifest: { findUnique: async () => capture },
     appSheetPendingImportBatch: { findUnique: async () => batch },
     appSheetPendingImportDisposition: { findUnique: async () => disposition },
     operationObject: {
@@ -211,7 +214,7 @@ function reviewedSettlementFixture(order = commercialOrder()) {
       update: async () => { writes.push("credit.update"); },
     },
   } as unknown as Tx;
-  return { tx, writes, order, settlement, orderState, orderUpdates, collectionReports };
+  return { tx, writes, order, settlement, capture, orderState, orderUpdates, collectionReports };
 }
 
 function commandContext(tx: Tx, command: string, options: { targetId?: string; appliedMinor?: string } = {}): CommandContext {
@@ -284,6 +287,18 @@ test("same-gross quote revision rejects collection and member-credit writes agai
     await assert.rejects(spec.execute(commandContext(fixture.tx, command)), error => error instanceof OperationError &&
       error.code === "APPSHEET_LEGACY_SETTLEMENT_TARGET_CHANGED");
     assert.deepEqual(fixture.writes, [], `${command} must reject before ledger, credit, receipt, or order writes`);
+  }
+});
+
+test("a changed capture invalidates legacy receipts before any collection or credit write", async () => {
+  for (const command of ["CollectionVerified", "MemberCreditApplied"]) {
+    const fixture = reviewedSettlementFixture();
+    fixture.capture.dataHash = "f".repeat(64);
+    const spec = commandSpecs.get(command);
+    assert.ok(spec);
+    await assert.rejects(spec.execute(commandContext(fixture.tx, command)), error => error instanceof OperationError &&
+      error.code === "APPSHEET_LEGACY_SETTLEMENT_SOURCE_INVALID");
+    assert.deepEqual(fixture.writes, []);
   }
 });
 
