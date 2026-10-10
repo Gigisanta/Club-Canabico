@@ -1756,7 +1756,8 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
         const order = await db.operationOrder.findUniqueOrThrow({ where: { id: target } });
         const quote = order.quote as Record<string, any>;
         assert.equal(order.commercialState, "preorder");
-        assert.equal(order.totalMinor, 816n);
+        // Products: 110 + 6 rounded surcharge; Moto: 700 + 35 surcharge.
+        assert.equal(order.totalMinor, 851n);
         assert.equal(order.subtotalMinor, 110n);
         assert.equal(order.surchargeMinor, 6n);
         assert.equal(quote.subtotalCalculationState, "defined");
@@ -1764,7 +1765,9 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
         assert.equal(quote.totalCalculationSource, "appsheet_recalculation_action");
         assert.equal(quote.appSheetFormula.results.Subtotal_Venta, "110");
         assert.equal(quote.appSheetFormula.results.Transferencia, "6");
-        assert.equal(quote.appSheetFormula.results.Total_Facturado, "816");
+        assert.equal(quote.appSheetFormula.results.Transferencia_moto, "35");
+        assert.equal(quote.appSheetFormula.results.Subtotal_Cliente_Moto, "735");
+        assert.equal(quote.appSheetFormula.results.Total_Facturado, "851");
         assert.equal(quote.appSheetFormula.transfer.subcentRemainderNumerator, "10");
         assert.equal(quote.appSheetFormula.numbering.captureId, captureId);
         assert.equal(await db.stockReservation.count({ where: { orderId: target } }), 0);
@@ -1796,7 +1799,7 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       assert.equal(validEdit.body.result.invoiceNumber, originalQuote.invoiceNumber);
       const editedOrder = await db.operationOrder.findUniqueOrThrow({ where: { id: editedTarget } });
       const editedQuote = editedOrder.quote as Record<string, any>;
-      assert.equal(editedOrder.totalMinor, 826n);
+      assert.equal(editedOrder.totalMinor, 861n);
       assert.equal(editedQuote.totalCalculationState, "defined");
       assert.equal(editedQuote.appSheetFormula.results.Transferencia, "6");
       assert.equal(editedQuote.appSheetFormula.numbering.sequenceId, originalQuote.appSheetFormula.numbering.sequenceId);
