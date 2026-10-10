@@ -106,12 +106,12 @@ test("manual and invalid quantity subtotal proposals stay pending without suppre
   const fractional = proposeAppSheetLinePricingInitialValue({
     catalogue: { price5Grams: { amountMinor: "101", currency: "ARS" } },
     scale: "Precio_5_Gramos",
-    quantityGrams: "0.0001",
+    quantityGrams: "not-a-number",
   });
   assert.equal(fractional.status, "defined");
   if (fractional.status === "defined") {
     assert.equal(fractional.unitPriceMinor, "101");
-    assert.deepEqual(fractional.subtotal, { status: "pending", reason: "invalid_quantity", quantityGrams: "0.0001" });
+    assert.deepEqual(fractional.subtotal, { status: "pending", reason: "invalid_quantity", quantityGrams: "not-a-number" });
   }
   assert.deepEqual(proposeAppSheetLineSubtotal({ unitPriceMinor: "985", quantityGrams: "1.2" }), {
     status: "defined", quantityGrams: "1.2", subtotalMinorExact: { numerator: "1182", denominator: "1" }, subtotalMinor: "1182",

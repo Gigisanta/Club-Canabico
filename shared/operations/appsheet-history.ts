@@ -1,3 +1,5 @@
+import type { AppSheetReviewTarget } from "./appsheet-review.js";
+
 /**
  * Historical-only projection rules for the AppSheet live capture.
  *
@@ -7,6 +9,61 @@
 export const APPSHEET_HISTORY_SOURCE_SYSTEM = "appsheet-live-verified" as const;
 export const APPSHEET_HISTORY_IMPORTER_VERSION = "bombo-appsheet-history/1.2.0" as const;
 export const APPSHEET_HISTORY_MAPPING_ID = "appsheet-live-history-v2" as const;
+export const APPSHEET_HISTORY_STAGE_SCHEMA_VERSION_V1 = "appsheet-history-stage/v1" as const;
+export const APPSHEET_HISTORY_STAGE_SCHEMA_VERSION_V2 = "appsheet-history-stage/v2" as const;
+
+export type AppSheetHistoryStageTarget = AppSheetReviewTarget;
+export type AppSheetHistoryStageBindingExpectation = {
+  target?: AppSheetHistoryStageTarget;
+  destinationIdentity?: string;
+};
+
+const APPSHEET_HISTORY_STAGE_HASH = /^[a-f0-9]{64}$/;
+const APPSHEET_HISTORY_STAGE_COMMIT = /^[a-f0-9]{40}$/;
+
+function stageObject(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+/** V2 stages bind the technical review and its explicit target/destination; legacy reviews stay isolated-only. */
+export function appSheetHistoryStageHasBoundTechnicalReview(
+  value: unknown,
+  expected: AppSheetHistoryStageBindingExpectation = {},
+): boolean {
+  const stage = stageObject(value);
+  const destination = stageObject(stage?.destination);
+  const review = stageObject(stage?.technicalReview);
+  const humanReview = stageObject(stage?.humanReview);
+  const operationalAuthority = stageObject(stage?.operationalAuthority);
+  const target = destination?.target;
+  const destinationIdentity = destination?.identity;
+  const reviewedAt = review?.reviewedAt;
+  const reviewBindingValid = (review?.schemaVersion === 2 && review.bindingSource === "explicit-target-and-destination") ||
+    (target === "isolated-test" && review?.schemaVersion === 1 && review.bindingSource === "legacy-isolated-only");
+  if (!stage || stage.schemaVersion !== APPSHEET_HISTORY_STAGE_SCHEMA_VERSION_V2 || stage.projectionKind !== "history" ||
+      stage.status !== "staged" || typeof stage.captureId !== "string" || !stage.captureId.trim() ||
+      !APPSHEET_HISTORY_STAGE_HASH.test(String(stage.manifestHash)) || !APPSHEET_HISTORY_STAGE_HASH.test(String(stage.dataHash)) ||
+      !APPSHEET_HISTORY_STAGE_HASH.test(String(stage.projectionHash)) || !APPSHEET_HISTORY_STAGE_HASH.test(String(stage.definitionHash)) ||
+      typeof stage.importerVersion !== "string" || !stage.importerVersion.trim() ||
+      typeof stage.mappingId !== "string" || !stage.mappingId.trim() ||
+      typeof stage.actorUserId !== "string" || !stage.actorUserId.trim() ||
+      (target !== "isolated-test" && target !== "production") ||
+      typeof destinationIdentity !== "string" || !/^appsheet-db-v1:[a-f0-9]{64}$/.test(destinationIdentity) ||
+      (expected.target !== undefined && target !== expected.target) ||
+      (expected.destinationIdentity !== undefined && destinationIdentity !== expected.destinationIdentity) ||
+      !review || !reviewBindingValid || review.reviewKind !== "independent-technical" || review.approved !== true ||
+      typeof review.reviewer !== "string" || !review.reviewer.trim() ||
+      review.reviewer.trim().toLowerCase() === stage.importerVersion.trim().toLowerCase() ||
+      typeof reviewedAt !== "string" || !Number.isFinite(Date.parse(reviewedAt)) || Date.parse(reviewedAt) > Date.now() + 60_000 ||
+      !Number.isSafeInteger(review.findingsCount) || review.findingsCount !== 0 ||
+      !APPSHEET_HISTORY_STAGE_HASH.test(String(review.findingsHash)) ||
+      typeof review.commitSha !== "string" || !APPSHEET_HISTORY_STAGE_COMMIT.test(review.commitSha) ||
+      String(review.reviewer).trim().toLowerCase() === stage.actorUserId.trim().toLowerCase() ||
+      !humanReview || humanReview.status !== "pending" || !operationalAuthority || operationalAuthority.status !== "unchanged" ||
+      stage.reviewedBy !== null || stage.reviewedAt !== null || stage.authorizationContext !== "user-authorized-plan")
+    return false;
+  return true;
+}
 
 export type AppSheetHistoryKind =
   | "invoice"

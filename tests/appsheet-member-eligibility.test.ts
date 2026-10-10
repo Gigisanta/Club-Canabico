@@ -4,7 +4,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import bcrypt from "bcryptjs";
 import { Prisma } from "@prisma/client";
-import type { CommandEnvelope } from "../shared/operations/contracts.js";
+import { profileCapabilities, type CommandEnvelope } from "../shared/operations/contracts.js";
 import { canonicalJson } from "../shared/operations/exact.js";
 import { canonicalCommandBodyHash } from "../server/operations/canonical.js";
 import {
@@ -18,12 +18,14 @@ import {
   APPSHEET_EXPECTED_LIVE_APP_ID,
   appSheetAppliedDefinitionHash,
   appSheetCanonicalCurrentDestinationHash,
+  appSheetDefinitionProductionReadiness,
 } from "../server/operations/appsheet-canonical.js";
 import { appSheetDatabaseDestinationIdentity } from "../server/operations/appsheet-database-target.js";
 import { legacyPayloadHash } from "../server/operations/legacy-upload-contract.js";
 import {
   APPSHEET_HISTORY_IMPORTER_VERSION,
   APPSHEET_HISTORY_MAPPING_ID,
+  APPSHEET_HISTORY_STAGE_SCHEMA_VERSION_V2,
   APPSHEET_HISTORY_SOURCE_SYSTEM,
 } from "../shared/operations/appsheet-history.js";
 import { definitionInventory, project } from "./support/appsheet-canonical-fixture.js";
@@ -103,6 +105,16 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
     });
 
     const importedId = "appsheet-member-eligibility-imported";
+    const clinicalId = "appsheet-member-eligibility-clinical-reader";
+    const clinicalPasswordText = randomUUID();
+    await db.user.create({ data: {
+      id: clinicalId, name: "Synthetic clinical reader", email: `${clinicalId}@appsheet-member.test`,
+      password: await bcrypt.hash(clinicalPasswordText, 4), role: "clinical",
+    } });
+    await db.operationAccess.create({ data: {
+      userId: clinicalId, profile: "clinical", capabilities: profileCapabilities.clinical,
+      scope: { memberIds: [importedId] }, enabled: true,
+    } });
     await db.operationMember.create({
       data: { id: importedId, name: "Imported but unreviewed", address: {}, preferences: {},
         sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM, sourceId: "source-17", legacyCustomerId: "source-17" },
@@ -139,10 +151,10 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api`;
     const origin = "http://appsheet-member.test";
     let cookie = "";
-    async function call(path: string, body?: unknown) {
+    async function call(path: string, body?: unknown, sessionCookie = cookie) {
       const response = await fetch(base + path, {
         method: body === undefined ? "GET" : "POST",
-        headers: { ...(cookie ? { Cookie: cookie } : {}), Origin: origin, "Content-Type": "application/json" },
+        headers: { ...(sessionCookie ? { Cookie: sessionCookie } : {}), Origin: origin, "Content-Type": "application/json" },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
       return { response, body: await response.json() as Record<string, any> };
@@ -154,6 +166,13 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
     });
     assert.equal(login.status, 200, await login.text());
     cookie = login.headers.get("set-cookie")!.split(";")[0]!;
+    const clinicalLogin = await fetch(`${base}/auth/login`, {
+      method: "POST",
+      headers: { Origin: origin, "Content-Type": "application/json" },
+      body: JSON.stringify({ email: `${clinicalId}@appsheet-member.test`, password: clinicalPasswordText }),
+    });
+    assert.equal(clinicalLogin.status, 200, await clinicalLogin.text());
+    const clinicalCookie = clinicalLogin.headers.get("set-cookie")!.split(";")[0]!;
 
     const envelope = (targetId: string, command: string, data: Record<string, unknown>): CommandEnvelope => ({
       schemaVersion: 1,
@@ -298,13 +317,15 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
     for (const path of [
       `/operations/members/${importedId}`,
       `/operations/members/${importedId}/history`,
-      `/operations/members/${importedId}/clinical`,
       `/operations/members/${legacyId}`,
     ]) {
       const denied = await call(path);
       assert.equal(denied.response.status, 423, `${path}: ${JSON.stringify(denied.body)}`);
       assert.equal(denied.body.code, "APPSHEET_MEMBER_NOT_ELIGIBLE");
     }
+    const deniedClinicalRead = await call(`/operations/members/${importedId}/clinical`, undefined, clinicalCookie);
+    assert.equal(deniedClinicalRead.response.status, 423, JSON.stringify(deniedClinicalRead.body));
+    assert.equal(deniedClinicalRead.body.code, "APPSHEET_MEMBER_NOT_ELIGIBLE");
 
     const update = envelope(importedId, "MemberUpdated", { name: "Should not persist", email: "", phone: "", address: {}, preferences: {} });
     const deniedUpdate = await call("/operations/commands", update);
@@ -540,9 +561,10 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
     });
     const historyBackup = { manifestHash: hash("synthetic-history-backup"), snapshotAt: now.toISOString() };
     const historyTechnicalReview = {
+      schemaVersion: 2,
       reviewKind: "independent-technical",
       approved: true,
-      projectionHash: historyProjectionHash,
+      bindingSource: "explicit-target-and-destination",
       reviewer: "synthetic-independent-history-reviewer",
       reviewedAt: new Date(now.getTime() - 1_000).toISOString(),
       findingsCount: 0,
@@ -550,24 +572,31 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
       commitSha: technicalReview.commitSha,
     };
     const historyStage = {
-      schemaVersion: "appsheet-history-stage/v1",
+      schemaVersion: APPSHEET_HISTORY_STAGE_SCHEMA_VERSION_V2,
       projectionKind: "history",
       sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
+      mappingId: APPSHEET_HISTORY_MAPPING_ID,
+      importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION,
       captureId: canonicalCapture.captureId,
       manifestHash: canonicalCapture.manifestHash,
       dataHash: canonicalCapture.dataHash,
       captureDefinitionHash: null,
       mode: "stable",
       definitionHash: appliedDefinitionHash,
+      definitionSourceSha256: fullDefinition.source.sha256,
+      definitionDescriptorSha256: fullDefinition.descriptorSha256,
+      definitionFileSha256: hash("synthetic history definition file"),
       definitionIdentityState: "verified",
-      mappingId: APPSHEET_HISTORY_MAPPING_ID,
-      importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION,
+      definitionReadiness: appSheetDefinitionProductionReadiness(fullDefinition),
+      definitionInventory: fullDefinition,
       status: "staged",
       projectionHash: historyProjectionHash,
+      destination: { target: "production", identity: destinationIdentity },
       humanReview: { status: "pending" },
       operationalAuthority: { status: "unchanged" },
       authorizationContext: "user-authorized-plan",
       actorUserId: stagerId,
+      actor: "codex:appsheet-history-stage",
       reviewedBy: null,
       reviewedAt: null,
       effects: { stock: false, cashLedger: false, payments: false, deliveries: false, messages: false, documents: false, numbering: "not-generated" },
@@ -679,8 +708,10 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
         technicalReviewAt: historyTechnicalReview.reviewedAt,
         commitSha: historyTechnicalReview.commitSha,
         target: "production",
+        destinationIdentity,
         backupManifestHash: historyBackup.manifestHash,
         backupSnapshotAt: historyBackup.snapshotAt,
+        authorizationContext: "user-authorized-plan",
         recordCount: 1,
         factCount: 1,
         exceptionCount: 0,

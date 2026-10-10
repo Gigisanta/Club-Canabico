@@ -5,7 +5,8 @@ import { db } from "../db.js";
 import { profileCapabilities, cutoverGateIds, cutoverProfiles, type Capability, type CutoverProfile } from "../../shared/operations/contracts.js";
 import { canonicalJson } from "../../shared/operations/exact.js";
 import { APPSHEET_CANONICAL_SOURCE_SYSTEM, APPSHEET_CANONICAL_MAPPING_ID, APPSHEET_CANONICAL_IMPORTER_VERSION, APPSHEET_CANONICAL_SCHEMA_VERSION, prepareAppSheetCaptureManifest } from "../../shared/operations/appsheet-canonical.js";
-import { APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM, APPSHEET_HISTORY_IMPORTER_VERSION } from "../../shared/operations/appsheet-history.js";
+import { APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM, APPSHEET_HISTORY_IMPORTER_VERSION,
+ appSheetHistoryStageHasBoundTechnicalReview } from "../../shared/operations/appsheet-history.js";
 import { appSheetDefinitionInventorySchema } from "../../shared/operations/appsheet-definition.js";
 import { APPSHEET_EXPECTED_LIVE_APP_ID, appSheetAppliedDefinitionHash, appSheetCanonicalCurrentDestinationHash } from "./appsheet-canonical.js";
 import { appSheetDatabaseDestinationIdentity } from "./appsheet-database-target.js";
@@ -718,12 +719,16 @@ const membersById=new Map<string,{id:string;legacyCustomerId:string|null;sourceS
  const activeHistoryReview=await ctx.tx.user.findUnique({where:{id:history.reviewedBy},select:{active:true}});
  if(!activeHistoryReview?.active)throw appSheetReadinessError("historical_reviewer_inactive");
  const controls=asJsonObject(history.controls),stage=controls&&asJsonObject(controls.appSheetHistoryStage);
+ const historyDestination=stage&&asJsonObject(stage.destination);
+ const historyTechnicalReview=stage&&asJsonObject(stage.technicalReview);
+ const historyRuntimeDestinationIdentity=productionAppSheetDestinationIdentity();
  const coverage=asJsonObject(history.coverage),historyDefinition=coverage&&asJsonObject(coverage.definition);
  const historyEffects=stage&&asJsonObject(stage.effects);
  const historyInventoryResult=appSheetDefinitionInventorySchema.safeParse(historyDefinition?.inventory);
  const historyInventory=historyInventoryResult.success?historyInventoryResult.data:null;
  const historyAppliedHash=historyInventory?appSheetAppliedDefinitionHash(historyInventory):null;
- if(!stage||!coverage||!historyDefinition||!historyInventory||stage.schemaVersion!=="appsheet-history-stage/v1"||stage.projectionKind!=="history"||
+ if(!stage||!coverage||!historyDefinition||!historyInventory||!historyRuntimeDestinationIdentity||
+    !appSheetHistoryStageHasBoundTechnicalReview(stage,{target:"production",destinationIdentity:historyRuntimeDestinationIdentity})||!historyDestination||
     stage.sourceSystem!==APPSHEET_HISTORY_SOURCE_SYSTEM||stage.mappingId!==APPSHEET_HISTORY_MAPPING_ID||stage.importerVersion!==APPSHEET_HISTORY_IMPORTER_VERSION||
     stage.captureId!==capture.captureId||stage.manifestHash!==capture.manifestHash||stage.dataHash!==capture.dataHash||stage.captureDefinitionHash!==null||
     stage.definitionHash!==definition.appliedHash||stage.definitionIdentityState!=="verified"||historyAppliedHash!==definition.appliedHash||
@@ -739,15 +744,15 @@ const membersById=new Map<string,{id:string;legacyCustomerId:string|null;sourceS
     })||typeof stage.backupManifestHash!=="string"||!hashPattern.test(stage.backupManifestHash)||
     typeof stage.backupSnapshotAt!=="string"||!Number.isFinite(Date.parse(stage.backupSnapshotAt))||Date.parse(stage.backupSnapshotAt)>Date.now()+60_000)
   throw appSheetReadinessError("historical_projection_capture_binding_missing");
- const historyTechnicalReview=asJsonObject(stage.technicalReview);
  if(!historyTechnicalReview||historyTechnicalReview.reviewKind!=="independent-technical"||historyTechnicalReview.approved!==true||
     sameHumanIdentity(historyTechnicalReview.reviewer,history.createdBy)||typeof historyTechnicalReview.reviewer!=="string"||!historyTechnicalReview.reviewer.trim()||
     typeof historyTechnicalReview.reviewedAt!=="string"||!Number.isFinite(Date.parse(historyTechnicalReview.reviewedAt))||Date.parse(historyTechnicalReview.reviewedAt)>Date.now()+60_000||
     historyTechnicalReview.findingsCount!==0||!hashPattern.test(String(historyTechnicalReview.findingsHash))||
-    historyTechnicalReview.commitSha!==masterAuditDetails.commitSha||historyTechnicalReview.projectionHash!==stage.projectionHash||
+    historyTechnicalReview.commitSha!==masterAuditDetails.commitSha||
     !hashPattern.test(String(stage.projectionHash))||historyTechnicalReview.commitSha!==definition.commitSha)
   throw appSheetReadinessError("historical_technical_review_unbound");
- const historyReviewHash=hashJson({reviewKind:historyTechnicalReview.reviewKind,approved:historyTechnicalReview.approved,projectionHash:historyTechnicalReview.projectionHash,
+ const historyReviewHash=hashJson({schemaVersion:historyTechnicalReview.schemaVersion,reviewKind:historyTechnicalReview.reviewKind,approved:historyTechnicalReview.approved,
+  bindingSource:historyTechnicalReview.bindingSource,projectionHash:stage.projectionHash,target:historyDestination.target,destinationIdentity:historyDestination.identity,
   captureId:stage.captureId,manifestHash:stage.manifestHash,definitionHash:stage.definitionHash,importer:APPSHEET_HISTORY_IMPORTER_VERSION,
   reviewer:historyTechnicalReview.reviewer,reviewedAt:historyTechnicalReview.reviewedAt,findingsCount:historyTechnicalReview.findingsCount,
   findingsHash:historyTechnicalReview.findingsHash,commitSha:historyTechnicalReview.commitSha});
@@ -781,6 +786,7 @@ const membersById=new Map<string,{id:string;legacyCustomerId:string|null;sourceS
     historyAuditDetails.projectionHash!==stage.projectionHash||historyAuditDetails.mode!=="stable"||
     historyAuditDetails.reviewer!==historyTechnicalReview.reviewer||historyAuditDetails.technicalReviewAt!==historyTechnicalReview.reviewedAt||
     historyAuditDetails.commitSha!==historyTechnicalReview.commitSha||historyAuditDetails.target!=="production"||
+    historyAuditDetails.destinationIdentity!==historyDestination.identity||historyAuditDetails.authorizationContext!=="user-authorized-plan"||
     historyAuditDetails.backupManifestHash!==stage.backupManifestHash||historyAuditDetails.backupSnapshotAt!==stage.backupSnapshotAt||
     historyAuditDetails.recordCount!==historyRecords.length||historyAuditDetails.factCount!==historyFacts.length||
     historyAuditDetails.exceptionCount!==allHistoryExceptions||historyAuditDetails.reviewedBy!==null||historyAuditDetails.status!=="staged")

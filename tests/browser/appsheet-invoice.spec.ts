@@ -966,7 +966,7 @@ test("legacy invoice keeps the not-NO catalog rule and positive sub-gram quantit
   expect(commandPosts).toHaveLength(0);
 });
 
-test("a retained AppSheet preorder line requires current availability before InvoiceUpdated", async ({ page }) => {
+test("saving an AppSheet preorder stays pending until the separate confirmation command", async ({ page }) => {
   let skuCAvailability = "Sí";
   let catalogReads = 0;
   await page.route("**/api/operations/catalog**", async route => {
@@ -974,7 +974,11 @@ test("a retained AppSheet preorder line requires current availability before Inv
     return fulfillCatalogAvailability(route, skuId => skuId === "ops-sku-c" ? skuCAvailability : "NO");
   });
   const invoiceUpdatedPosts: Request[] = [];
-  page.on("request", request => { if (isCommand(request, "InvoiceUpdated")) invoiceUpdatedPosts.push(request); });
+  const invoiceConfirmedPosts: Request[] = [];
+  page.on("request", request => {
+    if (isCommand(request, "InvoiceUpdated")) invoiceUpdatedPosts.push(request);
+    if (isCommand(request, "InvoiceConfirmed")) invoiceConfirmedPosts.push(request);
+  });
   await enterOrders(page);
   const financeBefore = await financeSnapshot(page);
   const stockBefore = await stockSnapshot(page, "ops-sku-c");
@@ -1033,21 +1037,14 @@ test("a retained AppSheet preorder line requires current availability before Inv
   await expect(historicalLine).toContainText("3 g");
   await expect(historicalLine.locator("[data-testid^='appsheet-edit-product-']")).toBeVisible();
 
-  const acceptance = field(editor, "acceptance");
-  await expect(acceptance).toBeVisible();
-  await expect(acceptance).toHaveAttribute("required", "");
-  await expect(editor.getByTestId("appsheet-save-invoice")).toBeDisabled();
+  await expect(field(editor, "acceptance")).toHaveCount(0);
+  await expect(editor.getByTestId("appsheet-save-invoice")).toBeEnabled();
   expect(await getJson(page, `orders/${encodeURIComponent(shellId)}`)).toMatchObject({
     order: { commercialState: "preorder" },
     reservations: [],
     deliveries: [],
   });
-  const acceptanceNote = "El cliente aceptó esta factura y el envío según los importes mostrados.";
-  await acceptance.fill(acceptanceNote);
-  await field(editor, "note").fill("Aclaración editada después de la aceptación.");
-  await expect(acceptance).toHaveValue("");
-  await expect(editor.getByTestId("appsheet-save-invoice")).toBeDisabled();
-  await acceptance.fill(acceptanceNote);
+  await field(editor, "note").fill("Aclaración editada antes de confirmar.");
   await expect(editor.getByTestId("appsheet-save-invoice")).toBeEnabled();
 
   const refreshCatalog = async () => {
@@ -1084,7 +1081,7 @@ test("a retained AppSheet preorder line requires current availability before Inv
   skuCAvailability = "Sí";
   await refreshCatalog();
   await expect(historicalLine.locator("small[role='alert']")).toHaveCount(0);
-  await expect(acceptance).toHaveValue(acceptanceNote);
+  await expect(field(editor, "acceptance")).toHaveCount(0);
   await expect(editor.getByTestId("appsheet-save-invoice")).toBeEnabled();
 
   const updateRefresh = page.waitForResponse(response =>
@@ -1104,23 +1101,51 @@ test("a retained AppSheet preorder line requires current availability before Inv
   expect(updatedEnvelope.data).toMatchObject({
     memberId: "ops-member",
     invoiceDate,
-    preorder: false,
-    acceptance: { note: acceptanceNote },
+    preorder: true,
     lines: [{ skuId: "ops-sku-c", scale: "Precio_5_Gramos", quantity: "3", totalMinor: "1201" }],
   });
+  expect(Object.hasOwn(updatedEnvelope.data, "acceptance")).toBe(false);
   const updatedLines = updatedEnvelope.data.lines as Array<Record<string, unknown>>;
   expect(Object.hasOwn(updatedLines[0]!, "pricePerGramMinor")).toBe(false);
-  expect(updatedBody.result).toMatchObject({ orderId: shellId, commercialState: "confirmed", quoteFrozen: true });
+  expect(updatedBody.result).toMatchObject({ orderId: shellId, commercialState: "preorder", quoteFrozen: false });
+  expect(invoiceConfirmedPosts).toHaveLength(0);
 
   const refreshedOrders = await (await updateRefresh).json();
   expect(refreshedOrders.items.filter((item: { id: string }) => item.id === shellId)).toHaveLength(1);
   await expect(editor).toHaveCount(0);
+  const pending = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
+  expect(pending.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "preorder", quoteFrozen: false });
+  expect(pending.order.quote.lines).toHaveLength(1);
+  expect(pending.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201" });
+  expect(Object.hasOwn(pending.order.quote.input.lines[0], "pricePerGramMinor")).toBe(false);
+  expect(Object.hasOwn(pending.order.quote.lines[0], "pricePerGramMinor")).toBe(false);
+  expect(pending.reservations).toHaveLength(0);
+  expect(pending.deliveries).toHaveLength(0);
+  expect(await stockSnapshot(page, "ops-sku-c")).toEqual(stockBefore);
+  expect(await financeSnapshot(page)).toEqual(financeBefore);
+
+  preorderRow = page.locator("tbody tr").filter({ hasText: `Factura #${shellId.slice(0, 8).toUpperCase()}` });
+  await preorderRow.getByRole("button", { name: "Confirmar preventa", exact: true }).click();
+  const confirmationDialog = page.getByTestId("appsheet-invoice-dialog");
+  await expect(confirmationDialog).toBeVisible();
+  await expect(confirmationDialog.getByText("Evidencia aportada por el operador")).toBeVisible();
+  await expect(confirmationDialog.getByText("El sistema registra esta evidencia, pero no verifica el consentimiento del cliente.")).toBeVisible();
+  const confirmationNote = "El operador informa que el cliente aceptó los importes mostrados.";
+  await field(confirmationDialog, "acceptance").fill(confirmationNote);
+  const confirmationPromise = saveResponse(page, "InvoiceConfirmed");
+  await confirmationDialog.getByTestId("appsheet-confirm-preorder").click();
+  const confirmedResponse = await confirmationPromise;
+  const confirmationStatus = confirmedResponse.status();
+  const confirmationText = confirmationStatus === 200 ? "" : await confirmedResponse.text();
+  expect(confirmationStatus, confirmationText).toBe(200);
+  const confirmationEnvelope = confirmedResponse.request().postDataJSON() as CommandEnvelope;
+  expect(confirmationEnvelope.command).toBe("InvoiceConfirmed");
+  expect(confirmationEnvelope.targetId).toBe(shellId);
+  expect(confirmationEnvelope.data).toEqual({ acceptance: { note: confirmationNote } });
+  expect(invoiceConfirmedPosts).toHaveLength(1);
+  await expect(confirmationDialog).toHaveCount(0);
   const confirmed = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
-  expect(confirmed.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "confirmed", totalMinor: null, capturedBaseMinor: "1201", quote: { acceptance: { note: acceptanceNote } } });
-  expect(confirmed.order.quote.lines).toHaveLength(1);
-  expect(confirmed.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201" });
-  expect(Object.hasOwn(confirmed.order.quote.input.lines[0], "pricePerGramMinor")).toBe(false);
-  expect(Object.hasOwn(confirmed.order.quote.lines[0], "pricePerGramMinor")).toBe(false);
+  expect(confirmed.order).toMatchObject({ id: shellId, commercialState: "confirmed", quote: { acceptance: { note: confirmationNote } } });
   expect(confirmed.reservations).toHaveLength(1);
   expect(confirmed.reservations[0]).toMatchObject({ quantity: "3" });
   expect(confirmed.deliveries).toHaveLength(0);
@@ -1232,9 +1257,37 @@ test("a late catalog page cannot leak rows or its cursor into a newer search", a
   expect(commandPosts).toEqual([]);
 });
 
-test("an empty AppSheet preorder shell can be completed and reserved through one InvoiceUpdated save", async ({ page }) => {
+test("an empty AppSheet preorder shell saves as pending, rejects failed writes, and blocks an invalid snapshot", async ({ page }) => {
+  await page.route("**/api/operations/catalog**", async route => {
+    const response = await route.fetch();
+    if (response.status() !== 200) return route.fulfill({ response });
+    const body = await response.json() as { items?: Array<Record<string, unknown>> };
+    const items = (body.items ?? []).map(item => {
+      if (item.id !== "ops-sku-c") return item;
+      return { ...item, requiresAppSheetSourceLot: true, appSheetSourceLots: [] };
+    });
+    return route.fulfill({ response, json: { ...body, items } });
+  });
+  let rejectNextUpdate = true;
+  let rejectedUpdateEnvelope: CommandEnvelope | null = null;
+  await page.route("**/api/operations/commands", async route => {
+    const request = route.request();
+    if (rejectNextUpdate && isCommand(request, "InvoiceUpdated")) {
+      rejectNextUpdate = false;
+      rejectedUpdateEnvelope = request.postDataJSON() as CommandEnvelope;
+      return route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "Rechazo sintético para comprobar que la preventa no se escribe." }) });
+    }
+    return route.continue();
+  });
+  const invoiceUpdatedPosts: CommandEnvelope[] = [];
+  const invoiceConfirmedPosts: Request[] = [];
+  page.on("request", request => {
+    if (isCommand(request, "InvoiceUpdated")) invoiceUpdatedPosts.push(request.postDataJSON() as CommandEnvelope);
+    if (isCommand(request, "InvoiceConfirmed")) invoiceConfirmedPosts.push(request);
+  });
   await enterOrders(page);
   const financeBefore = await financeSnapshot(page);
+  const stockBefore = await stockSnapshot(page, "ops-sku-c");
   await page.getByTestId("appsheet-preorder-open").click();
   const shell = page.getByTestId("appsheet-invoice-dialog");
   await expect(shell).toBeVisible();
@@ -1283,22 +1336,44 @@ test("an empty AppSheet preorder shell can be completed and reserved through one
     total: "12.01",
   });
 
-  const acceptance = field(editor, "acceptance");
-  await expect(acceptance).toBeVisible();
-  await expect(acceptance).toHaveAttribute("required", "");
-  await expect(editor.getByTestId("appsheet-save-invoice")).toBeDisabled();
+  const productRow = editor.locator(".appsheet-dialog-lines li");
+  await expect(productRow).toHaveCount(1);
+  await productRow.getByRole("button", { name: "Editar producto", exact: true }).click();
+  const product = page.getByTestId("appsheet-product-dialog");
+  await expect(product).toBeVisible();
+  const sourceLot = field(product, "line-sourceLotId");
+  await expect(sourceLot).toHaveValue("");
+  await expect(sourceLot).not.toHaveAttribute("required", "");
+  await product.getByRole("button", { name: "Guardar cambios", exact: true }).click();
+  await expect(product).toHaveCount(0);
+  await expect(editor.getByTestId("appsheet-save-invoice")).toBeEnabled();
+  await expect(field(editor, "acceptance")).toHaveCount(0);
   expect(await getJson(page, `orders/${encodeURIComponent(shellId)}`)).toMatchObject({
     order: { commercialState: "preorder" },
     reservations: [],
     deliveries: [],
   });
-  const acceptanceNote = "El cliente aceptó esta factura y el envío según los importes mostrados.";
-  await acceptance.fill(acceptanceNote);
-  await field(editor, "note").fill("Aclaración editada después de la aceptación.");
-  await expect(acceptance).toHaveValue("");
-  await expect(editor.getByTestId("appsheet-save-invoice")).toBeDisabled();
-  await acceptance.fill(acceptanceNote);
+  const note = "Aclaración editada en la preventa pendiente.";
+  await field(editor, "note").fill(note);
   await expect(editor.getByTestId("appsheet-save-invoice")).toBeEnabled();
+
+  const rejectedPromise = saveResponse(page, "InvoiceUpdated");
+  await editor.getByTestId("appsheet-save-invoice").click();
+  const rejected = await rejectedPromise;
+  expect(rejected.status()).toBe(422);
+  expect(rejectedUpdateEnvelope).not.toBeNull();
+  expect(rejectedUpdateEnvelope!.data).toMatchObject({ preorder: true, lines: [{ totalMinor: "1201" }] });
+  expect(Object.hasOwn(rejectedUpdateEnvelope!.data, "acceptance")).toBe(false);
+  await expect(editor.getByRole("alert")).toContainText("Rechazo sintético");
+  await expect(field(editor, "note")).toHaveValue(note);
+  await expect(productRow).toHaveCount(1);
+  const afterRejectedUpdate = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
+  expect(afterRejectedUpdate.order).toMatchObject({ commercialState: "preorder" });
+  expect(afterRejectedUpdate.order.quote.lines).toEqual([]);
+  expect(afterRejectedUpdate.reservations).toHaveLength(0);
+  expect(afterRejectedUpdate.deliveries).toHaveLength(0);
+  expect(await stockSnapshot(page, "ops-sku-c")).toEqual(stockBefore);
+  expect(await financeSnapshot(page)).toEqual(financeBefore);
 
   const updateRefresh = page.waitForResponse(response =>
     response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/orders",
@@ -1316,22 +1391,60 @@ test("an empty AppSheet preorder shell can be completed and reserved through one
   expect(updatedEnvelope.data).toMatchObject({
     memberId: "ops-member",
     invoiceDate,
-    preorder: false,
-    acceptance: { note: acceptanceNote },
+    preorder: true,
+    note,
     lines: [{ skuId: "ops-sku-c", scale: "Precio_5_Gramos", quantity: "3", totalMinor: "1201" }],
   });
-  expect(updatedBody.result).toMatchObject({ orderId: shellId, commercialState: "confirmed", quoteFrozen: true });
+  expect(Object.hasOwn(updatedEnvelope.data, "acceptance")).toBe(false);
+  expect(invoiceUpdatedPosts).toHaveLength(2);
+  expect(invoiceConfirmedPosts).toHaveLength(0);
+  expect(updatedBody.result).toMatchObject({ orderId: shellId, commercialState: "preorder", quoteFrozen: false });
 
   const refreshedOrders = await (await updateRefresh).json();
   expect(refreshedOrders.items.filter((item: { id: string }) => item.id === shellId)).toHaveLength(1);
   await expect(editor).toHaveCount(0);
-  const confirmed = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
-  expect(confirmed.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "confirmed", totalMinor: null, capturedBaseMinor: "1201", quote: { acceptance: { note: acceptanceNote } } });
-  expect(confirmed.order.quote.lines).toHaveLength(1);
-  expect(confirmed.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201" });
-  expect(confirmed.reservations).toHaveLength(1);
-  expect(confirmed.reservations[0]).toMatchObject({ quantity: "3" });
-  expect(confirmed.deliveries).toHaveLength(0);
+  const pending = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
+  expect(pending.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "preorder", quoteFrozen: false, note });
+  expect(pending.order.quote.lines).toHaveLength(1);
+  expect(pending.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201" });
+  expect(Object.hasOwn(pending.order.quote.input.lines[0], "sourceLotId")).toBe(false);
+  expect(pending.reservations).toHaveLength(0);
+  expect(pending.deliveries).toHaveLength(0);
+  expect(await stockSnapshot(page, "ops-sku-c")).toEqual(stockBefore);
+  expect(await financeSnapshot(page)).toEqual(financeBefore);
+
+  await page.route("**/api/operations/orders", async route => {
+    const response = await route.fetch();
+    if (response.status() !== 200) return route.fulfill({ response });
+    const body = await response.json() as { items?: Array<Record<string, unknown>> };
+    const items = (body.items ?? []).map(item => {
+      if (item.id !== shellId) return item;
+      const quote = item.quote && typeof item.quote === "object" && !Array.isArray(item.quote)
+        ? item.quote as Record<string, unknown>
+        : {};
+      const input = quote.input && typeof quote.input === "object" && !Array.isArray(quote.input)
+        ? quote.input as Record<string, unknown>
+        : {};
+      return { ...item, quote: { ...quote, input: { ...input, currency: "JPY" } } };
+    });
+    return route.fulfill({ response, json: { ...body, items } });
+  });
+  await page.reload();
+  await enterOrders(page);
+  const invalidCurrencyRow = page.locator("tbody tr").filter({ hasText: `Factura #${shellId.slice(0, 8).toUpperCase()}` });
+  await invalidCurrencyRow.getByRole("button", { name: "Formulario de venta", exact: true }).click();
+  const invalidSnapshotDialog = page.getByTestId("appsheet-invoice-dialog");
+  await expect(invalidSnapshotDialog.getByRole("alert")).toContainText("moneda admitida (ARS o USD)");
+  await expect(invalidSnapshotDialog.getByTestId("appsheet-save-invoice")).toHaveCount(0);
+  await expect(invalidSnapshotDialog.getByTestId("appsheet-add-product")).toHaveCount(0);
+  expect(invoiceUpdatedPosts).toHaveLength(2);
+  expect(invoiceConfirmedPosts).toHaveLength(0);
+  const storedAfterInvalidSnapshot = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
+  expect(storedAfterInvalidSnapshot.order.quote.input).toMatchObject({ currency: "ARS", preorder: true });
+  expect(storedAfterInvalidSnapshot.order.commercialState).toBe("preorder");
+  expect(storedAfterInvalidSnapshot.reservations).toHaveLength(0);
+  expect(storedAfterInvalidSnapshot.deliveries).toHaveLength(0);
+  expect(await stockSnapshot(page, "ops-sku-c")).toEqual(stockBefore);
   expect(await financeSnapshot(page)).toEqual(financeBefore);
 });
 
@@ -1386,7 +1499,7 @@ test("an invoice line keeps its optional price-per-gram separate through draft e
   await expect(priceDetails).toHaveJSProperty("open", false);
   await priceDetails.locator("summary").click();
   const priceField = field(product, "line-pricePerGram");
-  await expect(priceField).toHaveValue("12.00");
+  await expect(priceField).toHaveValue("12");
   await priceField.fill("9.85");
   await field(product, "line-total").fill("12.01");
   await product.getByRole("button", { name: "Añadir producto", exact: true }).click();
@@ -1464,26 +1577,3 @@ test("an invoice line keeps its optional price-per-gram separate through draft e
   }
   expect(detail.order.lines[0].revenueMinor).toBe("1201");
 });
-
-function mockedCataloguePage(prefix: string, count: number, nextCursor: string | null) {
-  const items = Array.from({ length: count }, (_, index) => {
-    const suffix = String(index + 1).padStart(3, "0");
-    const id = `${prefix}-${suffix}`;
-    return {
-      id,
-      code: id,
-      name: id,
-      variety: `Variedad ${id}`,
-      category: "Variedad sintética",
-      unit: "g",
-      active: true,
-      appSheet: { availability: "Sí", segment: null, price5Grams: null },
-    };
-  });
-  return {
-    items,
-    versions: Object.fromEntries(items.map(item => [item.id, 1])),
-    hasMore: Boolean(nextCursor),
-    nextCursor,
-  };
-}

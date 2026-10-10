@@ -608,7 +608,16 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
     assert.ok(Number.isFinite(Date.parse(directConfirmedQuote.acceptance.acceptedAt)));
     assert.deepEqual(await countFinancialEffects(), financialEffectsBefore, "confirmar no emite cobros ni asienta caja");
 
-    await db.operationAuthority.update({ where: { id: "operations" }, data: { cutoverProfile: "legacy" } });
+    const authorityObject = await db.operationObject.findUnique({ where: { id: "operations" }, select: { version: true } });
+    const suspendReplacementRequest = envelope("operations", "AuthoritySuspended", {
+      reason: "Synthetic lifecycle transition before legacy invoice compatibility coverage",
+    }, authorityObject?.version ?? 0);
+    const suspendReplacement = await call(suspendReplacementRequest);
+    assert.equal(suspendReplacement.response.status, 200, JSON.stringify(suspendReplacement.body));
+    const suspendedAuthority = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+    assert.equal(suspendedAuthority.mode, "shadow");
+    assert.equal(suspendedAuthority.cutoverProfile, "appsheet-replacement");
+    await db.operationAuthority.update({ where: { id: "operations" }, data: { cutoverProfile: "legacy", mode: "active" } });
     const legacyCompatibleId = `invoice-update-legacy-compatible-${randomUUID()}`;
     const legacyCompatibleSaveRequest = envelope(legacyCompatibleId, "InvoiceSaved", inputWithoutMoto({ quantity: "1", preorder: true }));
     const legacyCompatibleSave = await call(legacyCompatibleSaveRequest);

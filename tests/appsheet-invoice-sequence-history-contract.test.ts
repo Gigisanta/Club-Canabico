@@ -4,7 +4,7 @@ import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { splitSqlStatements } from "./migration-sql.js";
-import { previewAppSheetInvoiceSequenceSeed } from "../server/operations/appsheet-invoice-sequence.js";
+import { applyAppSheetInvoiceSequenceSeed, previewAppSheetInvoiceSequenceSeed } from "../server/operations/appsheet-invoice-sequence.js";
 import { OperationError } from "../server/operations/core.js";
 import {
   AppSheetHistoryStageError,
@@ -323,6 +323,29 @@ test("history writer persists its stable top-level coverage for invoice-sequence
     assert.equal(previewAttempt.preview.numberedInvoiceCount, 1);
     assert.equal(previewAttempt.preview.maxHiddenId, "41");
     assert.match(previewAttempt.preview.previewDigest, /^[a-f0-9]{64}$/);
+
+    const priorDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = databaseUrl.toString();
+    try {
+      const approvalActor = await db.user.findUniqueOrThrow({ where: { id: gateApproverId } });
+      await assert.rejects(db.$transaction((tx) => applyAppSheetInvoiceSequenceSeed(tx, {
+        captureId: sourceCapture.captureId,
+        snapshotId,
+        previewDigest: previewAttempt.preview.previewDigest,
+        evidence: { note: "Synthetic reject of isolated history stage" },
+      }, approvalActor, new Date())), (error) => error instanceof OperationError && error.code === "APP_SHEET_HISTORY_BINDING_INVALID");
+      assert.deepEqual({
+        sequences: await db.appSheetInvoiceSequence.count(),
+        reservations: await db.appSheetInvoiceNumberReservation.count(),
+        ledgerEvents: await db.ledgerEvent.count(),
+        stockFacts: await db.stockFact.count(),
+        outbox: await db.operationOutbox.count(),
+        audits: await db.operationAudit.count(),
+      }, effectsBeforePreview, "el rechazo transaccional de un stage aislado no crea efectos de siembra");
+    } finally {
+      if (priorDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = priorDatabaseUrl;
+    }
 
     const setCoverage = async (coverage: Prisma.InputJsonValue) => db.legacyImportSnapshot.update({ where: { id: snapshotId }, data: { coverage } });
     const expectCoverageWriteRejected = async (label: string, coverage: Prisma.InputJsonValue) => {

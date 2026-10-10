@@ -35,6 +35,9 @@ type InvoiceDraft = {
   lines: InvoiceLineDraft[];
   moto: MotoDraft | null;
 };
+type SnapshotDraft =
+  | { status: "valid"; draft: InvoiceDraft }
+  | { status: "unavailable" | "invalid-currency"; error: string };
 
 interface Props {
   open: boolean;
@@ -87,10 +90,17 @@ function formatAddress(value: Row) {
   ].map(part => part.trim()).filter(Boolean);
   return [...new Set(parts)].join(" · ");
 }
-function fromSnapshot(order: Row | undefined, fallbackDate: string): InvoiceDraft | null {
+function fromSnapshot(order: Row | undefined, fallbackDate: string): SnapshotDraft {
   const quote = objectValue(order?.quote);
   const input = objectValue(quote.input);
-  if (quote.source !== "appsheet-invoice" || !Object.keys(input).length) return null;
+  if (quote.source !== "appsheet-invoice" || !Object.keys(input).length) return {
+    status: "unavailable",
+    error: "No se pudo cargar la preventa original para editar. La versión guardada se conserva; volvé a abrir el registro o consultá soporte antes de guardar.",
+  };
+  if (input.currency !== "ARS" && input.currency !== "USD") return {
+    status: "invalid-currency",
+    error: "La preventa original no tiene una moneda admitida (ARS o USD). La versión guardada se conserva; revisá el dato de origen antes de editar.",
+  };
   const lines = Array.isArray(input.lines) ? input.lines.filter((item): item is Row => Boolean(item) && typeof item === "object").map(line => ({
     id: stringValue(line.id, crypto.randomUUID()), skuId: stringValue(line.skuId), sourceLotId: stringValue(line.sourceLotId), date: stringValue(line.date, stringValue(input.invoiceDate, fallbackDate)),
     scale: stringValue(line.scale), quantity: stringValue(line.quantity), total: minorToForm(line.totalMinor),
@@ -99,9 +109,9 @@ function fromSnapshot(order: Row | undefined, fallbackDate: string): InvoiceDraf
   const motoValue = objectValue(input.moto);
   const payment = (value: unknown): Payment => value === "transfer" || value === "mercado_pago" || value === "card" ? value : "cash";
   const addressObject = objectValue(input.address);
-  return {
+  return { status: "valid", draft: {
     memberId: stringValue(input.memberId, stringValue(order?.memberId)),
-    invoiceNumber: stringValue(input.invoiceNumber) || stringValue(quote.invoiceNumber), invoiceDate: stringValue(input.invoiceDate, fallbackDate), currency: input.currency === "USD" ? "USD" : "ARS",
+    invoiceNumber: stringValue(input.invoiceNumber) || stringValue(quote.invoiceNumber), invoiceDate: stringValue(input.invoiceDate, fallbackDate), currency: input.currency,
     address: formatAddress(addressObject), addressObject, note: stringValue(input.note),
     productPaymentMethod: payment(input.productPaymentMethod), lines,
     moto: Object.keys(motoValue).length ? {
@@ -110,7 +120,7 @@ function fromSnapshot(order: Row | undefined, fallbackDate: string): InvoiceDraf
       clientTariff: minorToForm(motoValue.clientTariffMinor), adminTariff: minorToForm(motoValue.adminTariffMinor),
       totalTariff: minorToForm(motoValue.totalTariffMinor), notes: stringValue(motoValue.notes),
     } : null,
-  };
+  } };
 }
 function blankDraft(date: string): InvoiceDraft {
   return { memberId: "", invoiceNumber: "", invoiceDate: date, currency: "ARS", address: "", addressObject: {}, note: "", productPaymentMethod: "cash", lines: [], moto: null };
@@ -186,7 +196,11 @@ export function AppSheetInvoiceForm(props: Props) {
   const submitting = useRef(false);
   const memberSubmitting = useRef(false);
   const initialDate = useMemo(() => civilDate(context.timeZone), [context.timeZone]);
-  const initial = useMemo(() => mode === "edit-preorder" ? fromSnapshot(order, initialDate) ?? blankDraft(initialDate) : blankDraft(initialDate), [mode, order, initialDate]);
+  const snapshot = useMemo(() => mode === "edit-preorder" ? fromSnapshot(order, initialDate) : null, [mode, order, initialDate]);
+  const snapshotError = mode === "edit-preorder" && snapshot?.status !== "valid"
+    ? snapshot?.error ?? "No se pudo cargar la preventa original para editar. La versión guardada se conserva."
+    : "";
+  const initial = useMemo(() => snapshot?.status === "valid" ? snapshot.draft : blankDraft(initialDate), [snapshot, initialDate]);
   const [draft, setDraft] = useState<InvoiceDraft>(initial);
   const [stage, setStage] = useState<"main" | "product" | "moto" | "member">("main");
   const [productDraft, setProductDraft] = useState<InvoiceLineDraft | null>(null);
@@ -339,7 +353,7 @@ export function AppSheetInvoiceForm(props: Props) {
       setError("La variedad seleccionada ya no está disponible para nuevas líneas. Conservamos el borrador; elegí otra o verificá el catálogo antes de continuar.");
       return;
     }
-    const requiresSelectedSourceLot = activeReplacement && selected?.requiresAppSheetSourceLot === true && mode !== "preorder";
+    const requiresSelectedSourceLot = activeReplacement && selected?.requiresAppSheetSourceLot === true && mode !== "preorder" && mode !== "edit-preorder";
     const sourceLotOptionsForLine = sourceLotOptions(selected);
     if (requiresSelectedSourceLot && (!submittedDraft.sourceLotId || !sourceLotOptionsForLine.some(option => stringValue(option.sourceLotId) === submittedDraft.sourceLotId))) {
       setError("Elegí un lote de origen con disponibilidad actual para cada producto antes de guardar la factura.");
@@ -536,7 +550,7 @@ export function AppSheetInvoiceForm(props: Props) {
             : "La variedad seleccionada dejó de estar disponible. Conservamos la línea del borrador; elegí una variedad disponible o quitá esa línea antes de guardar.");
         return;
       }
-      if (activeReplacement && mode !== "preorder") {
+      if (activeReplacement && mode !== "preorder" && mode !== "edit-preorder") {
         if (catalogLoading || catalogError) {
           setError(catalogError
             ? "No se pudo verificar la disponibilidad de lotes. Reintentá la carga antes de guardar; conservamos el borrador."
@@ -560,16 +574,15 @@ export function AppSheetInvoiceForm(props: Props) {
     const command = isCreate ? "InvoiceSaved" : "InvoiceUpdated";
     let data: Row;
     try {
-      if (mode === "edit-preorder" && !confirmationEvidence.trim()) {
-        setError("Registrá la aceptación explícita del cliente antes de confirmar la preventa.");
+      if (mode === "edit-preorder" && snapshotError) {
+        setError(snapshotError);
         submitting.current = false; setBusy(false);
         return;
       }
       data = attempted.current?.command === command
         ? attempted.current.data
         : {
-          ...payload(mode === "preorder"),
-          ...(mode === "edit-preorder" ? { acceptance: { note: confirmationEvidence.trim() } } : {}),
+          ...payload(mode === "preorder" || mode === "edit-preorder"),
         };
     }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Revisá los datos de la factura."); submitting.current = false; setBusy(false); return; }
@@ -577,14 +590,16 @@ export function AppSheetInvoiceForm(props: Props) {
     try {
       await runCommand(command, isCreate ? target.current : String(order?.id), isCreate ? 0 : expectedVersion ?? Number.NaN, data, isCreate);
       const orderId = isCreate ? target.current : String(order?.id);
-      const message = mode === "preorder" ? "Preventa creada. Todavía no reserva stock ni programa un envío." : mode === "edit-preorder" ? "Factura guardada y confirmada desde la preventa. El envío quedó vinculado cuando corresponde; no se registró ningún cobro." : "Factura guardada y confirmada. El envío quedó vinculado cuando corresponde; no se registró ningún cobro.";
+      const message = mode === "preorder" ? "Preventa creada. Todavía no reserva stock ni programa un envío." : mode === "edit-preorder" ? "Preventa guardada y todavía pendiente de confirmación. No se reservó stock ni se programó un envío." : "Factura guardada y confirmada. El envío quedó vinculado cuando corresponde; no se registró ningún cobro.";
       dialog.current?.close(); onSaved(orderId, message); onClose();
     } catch (cause) {
       const pending = uncertain || isUncertainCommandOutcome(cause);
       setUncertain(pending);
       if (!pending) attempted.current = null;
       setError(pending
-        ? "Confirmación pendiente: el servidor pudo haber guardado esta factura. No cambies los campos; reintentá para recuperar el mismo comprobante."
+        ? mode === "edit-preorder"
+          ? "Resultado del guardado pendiente: el servidor pudo haber guardado esta preventa. No cambies los campos; reintentá para recuperar el mismo registro."
+          : "Confirmación pendiente: el servidor pudo haber guardado esta factura. No cambies los campos; reintentá para recuperar el mismo comprobante."
         : cause instanceof Error ? cause.message : "No se pudo guardar la factura.");
     } finally { submitting.current = false; setBusy(false); }
   }
@@ -595,14 +610,14 @@ export function AppSheetInvoiceForm(props: Props) {
     const quote = objectValue(confirmation?.quote);
     const savedLines = Array.isArray(quote.lines) ? quote.lines : [];
     if (!id || !savedLines.length || !confirmationEvidence.trim() || !Number.isSafeInteger(confirmationVersion)) {
-      setConfirmationError(!savedLines.length ? "La preventa todavía no tiene productos guardados. Abrí «Formulario de venta» antes de confirmar." : "Cargá la aceptación y actualizá la versión del registro.");
+      setConfirmationError(!savedLines.length ? "La preventa todavía no tiene productos guardados. Abrí «Formulario de venta» antes de confirmar." : "Cargá la evidencia informada y actualizá la versión del registro.");
       return;
     }
     if (submitting.current) return;
     submitting.current = true; setBusy(true); setConfirmationError("");
     try {
       await runCommand("InvoiceConfirmed", id, confirmationVersion!, { acceptance: { note: confirmationEvidence.trim() } });
-      dialog.current?.close(); onSaved(id, "Preventa confirmada con la versión guardada. Se reservó stock y se creó el envío si incluye servicio de moto; no se registró un cobro."); onClose();
+      dialog.current?.close(); onSaved(id, "Preventa confirmada con la versión guardada y la evidencia aportada por el operador. Se reservó stock y se creó el envío si incluye servicio de moto; no se registró un cobro."); onClose();
     } catch (cause) {
       setUncertain(isUncertainCommandOutcome(cause));
       setConfirmationError(isUncertainCommandOutcome(cause)
@@ -612,6 +627,17 @@ export function AppSheetInvoiceForm(props: Props) {
   }
 
   if (!open) return null;
+  if (mode === "edit-preorder" && snapshotError) return <dialog className="ops-dialog appsheet-invoice-dialog" ref={dialog} data-testid="appsheet-invoice-dialog" aria-labelledby="appsheet-invoice-title" onCancel={event => { event.preventDefault(); close(); }}>
+    <div className="ops-dialog-card appsheet-invoice-card">
+      <header className="ops-dialog-head appsheet-invoice-head">
+        <div><span className="ops-kicker">Bombo · Facturación</span><h2 id="appsheet-invoice-title">Formulario de venta</h2><p>La preventa original debe conservarse para poder editarla.</p></div>
+        <button type="button" className="ops-icon-button" aria-label="Cerrar formulario" onClick={close}>×</button>
+      </header>
+      <div className="appsheet-invoice-body"><p className="ops-inline-error" role="alert">{snapshotError}</p>
+        <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={close}>Cerrar</button></footer>
+      </div>
+    </div>
+  </dialog>;
   const creatingShell = mode === "preorder";
   const confirming = mode === "confirm-preorder";
   const selectedMember = (value: string) => {
@@ -647,13 +673,13 @@ export function AppSheetInvoiceForm(props: Props) {
   const clientTariffPreview = draft.moto ? amountMinorOrNull(draft.moto.clientTariff) : 0n;
   const clientTariffMinor = clientTariffPreview;
   const capturedBaseMinor = productSubtotalMinor === null || clientTariffMinor === null ? null : productSubtotalMinor + clientTariffMinor;
-  const motoSummaryPreview = replacementProfile && draft.moto
+  const motoSummaryPreview = replacementProfile && mode !== "edit-preorder" && draft.moto
     ? calculateMotoPreview(draft.moto.clientTariff, draft.moto.paymentMethod, draft.currency)
     : null;
-  const motoEditorPreview = replacementProfile && motoDraft
+  const motoEditorPreview = replacementProfile && mode !== "edit-preorder" && motoDraft
     ? calculateMotoPreview(motoDraft.clientTariff, motoDraft.paymentMethod, draft.currency)
     : null;
-  const formulaPreview = replacementProfile && productPreviewReady && productSubtotalMinor !== null && clientTariffPreview !== null ? calculateAppSheetInvoiceFinancials({
+  const formulaPreview = replacementProfile && mode !== "edit-preorder" && productPreviewReady && productSubtotalMinor !== null && clientTariffPreview !== null ? calculateAppSheetInvoiceFinancials({
     subtotalMinor: productSubtotalMinor,
     clientTariffMinor: clientTariffPreview,
     paymentMethod: draft.productPaymentMethod,
@@ -681,7 +707,7 @@ export function AppSheetInvoiceForm(props: Props) {
     <div className="ops-dialog-card appsheet-invoice-card">
       <header className="ops-dialog-head appsheet-invoice-head">
         <div><span className="ops-kicker">Bombo · Facturación</span><h2 id="appsheet-invoice-title">{confirming ? "Confirmar preventa" : creatingShell ? "Preventa" : mode === "edit-preorder" ? "Formulario de venta" : "Nueva factura"}</h2>
-          <p>{confirming ? "Se confirma exactamente la última versión guardada, sin volver a cotizar." : creatingShell ? "Guardá fecha y socio para continuar el formulario más tarde." : "Completá la factura y el viaje de moto con los importes ingresados."}</p></div>
+          <p>{confirming ? "Se confirma exactamente la última versión guardada, sin volver a cotizar." : creatingShell ? "Guardá fecha y socio para continuar el formulario más tarde." : mode === "edit-preorder" ? "Guardá los cambios; la preventa sigue pendiente hasta que elijas Confirmar preventa." : "Completá la factura y el viaje de moto con los importes ingresados."}</p></div>
         <button type="button" className="ops-icon-button" aria-label="Cerrar formulario" onClick={close} disabled={busy || uncertain}>×</button>
       </header>
 
@@ -703,7 +729,7 @@ export function AppSheetInvoiceForm(props: Props) {
         {unboundConfirmedSourceLot && hasMoreCatalog && !catalog.some(item => String(item.id) === stringValue(unboundConfirmedSourceLot.skuId)) && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={loadMoreCatalog} disabled={catalogLoading}>Cargar más variedades para verificar el lote</button>}
         {activeReplacement && catalogLoading && <p role="status">Verificando la disponibilidad de lotes de origen…</p>}
         {activeReplacement && catalogError && <p className="ops-inline-error" role="alert">No se pudo verificar la disponibilidad de lotes. Reintentá cargar el catálogo antes de confirmar.</p>}
-        {confirmation && !blankPreorder && <label className="ops-field appsheet-field" htmlFor="appsheet-acceptance"><span>Aceptación registrada</span><textarea id="appsheet-acceptance" name="acceptance" value={confirmationEvidence} onChange={event => setConfirmationEvidence(event.target.value)} maxLength={2000} required disabled={busy || uncertain} /></label>}
+        {confirmation && !blankPreorder && <label className="ops-field appsheet-field" htmlFor="appsheet-acceptance"><span>Evidencia aportada por el operador</span><textarea id="appsheet-acceptance" name="acceptance" value={confirmationEvidence} onChange={event => setConfirmationEvidence(event.target.value)} maxLength={2000} required disabled={busy || uncertain} /><small>El sistema registra esta evidencia, pero no verifica el consentimiento del cliente.</small></label>}
         {uncertain && <p className="appsheet-pending" role="alert">Confirmación pendiente: se pudo confirmar la preventa. Conservá la evidencia y reintentá exactamente la misma acción.</p>}
         <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={close} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" data-testid={uncertain ? "appsheet-retry-confirm-preorder" : "appsheet-confirm-preorder"} disabled={busy || confirmationLoading || !confirmation || blankPreorder || Boolean(unboundConfirmedSourceLot) || (activeReplacement && (catalogLoading || Boolean(catalogError))) || !Number.isSafeInteger(confirmationVersion) || !confirmationEvidence.trim()}>{busy ? "Confirmando…" : uncertain ? "Reintentar confirmación" : "Confirmar preventa"}</button></footer>
       </form> : <form className="appsheet-invoice-body" onSubmit={event => void saveInvoice(event)} aria-busy={busy}>
@@ -758,12 +784,14 @@ export function AppSheetInvoiceForm(props: Props) {
 
           <section className="appsheet-section appsheet-payment-section">
             <label className="ops-field appsheet-field"><span>Forma de pago</span><select name="productPaymentMethod" data-testid="productPaymentMethod" aria-label="Forma de pago" value={draft.productPaymentMethod} onChange={event => updateDraft("productPaymentMethod", event.target.value as Payment)} disabled={busy || uncertain}>{paymentOptions(draft.productPaymentMethod === "card").map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-            {replacementProfile && draft.productPaymentMethod !== "cash" && draft.productPaymentMethod !== "card"
+            {mode !== "edit-preorder" && replacementProfile && draft.productPaymentMethod !== "cash" && draft.productPaymentMethod !== "card"
               ? <label className="ops-field appsheet-field"><span>Transferencia</span><input name="productTransfer" data-testid="productTransfer" aria-label="Transferencia" value={formulaPreview ? formatMinor(formulaPreview.transferMinor.toString(), draft.currency) : "Pendiente de definición"} readOnly /><small>5% del subtotal de productos según la regla capturada; el importe se redondea al centavo con mitad hacia arriba.</small></label>
-              : !replacementProfile && draft.productPaymentMethod === "transfer" && <label className="ops-field appsheet-field"><span>Transferencia</span><input name="productTransfer" data-testid="productTransfer" aria-label="Transferencia" value="Pendiente de definición" readOnly /><small>El campo observado está deshabilitado; el importe derivado y su fórmula siguen pendientes de cotejo.</small></label>}
+              : mode !== "edit-preorder" && !replacementProfile && draft.productPaymentMethod === "transfer" && <label className="ops-field appsheet-field"><span>Transferencia</span><input name="productTransfer" data-testid="productTransfer" aria-label="Transferencia" value="Pendiente de definición" readOnly /><small>El campo observado está deshabilitado; el importe derivado y su fórmula siguen pendientes de cotejo.</small></label>}
           </section>
 
-          <section className="appsheet-totals" aria-label="Resumen de factura" aria-live="polite">
+          {mode === "edit-preorder"
+            ? <p className="appsheet-footnote">El valor total de cada línea se conserva como fue ingresado; guardar esta preventa no vuelve a calcular ni confirma el total de la factura.</p>
+            : <><section className="appsheet-totals" aria-label="Resumen de factura" aria-live="polite">
             <div><span>Gramos</span><strong>{invoiceGrams === null ? "Pendiente de corregir" : `${invoiceGrams} g`}</strong></div>
             <div><span>Monto parcial</span><strong>{formulaPreview ? formatMinor(formulaPreview.subtotalMinor.toString(), draft.currency) : "Pendiente de definición"}</strong></div>
             <div><span>Suma explícita de líneas</span><strong>{productSubtotalMinor === null ? "Pendiente de completar importes" : formatMinor(productSubtotalMinor.toString(), draft.currency)}</strong></div>
@@ -784,16 +812,13 @@ export function AppSheetInvoiceForm(props: Props) {
               ? motoSummaryPreview
                 ? "Tarifa Cliente moto y su recargo se muestran junto a los productos. El total de la factura queda pendiente hasta completar productos válidos."
                 : "Completá productos válidos para calcular el total de la factura."
-              : "El importe capturado reúne productos y Tarifa Cliente como referencia. El total facturado todavía está pendiente de definición."}</p>
+              : "El importe capturado reúne productos y Tarifa Cliente como referencia. El total facturado todavía está pendiente de definición."}</p></>}
           <label className="ops-field appsheet-field"><span>Aclaración</span><textarea name="note" data-testid="note" aria-label="Aclaración" value={draft.note} onChange={event => updateDraft("note", event.target.value)} rows={2} maxLength={2000} disabled={busy || uncertain} /></label>
-          {mode === "edit-preorder" && <>
-            <label className="ops-field appsheet-field" htmlFor="appsheet-edit-preorder-acceptance"><span>Aceptación registrada</span><textarea id="appsheet-edit-preorder-acceptance" name="acceptance" data-testid="edit-preorder-acceptance" value={confirmationEvidence} onChange={event => setConfirmationEvidence(event.target.value)} maxLength={2000} required disabled={busy || uncertain} /><small>Registrá la aceptación explícita del cliente para los productos, importes y envío que muestra este formulario.</small></label>
-            <p className="appsheet-footnote">Guardar y confirmar registra esta aceptación, reserva stock y crea el envío cuando hay moto. El cobro queda pendiente.</p>
-          </>}
+          {mode === "edit-preorder" && <p className="appsheet-footnote">Guardar conserva la preventa pendiente sin reservar stock ni crear un envío. Usá «Confirmar preventa» por separado para volver a verificar disponibilidad y aplicar esos efectos.</p>}
           {mode === "invoice" && <p className="appsheet-footnote">Guardar confirma la factura y su envío cuando hay moto. El cobro queda pendiente y no afecta cajas.</p>}
         </>}
         {error && <p className={uncertain ? "appsheet-pending" : "ops-inline-error"} role="alert">{error}</p>}
-        <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={close} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" data-testid={uncertain ? "appsheet-retry-invoice" : "appsheet-save-invoice"} disabled={busy || (!uncertain && (!draft.memberId || ((mode === "invoice" || mode === "edit-preorder") && !draft.lines.length) || (mode === "edit-preorder" && (!Number.isSafeInteger(expectedVersion) || !confirmationEvidence.trim()))))}>{busy ? "Guardando…" : uncertain ? "Reintentar confirmación" : creatingShell ? "Guardar preventa" : mode === "edit-preorder" ? "Guardar y confirmar" : "Guardar"}</button></footer>
+        <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={close} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" data-testid={uncertain ? "appsheet-retry-invoice" : "appsheet-save-invoice"} disabled={busy || (!uncertain && (!draft.memberId || ((mode === "invoice" || mode === "edit-preorder") && !draft.lines.length) || (mode === "edit-preorder" && !Number.isSafeInteger(expectedVersion))))}>{busy ? "Guardando…" : uncertain ? mode === "edit-preorder" ? "Reintentar guardado" : "Reintentar confirmación" : creatingShell || mode === "edit-preorder" ? "Guardar preventa" : "Guardar"}</button></footer>
       </form>}
 
       {stage === "member" && <dialog className="ops-dialog appsheet-child-dialog" ref={memberDialog} data-testid="appsheet-member-dialog" aria-labelledby="appsheet-member-title" onCancel={event => { event.preventDefault(); cancelMemberCreate(); }}>
@@ -819,7 +844,7 @@ export function AppSheetInvoiceForm(props: Props) {
             <label className="ops-field appsheet-field"><span>ID. Factura</span><input aria-label="ID. Factura" value={draft.invoiceNumber || "Se asigna al guardar"} readOnly /></label>
             <label className="ops-field appsheet-field"><span>Fecha</span><input name="line-date" data-testid="line-date" aria-label="Fecha del producto" type="date" value={productDraft.date} onChange={event => updateProductField("date", event.target.value)} required /></label>
             <label className="ops-field appsheet-field"><span>Variedad</span><select name="line-skuId" data-testid="line-skuId" aria-label="Variedad" value={productDraft.skuId} onChange={event => updateProductField("skuId", event.target.value)} required><option value="">Elegí variedad</option>{productDraft.skuId && !saleProducts.some(item => String(item.id) === productDraft.skuId) && <option value={productDraft.skuId}>{stringValue(catalog.find(item => String(item.id) === productDraft.skuId)?.name, productDraft.skuId)} · {retainedProductIsHistorical ? "guardada en la preventa" : "no disponible; borrador conservado"}</option>}{saleProducts.map(item => <option key={String(item.id)} value={String(item.id)}>{stringValue(item.name, stringValue(item.code, String(item.id)))}</option>)}</select>{catalogLoading && <small role="status">Cargando variedades…</small>}{catalogError && <small className="appsheet-subtle-error">No se pudo cargar catálogo. <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={retryCatalog}>Reintentar</button></small>}{!catalogLoading && !catalogError && !saleProducts.length && <small>No hay variedades activas disponibles para factura.</small>}{hasMoreCatalog && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={loadMoreCatalog} disabled={catalogLoading}>Cargar más variedades</button>}</label>
-            {activeReplacement && selectedProduct?.requiresAppSheetSourceLot === true && <label className="ops-field appsheet-field"><span>Lote de origen</span><select name="line-sourceLotId" data-testid="line-sourceLotId" aria-label="Lote de origen" value={productDraft.sourceLotId} onChange={event => updateProductField("sourceLotId", event.target.value)} required={mode !== "preorder"}><option value="">{mode === "preorder" ? "Elegir más adelante" : "Elegí un lote disponible"}</option>{productDraft.sourceLotId && !selectedSourceLots.some(option => stringValue(option.sourceLotId) === productDraft.sourceLotId) && <option value={productDraft.sourceLotId}>{productDraft.sourceLotId} · no disponible; elegí otro</option>}{selectedSourceLots.map(option => <option key={stringValue(option.sourceLotId)} value={stringValue(option.sourceLotId)}>{stringValue(option.receivedDate)} · {stringValue(option.availableQuantity)} g disponibles · {stringValue(option.sourceLotId).slice(0, 18)}</option>)}</select><small>{mode === "preorder" ? "Podés elegirlo ahora o al editar la preventa antes de confirmar." : "La confirmación reserva únicamente el lote elegido y vuelve a comprobar su disponibilidad."}</small></label>}
+            {activeReplacement && selectedProduct?.requiresAppSheetSourceLot === true && <label className="ops-field appsheet-field"><span>Lote de origen</span><select name="line-sourceLotId" data-testid="line-sourceLotId" aria-label="Lote de origen" value={productDraft.sourceLotId} onChange={event => updateProductField("sourceLotId", event.target.value)} required={mode !== "preorder" && mode !== "edit-preorder"}><option value="">{mode === "preorder" || mode === "edit-preorder" ? "Resolver al confirmar" : "Elegí un lote disponible"}</option>{productDraft.sourceLotId && !selectedSourceLots.some(option => stringValue(option.sourceLotId) === productDraft.sourceLotId) && <option value={productDraft.sourceLotId}>{productDraft.sourceLotId} · no disponible; elegí otro</option>}{selectedSourceLots.map(option => <option key={stringValue(option.sourceLotId)} value={stringValue(option.sourceLotId)}>{stringValue(option.receivedDate)} · {stringValue(option.availableQuantity)} g disponibles · {stringValue(option.sourceLotId).slice(0, 18)}</option>)}</select><small>{mode === "preorder" || mode === "edit-preorder" ? "La preventa puede guardarse sin lote. Elegilo antes de confirmar; su disponibilidad se verificará de nuevo." : "La confirmación reserva únicamente el lote elegido y vuelve a comprobar su disponibilidad."}</small></label>}
             <label className="ops-field appsheet-field"><span>Escala_Tarifaria</span><select name="line-scale" data-testid="line-scale" aria-label="Escala tarifaria" value={productDraft.scale} onChange={event => updateProductField("scale", event.target.value)}><option value="">Elegí una escala</option>{productDraft.scale && !observedScales.includes(productDraft.scale) && <option value={productDraft.scale}>{productDraft.scale}</option>}{observedScales.map(scale => <option key={scale} value={scale}>{scale}</option>)}</select><small>Se conserva la escala elegida; el precio sugerido sólo se propone cuando coincide exactamente el campo del catálogo y la moneda.</small></label>
             <label className="ops-field appsheet-field"><span>Gramos pedidos</span><input name="line-quantity" data-testid="line-quantity" aria-label="Gramos pedidos" type={replacementProfile ? "number" : "text"} inputMode="decimal" {...(replacementProfile ? { min: 1, max: 99, step: "any", "aria-describedby": "appsheet-quantity-guidance" } : {})} onInvalid={() => { if (replacementProfile) setError("Ingresá entre 1 y 99 gramos, con hasta tres decimales."); }} value={productDraft.quantity} onChange={event => updateProductField("quantity", event.target.value)} required placeholder="Ej.: 3,5" />{replacementProfile && <small id="appsheet-quantity-guidance">1–99 gramos, hasta tres decimales.</small>}</label>
             <label className="ops-field appsheet-field"><span>Valor total</span><input name="line-total" data-testid="line-total" aria-label="Valor total" inputMode="decimal" value={productDraft.total} onChange={event => updateProductField("total", event.target.value)} required placeholder="Importe editable" /><small>El total editable se propone si el cálculo es exacto y se actualiza hasta que ingreses un valor.</small></label>

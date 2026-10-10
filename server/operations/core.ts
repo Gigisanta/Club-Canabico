@@ -3,7 +3,13 @@ import { z } from "zod";
 import { db } from "../db.js";
 import { type Capability, type CommandEnvelope, type CommandResult } from "../../shared/operations/contracts.js";
 import { APPSHEET_CANONICAL_IMPORTER_VERSION, APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../../shared/operations/appsheet-canonical.js";
-import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../../shared/operations/appsheet-history.js";
+import {
+  APPSHEET_HISTORY_IMPORTER_VERSION,
+  APPSHEET_HISTORY_SOURCE_SYSTEM,
+  APPSHEET_HISTORY_STAGE_SCHEMA_VERSION_V1,
+  APPSHEET_HISTORY_STAGE_SCHEMA_VERSION_V2,
+  appSheetHistoryStageHasBoundTechnicalReview,
+} from "../../shared/operations/appsheet-history.js";
 import { canonicalCommandBodyHash } from "./canonical.js";
 import { capabilitiesFromGrant } from "./access-snapshot.js";
 export class OperationError extends Error {
@@ -89,13 +95,18 @@ export async function requireCanonicalAppSheetReplacementProfile(tx: Tx, request
   const rawCaptureId = projection !== null && typeof projection === "object" && !Array.isArray(projection)
     ? (projection as Record<string, unknown>).captureId
     : null;
-  const historyProjectionValid = !historyImporterVersion || (projection !== null && typeof projection === "object" && !Array.isArray(projection) &&
-    (projection as Record<string, unknown>).schemaVersion === "appsheet-history-stage/v1" &&
-    (projection as Record<string, unknown>).projectionKind === "history" &&
-    (projection as Record<string, unknown>).sourceSystem === APPSHEET_HISTORY_SOURCE_SYSTEM &&
-    (projection as Record<string, unknown>).importerVersion === preliminarySnapshot?.importerVersion &&
-    ["stable", "preliminary-delta"].includes(String((projection as Record<string, unknown>).mode)) &&
-    (projection as Record<string, unknown>).status === "staged");
+  const historyStage = projection !== null && typeof projection === "object" && !Array.isArray(projection)
+    ? projection as Record<string, unknown>
+    : null;
+  // Legacy v1 remains source/blocker evidence only; readiness and writes require a bound v2 stage.
+  const historyProjectionValid = !historyImporterVersion || (historyStage !== null &&
+    (historyStage.schemaVersion === APPSHEET_HISTORY_STAGE_SCHEMA_VERSION_V1 ||
+      (historyStage.schemaVersion === APPSHEET_HISTORY_STAGE_SCHEMA_VERSION_V2 && appSheetHistoryStageHasBoundTechnicalReview(historyStage))) &&
+    historyStage.projectionKind === "history" &&
+    historyStage.sourceSystem === APPSHEET_HISTORY_SOURCE_SYSTEM &&
+    historyStage.importerVersion === preliminarySnapshot?.importerVersion &&
+    ["stable", "preliminary-delta"].includes(String(historyStage.mode)) &&
+    historyStage.status === "staged");
   const snapshotCaptureId = preliminarySnapshot && typeof rawCaptureId === "string" && /^appsreal-[a-f0-9]{16}$/.test(rawCaptureId) &&
     /^[a-f0-9]{64}$/.test(preliminarySnapshot.fileHash) && rawCaptureId === `appsreal-${preliminarySnapshot.fileHash.slice(0, 16)}` &&
     projection !== null && typeof projection === "object" && !Array.isArray(projection) &&

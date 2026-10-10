@@ -1,11 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma, type User } from "@prisma/client";
 import { canonicalJson } from "../../shared/operations/exact.js";
-import { APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../../shared/operations/appsheet-history.js";
+import {
+  APPSHEET_HISTORY_IMPORTER_VERSION,
+  APPSHEET_HISTORY_MAPPING_ID,
+  APPSHEET_HISTORY_SOURCE_SYSTEM,
+  appSheetHistoryStageHasBoundTechnicalReview,
+  type AppSheetHistoryStageBindingExpectation,
+} from "../../shared/operations/appsheet-history.js";
 import { prepareAppSheetCaptureManifest } from "../../shared/operations/appsheet-canonical.js";
 import { formatAppSheetInvoiceNumberForYear } from "../../shared/operations/appsheet-invoice-rules.js";
 import { OperationError, json, requireCapability, type Tx } from "./core.js";
 import { requireApprovedAppSheetFinalDeltaGate } from "./access.js";
+import { appSheetDatabaseDestinationIdentity } from "./appsheet-database-target.js";
 
 const INT64_MAX = 9_223_372_036_854_775_807n;
 const HASH = /^[a-f0-9]{64}$/;
@@ -169,7 +176,8 @@ function referenceOnly(row: InvoiceSourceRow): InvoiceSourceRef {
   return reference;
 }
 
-async function prepareSeed(tx: Tx, captureId: string, snapshotId: string): Promise<PreparedSeed> {
+async function prepareSeed(tx: Tx, captureId: string, snapshotId: string,
+  bindingExpectation: AppSheetHistoryStageBindingExpectation = {}): Promise<PreparedSeed> {
   const capture = await requireApprovedAppSheetFinalDeltaGate(tx, captureId);
   const preparedCapture = parseCapture(capture);
 
@@ -182,18 +190,39 @@ async function prepareSeed(tx: Tx, captureId: string, snapshotId: string): Promi
   const coverageStability = record(coverage?.stability);
   const deltaEvidence = coverage?.deltaEvidence;
   const stage = record(record(snapshot.controls)?.appSheetHistoryStage);
+  const stageDestination = record(stage?.destination);
+  const technicalReview = record(stage?.technicalReview);
   if (!coverage || coverage.schemaVersion !== "appsheet-history-coverage/v1" || coverage.projectionKind !== "history" ||
       coverage.sourceSystem !== APPSHEET_HISTORY_SOURCE_SYSTEM || coverage.captureId !== preparedCapture.captureId ||
       coverage.manifestHash !== preparedCapture.manifestHash || coverage.dataHash !== preparedCapture.dataHash ||
       coverage.captureDefinitionHash !== preparedCapture.definitionHash || coverage.mode !== "stable" ||
       !coverageStability || !sameCanonicalJson(coverageStability, preparedCapture.stability) ||
       !sameStableHistoryPages(coverage.pages, preparedCapture.pageManifest) || !Array.isArray(deltaEvidence) || deltaEvidence.length !== 0 ||
-      !stage || stage.schemaVersion !== "appsheet-history-stage/v1" || stage.projectionKind !== "history" ||
-      stage.sourceSystem !== APPSHEET_HISTORY_SOURCE_SYSTEM || stage.captureId !== preparedCapture.captureId ||
+      !stage || !appSheetHistoryStageHasBoundTechnicalReview(stage, bindingExpectation) ||
+      stage.sourceSystem !== APPSHEET_HISTORY_SOURCE_SYSTEM || stage.importerVersion !== APPSHEET_HISTORY_IMPORTER_VERSION ||
+      stage.captureId !== preparedCapture.captureId ||
       stage.manifestHash !== preparedCapture.manifestHash || stage.dataHash !== preparedCapture.dataHash ||
       stage.captureDefinitionHash !== preparedCapture.definitionHash || stage.mode !== "stable" ||
       stage.definitionHash !== coverage.appliedDefinitionHash || stage.mappingId !== APPSHEET_HISTORY_MAPPING_ID || stage.status !== "staged")
     fail("APP_SHEET_HISTORY_BINDING_INVALID", "La cobertura y los controles publicados no corresponden a la captura estable.");
+  const stageAudits = await tx.operationAudit.findMany({
+    where: { objectId: snapshot.id, action: "legacy.appsheet_history_staged" },
+    select: { actorId: true, details: true },
+  });
+  const stageAudit = stageAudits.length === 1 ? stageAudits[0] : null;
+  const stageAuditDetails = record(stageAudit?.details);
+  if (!stageAudit || !stageAuditDetails || stageAudit.actorId !== snapshot.createdBy || stage.actorUserId !== snapshot.createdBy ||
+      !stageDestination || !technicalReview ||
+      stageAuditDetails.sourceSystem !== APPSHEET_HISTORY_SOURCE_SYSTEM ||
+      stageAuditDetails.importerVersion !== stage.importerVersion || stageAuditDetails.captureId !== stage.captureId ||
+      stageAuditDetails.manifestHash !== stage.manifestHash || stageAuditDetails.dataHash !== stage.dataHash ||
+      stageAuditDetails.projectionHash !== stage.projectionHash || stageAuditDetails.mode !== stage.mode ||
+      stageAuditDetails.target !== stageDestination.target || stageAuditDetails.destinationIdentity !== stageDestination.identity ||
+      stageAuditDetails.reviewer !== technicalReview.reviewer || stageAuditDetails.technicalReviewAt !== technicalReview.reviewedAt ||
+      stageAuditDetails.commitSha !== technicalReview.commitSha || stageAuditDetails.backupManifestHash !== stage.backupManifestHash ||
+      stageAuditDetails.backupSnapshotAt !== stage.backupSnapshotAt || stageAuditDetails.authorizationContext !== "user-authorized-plan" ||
+      stageAuditDetails.reviewedBy !== null || stageAuditDetails.status !== "staged")
+    fail("APP_SHEET_HISTORY_STAGE_AUDIT_UNBOUND", "La revisión técnica no coincide con el registro de staging de la historia.");
   if (snapshot.upload && !snapshot.upload.completedAt) fail("APP_SHEET_HISTORY_INCOMPLETE");
 
   const publication = await tx.legacyHistoryPublication.findUnique({ where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM } });
@@ -210,7 +239,9 @@ async function prepareSeed(tx: Tx, captureId: string, snapshotId: string): Promi
       orderBy: { sourceRow: "asc" }, select: { sourceRecordId: true, sourceTable: true, sourceKey: true, sourceRow: true, sourceHash: true, kind: true } }),
   ]);
   if (allRecordCount !== preparedCapture.dataRecordCount || allBaseFactCount !== allRecordCount ||
-      invoiceRecords.length === 0 || invoiceFacts.length !== invoiceRecords.length)
+      invoiceRecords.length === 0 || invoiceFacts.length !== invoiceRecords.length ||
+      stageAuditDetails.recordCount !== allRecordCount || stageAuditDetails.factCount !== allBaseFactCount ||
+      stageAuditDetails.exceptionCount !== coverage.exceptionTotal)
     fail("APP_SHEET_HISTORY_ROW_BINDING_INCOMPLETE", "Los registros y hechos históricos no cubren de forma completa la captura publicada.");
 
   const factsByRecord = new Map(invoiceFacts.map((fact) => [fact.sourceRecordId, fact]));
@@ -287,7 +318,16 @@ export async function applyAppSheetInvoiceSequenceSeed(tx: Tx, input: {
   if (!HASH.test(input.previewDigest) || !input.evidence.note.trim())
     throw new OperationError(422, "APP_SHEET_SEQUENCE_APPROVAL_EVIDENCE_REQUIRED", "Revisá la vista previa y registrá una evidencia de aprobación.");
 
-  const prepared = await prepareSeed(tx, input.captureId, input.snapshotId);
+  let productionDestinationIdentity: string | null = null;
+  try {
+    if (process.env.DATABASE_URL) productionDestinationIdentity = appSheetDatabaseDestinationIdentity("production", new URL(process.env.DATABASE_URL));
+  } catch {}
+  if (!productionDestinationIdentity)
+    fail("APP_SHEET_HISTORY_TARGET_UNBOUND", "La siembra requiere una identidad verificable de la base de producción.");
+  const prepared = await prepareSeed(tx, input.captureId, input.snapshotId, {
+    target: "production",
+    destinationIdentity: productionDestinationIdentity,
+  });
   if (prepared.report.previewDigest !== input.previewDigest)
     throw new OperationError(409, "APP_SHEET_SEQUENCE_PREVIEW_STALE", "La historia cambió desde la vista previa; generá una nueva y revisá las diferencias.");
   const existing = await tx.appSheetInvoiceSequence.findUnique({ where: { namespace: prepared.report.captureId } });

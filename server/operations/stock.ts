@@ -7,6 +7,7 @@ import { resolveStockAvailability, type StockAvailabilityChannel, type StockAvai
 import { APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../../shared/operations/appsheet-canonical.js";
 import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../../shared/operations/appsheet-history.js";
 import { appsheetInvoiceInput } from "../../shared/operations/appsheet.js";
+import { deriveAppSheetSourceStock } from "./appsheet-source-stock.js";
 import {
   requireApprovedAppSheetFinalDeltaGate,
   recordAppSheetCanonicalSkuMutation,
@@ -121,6 +122,20 @@ async function requireStockObjectScope(ctx:CommandContext,locationIds:string[],c
   const resolved=scope??await objectScope(ctx.tx,ctx.actor);
   assertStockObjectScope(resolved,locationIds,custodianIds);
   return resolved;
+}
+
+async function requireAppSheetSourceLotScope(ctx:CommandContext,targetLotId:string):Promise<void>{
+  const [lot,balances,openings]=await Promise.all([
+    ctx.tx.inventoryLot.findUnique({where:{id:targetLotId},select:{id:true}}),
+    ctx.tx.stockBalance.findMany({where:{lotId:targetLotId},select:{locationId:true,custodianId:true}}),
+    ctx.tx.stockFact.findMany({where:{lotId:targetLotId,kind:"opening"},select:{toLocationId:true,toCustodianId:true,sourceRecordId:true}}),
+  ]);
+  const opening=openings[0];
+  if(!lot||openings.length!==1||!opening?.sourceRecordId||!opening.toLocationId||!opening.toCustodianId||
+    balances.some(balance=>!balance.locationId||!balance.custodianId))
+    throw new OperationError(423,"APPSHEET_SOURCE_LOT_SCOPE_UNVERIFIED","No pudo verificarse el alcance físico del lote de origen AppSheet.");
+  await requireStockObjectScope(ctx,[...balances.map(balance=>balance.locationId),opening.toLocationId],
+    [...balances.map(balance=>balance.custodianId),opening.toCustodianId]);
 }
 
 registerCommand("StockWasteRecorded",{kind:"stock",capability:"stock.adjust",create:true,
@@ -1425,38 +1440,8 @@ type JsonRecord = Record<string, unknown>;
 function jsonRecord(value: unknown): JsonRecord | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : null;
 }
-function jsonColumns(value: unknown): JsonRecord[] | null {
-  const root = jsonRecord(value), columns = root?.columns;
-  return Array.isArray(columns) && columns.every((column) => jsonRecord(column)) ? columns as JsonRecord[] : null;
-}
 function sourceLotFailure(reason: string): never {
   throw new OperationError(423, "APPSHEET_SOURCE_LOT_NOT_ELIGIBLE", "El lote de origen AppSheet requiere una revisión vigente de captura, catálogo y apertura.", { reason });
-}
-function sourceColumn(record: { original: unknown; normalized: unknown }, header: string): { original: JsonRecord; normalized: JsonRecord } {
-  const originals = jsonColumns(record.original)?.filter((column) => column.header === header) ?? [];
-  const normalized = jsonColumns(record.normalized)?.filter((column) => column.header === header) ?? [];
-  if (originals.length !== 1 || normalized.length !== 1) return sourceLotFailure(`source_column_${header}_missing_or_ambiguous`);
-  const originalCell = jsonRecord(originals[0]!.value), effectiveValue = jsonRecord(originalCell?.effectiveValue);
-  if (!originalCell || !effectiveValue || originalCell.formula !== null) return sourceLotFailure(`source_column_${header}_not_a_literal_cell`);
-  return { original: effectiveValue, normalized: normalized[0]! };
-}
-function sourceLotStockActual(record: { original: unknown; normalized: unknown }): string {
-  const column = sourceColumn(record, "Stock_Actual"), exact = column.normalized.exactDecimal, value = column.normalized.value;
-  if (typeof exact !== "string" || value !== exact || typeof column.original.numberValue !== "number" || !Number.isFinite(column.original.numberValue))
-    return sourceLotFailure("source_stock_actual_not_known_numeric");
-  let quantity: bigint, originalQuantity: bigint;
-  try {
-    quantity = parseQ(exact, "g", "Stock_Actual");
-    originalQuantity = parseQ(String(column.original.numberValue), "g", "Stock_Actual");
-  } catch { return sourceLotFailure("source_stock_actual_invalid"); }
-  if (quantity <= ZERO || quantity !== originalQuantity) return sourceLotFailure("source_stock_actual_not_positive_or_inconsistent");
-  return formatQ(quantity, "g");
-}
-function sourceLotDeliveryDate(record: { original: unknown; normalized: unknown }, today: string): string {
-  const column = sourceColumn(record, "Fecha_Entrega"), value = column.normalized.value;
-  if (typeof value !== "string" || column.original.stringValue !== value || !z.iso.date().safeParse(value).success || value > today)
-    return sourceLotFailure("source_delivery_date_not_known_or_future");
-  return value;
 }
 function appSheetToday(now: Date): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires" }).format(now);
@@ -1466,13 +1451,19 @@ function sourceDateForLot(date: Date): string {
 }
 
 type SourceLotReviewProof = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   captureId: string;
   historySnapshotId: string;
   manifestHash: string;
   sourceRecordId: string;
   sourceKey: string;
   sourceContentHash: string;
+  sourceDataHash: string;
+  sourceRowHash: string;
+  sourceDerivationHash: string;
+  sourceStockDefinitionHash: string;
+  sourceMovementRowsetHash: string;
+  sourceSelectionHash: string;
   sourceStockActual: string;
   sourceDeliveryDate: string;
   targetLotId: string;
@@ -1498,25 +1489,6 @@ type AppSheetSourceLotReviewPreparation = {
   openingFactId: string;
   identity: Prisma.LegacyIdentityGetPayload<object> | null;
 };
-
-async function sourceLotCaptureCells(tx: Prisma.TransactionClient, sourceRecordId: string): Promise<{ original: unknown; normalized: unknown } | null> {
-  const rows = await tx.$queryRaw<Array<{ original: Prisma.JsonValue; normalized: Prisma.JsonValue }>>`
-    SELECT
-      jsonb_build_object('columns', COALESCE((
-        SELECT jsonb_agg(jsonb_build_object('header', item->>'header', 'value', item->'value'))
-        FROM jsonb_array_elements(COALESCE(source."original"->'columns', '[]'::jsonb)) AS original_cells(item)
-        WHERE item->>'header' IN ('Stock_Actual', 'Fecha_Entrega')
-      ), '[]'::jsonb)) AS original,
-      jsonb_build_object('columns', COALESCE((
-        SELECT jsonb_agg(jsonb_build_object('header', item->>'header', 'value', item->'value', 'exactDecimal', item->'exactDecimal'))
-        FROM jsonb_array_elements(COALESCE(source."normalized"->'columns', '[]'::jsonb)) AS normalized_cells(item)
-        WHERE item->>'header' IN ('Stock_Actual', 'Fecha_Entrega')
-      ), '[]'::jsonb)) AS normalized
-    FROM "LegacySourceRecord" AS source
-    WHERE source."id" = ${sourceRecordId}
-  `;
-  return rows[0] ? { original: rows[0].original, normalized: rows[0].normalized } : null;
-}
 
 function sourceRelationSku(attributes: unknown): { sourceKey: string; sourceRecordId: string } {
   const relationships = jsonRecord(attributes)?.relationships;
@@ -1563,9 +1535,7 @@ async function prepareAppSheetSourceLotReview(
   if (!sourceMetadata || sourceMetadata.snapshotId !== history.id || sourceMetadata.sourceTable !== "C_Mercaderia" || sourceMetadata.sourceKey !== input.sourceKey ||
       sourceMetadata.fileHash !== capture.manifestHash || sourceMetadata.contentHash !== input.contentHash || sourceMetadata.treatment !== "fact_candidate")
     sourceLotFailure("source_record_capture_or_hash_mismatch");
-  const sourceCells = await sourceLotCaptureCells(ctx.tx, sourceMetadata.id);
-  if (!sourceCells) sourceLotFailure("source_record_capture_cells_missing");
-  const source = { ...sourceMetadata, ...sourceCells };
+  const source = sourceMetadata;
   const openExceptions = await ctx.tx.legacyException.count({ where: { snapshotId: history.id, sourceRecordId: source.id, status: "open" } });
   if (openExceptions !== 0) sourceLotFailure("source_record_has_open_exceptions");
   const publication = await ctx.tx.legacyHistoryPublication.findUnique({ where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM } });
@@ -1589,7 +1559,19 @@ async function prepareAppSheetSourceLotReview(
   if (facts.length !== 1 || facts[0]!.sourceHash !== source.contentHash || facts[0]!.kind !== "purchase") sourceLotFailure("source_history_fact_missing_or_stale");
   if (openingFacts.length !== 1 || !openingFacts[0]!.sourceRecordId || openingFacts[0]!.unit !== "g")
     sourceLotFailure("stock_opening_source_proof_missing_or_ambiguous");
-  const sourceStockActual = sourceLotStockActual(source), sourceDeliveryDate = sourceLotDeliveryDate(source, appSheetToday(ctx.now));
+  const derivation = await deriveAppSheetSourceStock(ctx.tx, source, capture.captureId);
+  if (derivation.status !== "derived") sourceLotFailure(`source_stock_derivation_${derivation.code}`);
+  if (derivation.sourceRecordId !== source.id || derivation.sourceKey !== source.sourceKey ||
+      derivation.sourceContentHash !== source.contentHash || derivation.manifestHash !== capture.manifestHash)
+    sourceLotFailure("source_stock_derivation_binding_mismatch");
+  let sourceStockActual: string;
+  try {
+    const quantity = parseQ(derivation.sourceStockActual, "g", "Stock_Actual");
+    if (quantity <= ZERO) sourceLotFailure("source_stock_actual_not_positive");
+    sourceStockActual = formatQ(quantity, "g");
+  } catch { return sourceLotFailure("source_stock_actual_invalid"); }
+  const sourceDeliveryDate = derivation.sourceDeliveryDate;
+  if (sourceDeliveryDate > appSheetToday(ctx.now)) sourceLotFailure("source_delivery_date_future");
   if (!openingFacts[0]!.quantity.equals(sourceStockActual) || sourceDateForLot(lot.receivedAt) !== sourceDeliveryDate)
     sourceLotFailure("stock_opening_does_not_match_source_lot");
   const sourceSku = sourceRelationSku(facts[0]!.attributes);
@@ -1629,8 +1611,11 @@ async function prepareAppSheetSourceLotReview(
     sku,
     source: { id: source.id, sourceKey: source.sourceKey, sourceTable: source.sourceTable, sourceSystem: history.sourceSystem,
       snapshotId: source.snapshotId, fileHash: source.fileHash, contentHash: source.contentHash, treatment: source.treatment },
-    proof: { schemaVersion: 1, captureId: capture.captureId, historySnapshotId: history.id, manifestHash: capture.manifestHash,
+    proof: { schemaVersion: 2, captureId: capture.captureId, historySnapshotId: history.id, manifestHash: capture.manifestHash,
       sourceRecordId: source.id, sourceKey: source.sourceKey, sourceContentHash: source.contentHash, sourceStockActual, sourceDeliveryDate,
+      sourceDataHash: derivation.dataHash, sourceRowHash: derivation.sourceRowHash, sourceDerivationHash: derivation.derivationHash,
+      sourceStockDefinitionHash: derivation.definition.bindingHash, sourceMovementRowsetHash: derivation.movementRowsetHash,
+      sourceSelectionHash: derivation.selectionHash,
       targetLotId: lot.id, skuId: sku.id, skuSourceId, openingFactId: openingFacts[0]!.id, openingSourceRecordId: openingSource.sourceRecordId,
       openingQuantity: openingFacts[0]!.quantity.toString(), openingUnit: openingFacts[0]!.unit, preparedBy, reviewerId: ctx.actor.id,
       reviewedAt: ctx.now.toISOString() },
@@ -1646,9 +1631,12 @@ const appSheetSourceLotReviewInput = z.strictObject({
   evidence,
 });
 const appSheetSourceLotProofSchema = z.strictObject({
-  schemaVersion: z.literal(1), captureId: z.string().min(1).max(100), historySnapshotId: objectId,
+  schemaVersion: z.literal(2), captureId: z.string().min(1).max(100), historySnapshotId: objectId,
   manifestHash: z.string().regex(/^[a-f0-9]{64}$/), sourceRecordId: objectId, sourceKey: z.string().min(1).max(150),
   sourceContentHash: z.string().regex(/^[a-f0-9]{64}$/), sourceStockActual: decimal, sourceDeliveryDate: civilDate,
+  sourceDataHash: z.string().regex(/^[a-f0-9]{64}$/), sourceRowHash: z.string().regex(/^[a-f0-9]{64}$/),
+  sourceDerivationHash: z.string().regex(/^[a-f0-9]{64}$/), sourceStockDefinitionHash: z.string().regex(/^[a-f0-9]{64}$/),
+  sourceMovementRowsetHash: z.string().regex(/^[a-f0-9]{64}$/), sourceSelectionHash: z.string().regex(/^[a-f0-9]{64}$/),
   targetLotId: objectId, targetLotVersion: z.number().int().min(1).max(2147483647), skuId: objectId, skuSourceId: z.string().min(1).max(150),
   openingFactId: z.string().uuid(), openingSourceRecordId: objectId, openingQuantity: decimal, openingUnit: z.string().min(1).max(20),
   preparedBy: objectId, reviewerId: objectId, reviewedAt: z.iso.datetime({ offset: true }),
@@ -1670,8 +1658,10 @@ async function hasPriorAppSheetSourceLotProofForCapture(
   const reviews = await ctx.tx.operationAudit.findMany({ where: { objectId: prepared.lot.id, action: "appsheet.source_lot_reviewed" } });
   for (const auditRow of reviews) {
     const details = jsonRecord(auditRow.details);
-    const parsed = appSheetSourceLotProofSchema.safeParse(details?.proof);
-    if (parsed.success && parsed.data.captureId === prepared.proof.captureId && parsed.data.sourceKey === input.sourceKey) return true;
+    const proof = jsonRecord(details?.proof);
+    // An older proof still owns this immutable capture/key. Its inability to certify
+    // the new derivation contract must require recapture, not another approval.
+    if (proof?.captureId === prepared.proof.captureId && proof.sourceKey === input.sourceKey && proof.targetLotId === prepared.lot.id) return true;
   }
   return false;
 }
@@ -1770,6 +1760,7 @@ export async function listAppSheetSourceLotOptions(
 registerCommand("AppSheetSourceLotReviewed", {
   kind: "lot", capability: "openings.approve", administrative: true,
   schema: appSheetSourceLotReviewInput,
+  authorize: async (ctx) => requireAppSheetSourceLotScope(ctx, ctx.envelope.targetId),
   execute: async (ctx) => {
     const input = appSheetSourceLotReviewInput.parse(ctx.envelope.data);
     const prepared = await prepareAppSheetSourceLotReview(ctx, input, { mode: "review" });
