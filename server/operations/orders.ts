@@ -63,7 +63,7 @@ function appSheetQuoteCanonical(value:unknown):string{
   // its original name and full definition in the hash without relaxing money
   // validation elsewhere. v1 snapshots do not contain this metadata field.
   const entries=Object.entries(current as Record<string,unknown>);
-  if(path.join(".")==="appSheetFormula.sourceExpressions"&&entries.some(([key])=>key==="motoClientSubtotal")){
+  if(path.length===2&&path[0]==="appSheetFormula"&&path[1]==="sourceExpressions"&&entries.some(([key])=>key==="motoClientSubtotal")){
    if(entries.some(([key])=>key==="motoClientSubtotalDefinition"))throw new TypeError("duplicate Moto source formula definition");
    return Object.fromEntries(entries.map(([key,entry])=>key==="motoClientSubtotal"
     ?["motoClientSubtotalDefinition",{sourceName:key,definition:omitPendingAmounts(entry,[...path,key])}]
