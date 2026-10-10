@@ -566,7 +566,7 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
     assert.equal(openedStock.body.result.lot.unit, "g");
     assert.equal(openedStock.body.result.balance.lotId, openingLotId);
     assert.equal(openedStock.body.result.balance.quantity, "5");
-    assert.equal(openedStock.body.result.opening.quantity, "5");
+    assert.ok(new Prisma.Decimal(openedStock.body.result.opening.quantity).eq("5"), "la apertura debe conservar exactamente 5 g");
     assert.equal(openedStock.body.result.opening.preparedBy, stagerId);
     assert.equal(openedStock.body.result.opening.approvedBy, ownerId);
     const openingReceipt = await db.commandReceipt.findUniqueOrThrow({ where: { requestId: openingRequest.requestId } });
