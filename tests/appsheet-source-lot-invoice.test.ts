@@ -11,7 +11,15 @@ import { appSheetDatabaseDestinationIdentity } from "../server/operations/appshe
 import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
 import { canonicalJson } from "../shared/operations/exact.js";
 import { formatAppSheetInvoiceNumberForYear } from "../shared/operations/appsheet-invoice-rules.js";
-import { appSheetSourceLotCaptureFixture } from "./support/appsheet-source-lot-fixture.js";
+import { appSheetSourceLotCanonicalConsumerFixture, appSheetSourceLotCaptureFixture } from "./support/appsheet-source-lot-fixture.js";
+
+function databaseTargetIdentity(url: URL) {
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const normalizedHost = hostname === "localhost" || hostname === "::1" || hostname.startsWith("127.")
+    ? "loopback"
+    : hostname;
+  return JSON.stringify([normalizedHost, url.port || "5432", decodeURIComponent(url.pathname.slice(1))]);
+}
 
 test("reviewed AppSheet source lots flow through the HTTP selector and confirmed invoice reservation", {
   skip: !process.env.TEST_DATABASE_URL,
@@ -20,6 +28,17 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
   const databaseUrl = new URL(process.env.TEST_DATABASE_URL!);
   assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(databaseUrl.hostname), "TEST_DATABASE_URL debe apuntar a loopback");
   assert.match(databaseUrl.pathname, /^\/bombo_ui_[a-z0-9_-]+$/i, "usar una base sintética bombo_ui_ dedicada");
+  if (process.env.DATABASE_URL) {
+    let applicationUrl: URL;
+    try {
+      applicationUrl = new URL(process.env.DATABASE_URL);
+    } catch {
+      assert.fail("DATABASE_URL debe ser una URL PostgreSQL válida cuando está definida");
+    }
+    assert.ok(["postgres:", "postgresql:"].includes(applicationUrl.protocol), "DATABASE_URL debe ser PostgreSQL");
+    assert.notEqual(databaseTargetIdentity(databaseUrl), databaseTargetIdentity(applicationUrl),
+      "TEST_DATABASE_URL no puede apuntar a la misma base PostgreSQL que DATABASE_URL");
+  }
   const schema = `appsheet_source_lot_invoice_${randomUUID().replaceAll("-", "")}`;
   databaseUrl.searchParams.set("schema", schema);
   const destinationIdentity = appSheetDatabaseDestinationIdentity("isolated-test", databaseUrl);
@@ -210,24 +229,82 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
       reviewer: "synthetic-independent-source-lot-technical-reviewer", approved: true,
       reviewedAt: new Date(Date.now() - 1_000).toISOString(), findings: [], target: "production", destinationIdentity: productionDestinationIdentity,
     };
-    const { stageAppSheetCanonicalMasters } = await import("../server/operations/appsheet-canonical.js");
     const { appSheetCanonicalCurrentDestinationHash } = await import("../server/operations/appsheet-canonical.js");
     const { finalDeltaProofForCapture } = await import("../server/operations/access.js");
     const { legacyPayloadHash } = await import("../server/operations/legacy-upload-contract.js");
     const { canonicalCommandBodyHash } = await import("../server/operations/canonical.js");
     const { appSheetDefinitionProductionReadiness } = await import("../shared/operations/appsheet-definition.js");
-    const stagedMaster = await stageAppSheetCanonicalMasters(sourceFixture.projection, {
-      actorId: stagerId, technicalReview, commitSha, target: "production", destinationIdentity: productionDestinationIdentity, backupEvidence,
-    }, db);
-    const masterSnapshot = await db.legacyImportSnapshot.findUniqueOrThrow({ where: { id: stagedMaster.snapshotId } });
-    const botInventory = { state: "verified", evidenceSha256: digest("synthetic app editor bot inventory consumer fixture"), observedCount: 1 };
-    const masterControls = masterSnapshot.controls as Record<string, any>;
-    const masterCoverage = masterSnapshot.coverage as Record<string, any>;
-    masterControls.appSheetCanonical.botInventory = botInventory;
-    masterCoverage.appSheetCanonical.botInventory = botInventory;
-    await db.legacyImportSnapshot.update({ where: { id: masterSnapshot.id }, data: {
-      controls: masterControls as Prisma.InputJsonValue, coverage: masterCoverage as Prisma.InputJsonValue,
+    const destinationFingerprints: Array<{
+      destinationType: "member" | "sku"; sourceTable: string; sourceKey: string; destinationId: string; dataHash: string; operationVersion: number;
+    }> = [];
+    for (const destination of sourceFixture.projection.destinations) {
+      if (destination.type === "member") {
+        const member = await db.operationMember.create({ data: { id: destination.id, ...destination.data } });
+        destinationFingerprints.push({ destinationType: destination.type, sourceTable: destination.sourceTable,
+          sourceKey: destination.sourceKey, destinationId: destination.id,
+          dataHash: appSheetCanonicalCurrentDestinationHash(member, "member"), operationVersion: 0 });
+      } else {
+        const sku = await db.catalogSku.create({ data: { id: destination.id, ...destination.data } });
+        destinationFingerprints.push({ destinationType: destination.type, sourceTable: destination.sourceTable,
+          sourceKey: destination.sourceKey, destinationId: destination.id,
+          dataHash: appSheetCanonicalCurrentDestinationHash(sku, "sku"), operationVersion: 0 });
+      }
+      await db.operationObject.create({ data: { id: destination.id, kind: destination.type, version: 0, createdBy: stagerId } });
+      await db.legacyIdentity.create({ data: {
+        id: `synthetic-source-lot-canonical-identity-${randomUUID()}`,
+        sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM,
+        sourceTable: destination.sourceTable,
+        sourceKey: destination.sourceKey,
+        destinationType: destination.type,
+        destinationId: destination.id,
+        approvedBy: null,
+      } });
+    }
+    const canonicalConsumerFixture = appSheetSourceLotCanonicalConsumerFixture({
+      projection: sourceFixture.projection,
+      botInventory: sourceFixture.botInventory,
+      destinationIdentity: productionDestinationIdentity,
+      backupEvidence,
+      technicalReview,
+      destinationFingerprints,
+    });
+    const masterSnapshotId = sourceFixture.projection.snapshotId;
+    // This immutable snapshot is a synthetic consumer precondition only. It
+    // is created with the fixture's explicitly synthetic bot inventory and
+    // does not claim to test or certify the production master-stage command.
+    await db.legacyImportSnapshot.create({ data: {
+      id: masterSnapshotId,
+      sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM,
+      filename: "synthetic-source-lot-consumer-precondition",
+      fileHash: capture.manifestHash,
+      importerVersion: APPSHEET_CANONICAL_IMPORTER_VERSION,
+      status: "staged",
+      createdBy: stagerId,
+      captureManifestId: capture.captureId,
+      controls: canonicalConsumerFixture.controls as Prisma.InputJsonValue,
+      coverage: canonicalConsumerFixture.coverage as Prisma.InputJsonValue,
     } });
+    for (const record of sourceFixture.projection.records) await db.legacySourceRecord.create({ data: {
+      id: record.id,
+      snapshotId: masterSnapshotId,
+      sourceTable: record.sourceTable,
+      sourceKey: record.sourceKey,
+      sourceRow: record.sourceRow,
+      fileHash: record.fileHash,
+      contentHash: record.contentHash,
+      importerVersion: record.importerVersion,
+      original: record.original as Prisma.InputJsonValue,
+      normalized: record.normalized as Prisma.InputJsonValue,
+      treatment: record.treatment,
+    } });
+    await db.operationObject.create({ data: { id: masterSnapshotId, kind: "legacyImport", version: 0, createdBy: stagerId } });
+    await db.operationAudit.create({ data: {
+      actorId: stagerId,
+      action: "appsheet.canonical_masters_staged",
+      objectId: masterSnapshotId,
+      details: canonicalConsumerFixture.stageAuditDetails as Prisma.InputJsonValue,
+    } });
+    const masterSnapshot = await db.legacyImportSnapshot.findUniqueOrThrow({ where: { id: masterSnapshotId } });
     const canonicalReview = await command(envelope(masterSnapshot.id, "AppSheetCanonicalIdentitiesReviewed", {
       captureId: capture.captureId, manifestHash: capture.manifestHash, projectionHash: sourceFixture.projection.projectionHash,
       destinationCount: sourceFixture.projection.destinations.length, evidenceReference: "synthetic source-lot canonical identity review",
@@ -313,13 +390,11 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
     } });
     const historyPublicationFingerprint = legacyPayloadHash({ snapshotId: historySnapshotId, fileHash: capture.manifestHash,
       mappingId: APPSHEET_HISTORY_MAPPING_ID, rows: sourceRecords.length, corrections: [] });
-    await db.legacyHistoryPublication.upsert({ where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM },
-      create: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, snapshotId: historySnapshotId, fileHash: capture.manifestHash,
-        mappingId: APPSHEET_HISTORY_MAPPING_ID, fingerprint: historyPublicationFingerprint, publishedBy: stagerId,
-        evidence: { reference: "synthetic source-lot history publication prerequisite" } },
-      update: { snapshotId: historySnapshotId, fileHash: capture.manifestHash, mappingId: APPSHEET_HISTORY_MAPPING_ID,
-        fingerprint: historyPublicationFingerprint, publishedBy: stagerId, evidence: { reference: "synthetic source-lot history publication prerequisite" } },
-    });
+    await db.legacyHistoryPublication.create({ data: {
+      sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, snapshotId: historySnapshotId, fileHash: capture.manifestHash,
+      mappingId: APPSHEET_HISTORY_MAPPING_ID, fingerprint: historyPublicationFingerprint, publishedBy: stagerId,
+      evidence: { reference: "synthetic source-lot history publication prerequisite" },
+    } });
     await db.operationAudit.create({ data: {
       actorId: stagerId, action: "legacy.appsheet_history_staged", objectId: historySnapshotId,
       details: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION,
@@ -342,12 +417,10 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
       schemaVersion: 1, captureId: capture.captureId, manifestHash: capture.manifestHash, dataHash: capture.dataHash,
       captureDefinitionHash: null, appliedDefinitionHash: sourceFixture.projection.appliedDefinitionHash, gateProof: { finalDelta },
     } };
-    await db.cutoverGate.upsert({ where: { id: "final-delta-reconciled" },
-      create: { id: "final-delta-reconciled", status: "approved", evidence: finalDeltaEvidence, captureManifestId: capture.captureId,
-        approvedBy: stagerId, reviewedBy: ownerId, approvedAt: new Date() },
-      update: { status: "approved", evidence: finalDeltaEvidence, captureManifestId: capture.captureId,
-        approvedBy: stagerId, reviewedBy: ownerId, approvedAt: new Date() },
-    });
+    await db.cutoverGate.create({ data: {
+      id: "final-delta-reconciled", status: "approved", evidence: finalDeltaEvidence, captureManifestId: capture.captureId,
+      approvedBy: stagerId, reviewedBy: ownerId, approvedAt: new Date(),
+    } });
 
     const openingRecords = new Map(sourceRecords.filter(record => record.sourceTable === "D_Stock").map(record => [record.sourceKey, record]));
     const internalLots = new Map<string, { id: string; balanceId: string; sourceRecordId: string }>();
@@ -441,9 +514,7 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
     await db.operationAuthority.update({ where: { id: "operations" }, data: {
       mode: "active", cutoverProfile: "appsheet-replacement", captureManifestId: capture.captureId, epoch: 3, approvedBy: ownerId,
     } });
-    await db.operationObject.upsert({ where: { id: "operations" },
-      create: { id: "operations", kind: "authority", version: 1, createdBy: ownerId },
-      update: { kind: "authority", version: 1, createdBy: ownerId },
+    await db.operationObject.create({ data: { id: "operations", kind: "authority", version: 1, createdBy: ownerId },
     });
     const activationResponse = { requestId: authorityRequestId, targetId: "operations", version: 1,
       result: { authority: { id: "operations", mode: "active", cutoverProfile: "appsheet-replacement",

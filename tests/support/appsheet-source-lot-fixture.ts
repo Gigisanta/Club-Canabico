@@ -4,7 +4,7 @@ import { APPSHEET_SOURCE_STOCK_APP_ID, APPSHEET_SOURCE_STOCK_FORMULA } from "../
 import { APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../../shared/operations/appsheet-canonical.js";
 import { appSheetAppliedDefinitionHash, prepareAppSheetMasterProjection } from "../../server/operations/appsheet-canonical.js";
 import { canonicalJson } from "../../shared/operations/exact.js";
-import type { AppSheetDefinitionInventory } from "../../shared/operations/appsheet-definition.js";
+import { appSheetDefinitionProductionReadiness, type AppSheetDefinitionInventory } from "../../shared/operations/appsheet-definition.js";
 import { definitionInventory as canonicalDefinitionInventory } from "./appsheet-canonical-fixture.js";
 
 const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
@@ -69,6 +69,178 @@ export function appSheetSourceStockDefinition(): { inventory: AppSheetDefinition
   });
   inventory.descriptorSha256 = hash({ ...inventory, descriptorSha256: "" });
   return { inventory, appliedDefinitionHash: appSheetAppliedDefinitionHash(inventory) };
+}
+
+export type SyntheticSourceLotBotInventory = {
+  state: "verified";
+  evidenceSha256: string;
+  observedCount: 0;
+  scope: "synthetic-consumer-precondition-only";
+  evidenceReference: "fixture-only; no AppSheet editor evidence";
+};
+
+/** Build a clearly synthetic canonical-master precondition for source-lot consumer tests.
+ * This artifact is not produced by, and does not certify, `stageAppSheetCanonicalMasters`.
+ */
+export function appSheetSourceLotCanonicalConsumerFixture(input: {
+  projection: ReturnType<typeof prepareAppSheetMasterProjection>;
+  botInventory: SyntheticSourceLotBotInventory;
+  destinationIdentity: string;
+  backupEvidence: { manifestHash: string; snapshotAt: string };
+  technicalReview: {
+    schemaVersion: number;
+    reviewKind: string;
+    captureId: string;
+    manifestHash: string;
+    definitionHash: string;
+    projectionKind: string;
+    projectionHash: string;
+    commitSha: string;
+    importer: string;
+    reviewer: string;
+    approved: boolean;
+    reviewedAt: string;
+    findings: unknown[];
+    target: string;
+    destinationIdentity: string;
+  };
+  destinationFingerprints: Array<{
+    destinationType: "member" | "sku";
+    sourceTable: string;
+    sourceKey: string;
+    destinationId: string;
+    dataHash: string;
+    operationVersion: number;
+  }>;
+}) {
+  const { projection, botInventory, destinationIdentity, backupEvidence, technicalReview } = input;
+  const definitionReadiness = appSheetDefinitionProductionReadiness(projection.definitionInventory, projection.expectedAppId);
+  const review = {
+    schemaVersion: technicalReview.schemaVersion,
+    reviewKind: technicalReview.reviewKind,
+    importer: technicalReview.importer,
+    reviewer: technicalReview.reviewer,
+    reviewedAt: technicalReview.reviewedAt,
+    approved: technicalReview.approved,
+    findingsCount: technicalReview.findings.length,
+    projectionHash: technicalReview.projectionHash,
+    captureId: technicalReview.captureId,
+    manifestHash: technicalReview.manifestHash,
+    definitionHash: technicalReview.definitionHash,
+    commitSha: technicalReview.commitSha,
+    bindingSource: "explicit-target-and-destination",
+    target: technicalReview.target,
+    destinationIdentity: technicalReview.destinationIdentity,
+  };
+  const appSheetCanonical = {
+    schemaVersion: 1,
+    projectionKind: "masters",
+    mappingId: projection.mappingId,
+    importerVersion: projection.importerVersion,
+    captureId: projection.capture.captureId,
+    manifestHash: projection.capture.manifestHash,
+    dataHash: projection.capture.dataHash,
+    captureDefinitionHash: projection.capture.definitionHash,
+    appliedDefinitionHash: projection.appliedDefinitionHash,
+    definitionReadiness,
+    expectedAppId: projection.expectedAppId,
+    definitionIdentityState: projection.definitionIdentityState,
+    definitionInventory: projection.definitionInventory,
+    projectionHash: projection.projectionHash,
+    stabilityMode: projection.capture.stabilityMode,
+    cutoffAt: projection.capture.cutoffAt,
+    timestampGaps: projection.capture.timestampGaps,
+    verifiedMasterPages: projection.verifiedMasterPages,
+    destinationFingerprints: input.destinationFingerprints,
+    globalDelta: {
+      globallyStable: projection.capture.stabilityMode === "stable",
+      unresolvedChangedPageCount: projection.summary.globalDeltaBlockingCount,
+      changedPages: projection.capture.pageManifest.filter((page) => page.stable === false).map((page) => ({
+        sheetId: page.sheetId,
+        title: page.title,
+        pageIndex: page.pageIndex,
+        startRow: page.startRow,
+        endRow: page.endRow,
+        pass1Hash: page.pageHash,
+        pass2Hash: page.verifiedPageHash,
+        pass3Evidence: page.pass3Evidence ?? null,
+      })),
+    },
+    botInventory,
+    stageContext: { target: "production", destinationIdentity, backupEvidence },
+    humanReview: { status: "pending" },
+    operationalAuthority: { status: "unchanged" },
+    effects: { stock: false, cash: false, orders: false, deliveries: false, messaging: false, priceApproval: false },
+  };
+  const capture = projection.capture;
+  return {
+    controls: { appSheetCanonical },
+    coverage: {
+      schemaVersion: 1,
+      appSheetCanonical: {
+        captureId: capture.captureId,
+        sourceSystem: capture.sourceSystem,
+        sourceId: capture.sourceId,
+        manifestHash: capture.manifestHash,
+        dataHash: capture.dataHash,
+        captureDefinitionHash: capture.definitionHash,
+        appliedDefinitionHash: projection.appliedDefinitionHash,
+        definitionReadiness,
+        expectedAppId: projection.expectedAppId,
+        identityState: projection.definitionIdentityState,
+        projectionHash: projection.projectionHash,
+        stabilityMode: capture.stabilityMode,
+        cutoffAt: capture.cutoffAt,
+        timestampGaps: capture.timestampGaps,
+        verifiedMasterPages: projection.verifiedMasterPages,
+        delta: {
+          globallyStable: capture.stabilityMode === "stable",
+          unresolvedChangedPageCount: projection.summary.globalDeltaBlockingCount,
+          changedPages: projection.capture.pageManifest.filter((page) => page.stable === false).map((page) => ({
+            sheetId: page.sheetId,
+            title: page.title,
+            pageIndex: page.pageIndex,
+            startRow: page.startRow,
+            endRow: page.endRow,
+            pass1Hash: page.pageHash,
+            pass2Hash: page.verifiedPageHash,
+            pass3Evidence: page.pass3Evidence ?? null,
+          })),
+        },
+        tables: projection.tableCoverage,
+        counts: projection.summary,
+        definition: {
+          sourceSha256: projection.definitionInventory.source.sha256,
+          descriptorSha256: projection.definitionInventory.descriptorSha256,
+          appliedDefinitionHash: projection.appliedDefinitionHash,
+          appId: projection.definitionInventory.app.id,
+          expectedAppId: projection.expectedAppId,
+          identityState: projection.definitionIdentityState,
+          parserVersion: projection.definitionInventory.parserVersion,
+          declaredCounts: projection.definitionInventory.declaredCounts,
+          observedCounts: projection.definitionInventory.observedCounts,
+          coverage: projection.definitionInventory.coverage,
+        },
+        botInventory,
+      },
+    },
+    stageAuditDetails: {
+      captureId: capture.captureId,
+      manifestHash: capture.manifestHash,
+      projectionHash: projection.projectionHash,
+      importerVersion: projection.importerVersion,
+      reviewer: review.reviewer,
+      reviewedAt: review.reviewedAt,
+      commitSha: review.commitSha,
+      target: "production",
+      backupManifestHash: backupEvidence.manifestHash,
+      backupSnapshotAt: backupEvidence.snapshotAt,
+      destinationIdentity,
+      recordCount: projection.summary.recordCount,
+      destinationCount: projection.destinations.length,
+      exceptionCount: projection.summary.exceptionCount,
+    },
+  };
 }
 
 function excelSerial(date: string): number {
@@ -171,6 +343,15 @@ export function appSheetSourceLotCaptureFixture(revision: string) {
     bodyExclusionReason: "authentication-table-body-redacted",
   }];
   const definition = appSheetSourceStockDefinition();
+  // The consumer-only bot inventory is explicitly synthetic. Keep this
+  // evidence in the fixture producer so no immutable snapshot needs patching.
+  const botInventory: SyntheticSourceLotBotInventory = {
+    state: "verified",
+    evidenceSha256: hash({ scope: "synthetic-consumer-precondition-only", appId: definition.inventory.app.id, observedCount: 0 }),
+    observedCount: 0,
+    scope: "synthetic-consumer-precondition-only",
+    evidenceReference: "fixture-only; no AppSheet editor evidence",
+  };
   const dataCoverage = {
     metadataStable: true, headersStableAll: true, totalPages: pageManifest.length,
     rowsWithValues: pageManifest.reduce((sum, page) => sum + page.counts.rowsWithValues, 0),
@@ -198,7 +379,8 @@ export function appSheetSourceLotCaptureFixture(revision: string) {
   };
   const projection = prepareAppSheetMasterProjection({ manifest, headers: { schemaVersion: "appsheet-sheet-headers/v1", spreadsheetId, sheets: headers },
     pages, definitionInventory: definition.inventory, mode: "stable" });
-  return { projection, sourceRows, sourceRowsFor, definition, sourceLotCapture: { manifest, headers: { schemaVersion: "appsheet-sheet-headers/v1", spreadsheetId, sheets: headers }, pages } };
+  return { projection, sourceRows, sourceRowsFor, definition, botInventory,
+    sourceLotCapture: { manifest, headers: { schemaVersion: "appsheet-sheet-headers/v1", spreadsheetId, sheets: headers }, pages } };
 }
 
 function sourceRecord(input: {
