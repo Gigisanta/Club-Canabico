@@ -5,6 +5,7 @@ import { readdir, readFile } from "node:fs/promises";
 import bcrypt from "bcryptjs";
 import type { CommandEnvelope } from "../shared/operations/contracts.js";
 import { canonicalJson } from "../shared/operations/exact.js";
+import { canonicalCommandBodyHash } from "../server/operations/canonical.js";
 import {
   APPSHEET_CANONICAL_IMPORTER_VERSION,
   APPSHEET_CANONICAL_MAPPING_ID,
@@ -18,6 +19,12 @@ import {
   appSheetCanonicalCurrentDestinationHash,
 } from "../server/operations/appsheet-canonical.js";
 import { appSheetDatabaseDestinationIdentity } from "../server/operations/appsheet-database-target.js";
+import { legacyPayloadHash } from "../server/operations/legacy-upload-contract.js";
+import {
+  APPSHEET_HISTORY_IMPORTER_VERSION,
+  APPSHEET_HISTORY_MAPPING_ID,
+  APPSHEET_HISTORY_SOURCE_SYSTEM,
+} from "../shared/operations/appsheet-history.js";
 import { definitionInventory, project } from "./support/appsheet-canonical-fixture.js";
 import { splitSqlStatements } from "./migration-sql.js";
 
@@ -504,6 +511,373 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
     assert.equal((await call(`/operations/members/${canonicalMember.id}`)).response.status, 200,
       "la auditoría real de revisión deja visible al socio canónico");
 
+    // Synthetic same-capture history supports the real pre-activation opening
+    // command. It is a contract fixture, not proof of source-system cutover.
+    const canonicalSkuSourceId = canonicalSku.sourceId;
+    assert.ok(canonicalSkuSourceId);
+    const historySnapshotId = `appsheet-member-eligibility-history-${randomUUID()}`;
+    const historySourceRecordId = `appsheet-member-eligibility-stock-source-${randomUUID()}`;
+    const historySourceKey = `synthetic-stock-source-${randomUUID()}`;
+    const historyContentHash = hash({ sourceTable: "D_Stock", sourceKey: historySourceKey, quantity: "5", unit: "g" });
+    const historyFactId = `appsheet-member-eligibility-stock-fact-${randomUUID()}`;
+    const historyPublicationFingerprint = legacyPayloadHash({
+      snapshotId: historySnapshotId,
+      fileHash: canonicalCapture.manifestHash,
+      mappingId: APPSHEET_HISTORY_MAPPING_ID,
+      rows: 1,
+      corrections: [],
+    });
+    const historyProjectionHash = hash({
+      schemaVersion: "appsheet-history-projection/v1",
+      captureId: canonicalCapture.captureId,
+      manifestHash: canonicalCapture.manifestHash,
+      dataHash: canonicalCapture.dataHash,
+      sourceRecordId: historySourceRecordId,
+      sourceHash: historyContentHash,
+      factId: historyFactId,
+    });
+    const historyBackup = { manifestHash: hash("synthetic-history-backup"), snapshotAt: now.toISOString() };
+    const historyTechnicalReview = {
+      reviewKind: "independent-technical",
+      approved: true,
+      projectionHash: historyProjectionHash,
+      reviewer: "synthetic-independent-history-reviewer",
+      reviewedAt: new Date(now.getTime() - 1_000).toISOString(),
+      findingsCount: 0,
+      findingsHash: hash([]),
+      commitSha: technicalReview.commitSha,
+    };
+    const historyStage = {
+      schemaVersion: "appsheet-history-stage/v1",
+      projectionKind: "history",
+      sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
+      captureId: canonicalCapture.captureId,
+      manifestHash: canonicalCapture.manifestHash,
+      dataHash: canonicalCapture.dataHash,
+      captureDefinitionHash: null,
+      mode: "stable",
+      definitionHash: appliedDefinitionHash,
+      definitionIdentityState: "verified",
+      mappingId: APPSHEET_HISTORY_MAPPING_ID,
+      importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION,
+      status: "staged",
+      projectionHash: historyProjectionHash,
+      humanReview: { status: "pending" },
+      operationalAuthority: { status: "unchanged" },
+      authorizationContext: "user-authorized-plan",
+      actorUserId: stagerId,
+      reviewedBy: null,
+      reviewedAt: null,
+      effects: { stock: false, cashLedger: false, payments: false, deliveries: false, messages: false, documents: false, numbering: "not-generated" },
+      backupManifestHash: historyBackup.manifestHash,
+      backupSnapshotAt: historyBackup.snapshotAt,
+      technicalReview: historyTechnicalReview,
+      recordsHash: hash([{ id: historySourceRecordId, sourceTable: "D_Stock", sourceKey: historySourceKey, contentHash: historyContentHash }]),
+      factsHash: hash([{ id: historyFactId, sourceRecordId: historySourceRecordId, sourceHash: historyContentHash, kind: "stock", quantity: "5", unit: "g" }]),
+      exceptionsHash: hash([]),
+    };
+    const historyCoverage = {
+      schemaVersion: "appsheet-history-coverage/v1",
+      projectionKind: "history",
+      sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
+      captureId: canonicalCapture.captureId,
+      manifestHash: canonicalCapture.manifestHash,
+      dataHash: canonicalCapture.dataHash,
+      captureDefinitionHash: null,
+      appliedDefinitionHash,
+      mode: "stable",
+      stability: { stable: true },
+      pages: canonicalCapture.pageManifest.map(page => ({
+        sheetId: page.sheetId, title: page.title, pageIndex: page.pageIndex, startRow: page.startRow,
+        endRow: page.endRow, pageHash: page.pageHash, verifiedPageHash: page.verifiedPageHash, stable: page.stable,
+      })),
+      sheets: [{ sourceTable: "D_Stock", sourceRecordCount: 1, factCount: 1, definitionTableMatch: "unique", changedPageIndexes: [], unresolvedFormulaCount: 0 }],
+      source: { spreadsheetId: canonicalCapture.spreadsheetId, dataRecordCount: 1 },
+      totals: { recordCount: 1, factCount: 1, exceptionCount: 0 },
+      exceptionTotal: 0,
+      definition: {
+        inventory: fullDefinition,
+        identityState: "verified",
+        appliedDefinitionHash,
+        sourceSha256: fullDefinition.source.sha256,
+        descriptorSha256: fullDefinition.descriptorSha256,
+        commitSha: technicalReview.commitSha,
+      },
+    };
+    await db.legacyImportSnapshot.create({ data: {
+      id: historySnapshotId,
+      sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
+      filename: "synthetic-same-capture-stock-history",
+      fileHash: canonicalCapture.manifestHash,
+      importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION,
+      status: "reviewed",
+      createdBy: stagerId,
+      reviewedBy: ownerId,
+      reviewedAt: now,
+      captureManifestId: canonicalCapture.captureId,
+      controls: { appSheetHistoryStage: historyStage },
+      coverage: historyCoverage,
+    } });
+    await db.legacySourceRecord.create({ data: {
+      id: historySourceRecordId,
+      snapshotId: historySnapshotId,
+      sourceTable: "D_Stock",
+      sourceKey: historySourceKey,
+      sourceRow: 2,
+      fileHash: canonicalCapture.manifestHash,
+      contentHash: historyContentHash,
+      importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION,
+      original: { columns: [{ header: "Cantidad", value: "5" }, { header: "Unidad", value: "g" }] },
+      normalized: { columns: [{ header: "Cantidad", value: "5", exactDecimal: "5" }, { header: "Unidad", value: "g" },
+        { header: "Codigo_Detalle", value: canonicalSkuSourceId }] },
+      treatment: "fact_candidate",
+    } });
+    await db.legacyHistoricalFact.create({ data: {
+      id: historyFactId,
+      snapshotId: historySnapshotId,
+      sourceRecordId: historySourceRecordId,
+      sourceTable: "D_Stock",
+      sourceKey: historySourceKey,
+      sourceRow: 2,
+      sourceHash: historyContentHash,
+      mappingId: APPSHEET_HISTORY_MAPPING_ID,
+      kind: "stock",
+      dateState: "not-applicable",
+      currencyState: "not-applicable",
+      amountState: "not-applicable",
+      quantity: "5",
+      quantityState: "known",
+      unit: "g",
+      unitState: "known",
+      attributes: { relationships: [{ targetTable: "D_Catalogo_Mercaderia", status: "unique", targetSourceKey: canonicalSkuSourceId }] },
+      createdBy: stagerId,
+    } });
+    await db.legacyHistoryPublication.create({ data: {
+      sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
+      snapshotId: historySnapshotId,
+      fileHash: canonicalCapture.manifestHash,
+      mappingId: APPSHEET_HISTORY_MAPPING_ID,
+      fingerprint: historyPublicationFingerprint,
+      publishedBy: stagerId,
+      evidence: { reference: "synthetic same-capture publication fixture" },
+    } });
+    await db.operationAudit.create({ data: {
+      actorId: stagerId,
+      action: "legacy.appsheet_history_staged",
+      objectId: historySnapshotId,
+      details: {
+        sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM,
+        importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION,
+        captureId: canonicalCapture.captureId,
+        manifestHash: canonicalCapture.manifestHash,
+        dataHash: canonicalCapture.dataHash,
+        projectionHash: historyProjectionHash,
+        mode: "stable",
+        reviewer: historyTechnicalReview.reviewer,
+        technicalReviewAt: historyTechnicalReview.reviewedAt,
+        commitSha: historyTechnicalReview.commitSha,
+        target: "production",
+        backupManifestHash: historyBackup.manifestHash,
+        backupSnapshotAt: historyBackup.snapshotAt,
+        recordCount: 1,
+        factCount: 1,
+        exceptionCount: 0,
+        reviewedBy: null,
+        status: "staged",
+      },
+    } });
+
+    const manualPauseStartedAt = new Date(new Date(canonicalCapture.firstReadAt).getTime() - 1_000).toISOString();
+    const finalDelta = {
+      schemaVersion: 1,
+      manualPauseStartedAt,
+      manualPauseEndedAt: null,
+      manualPauseEvidenceRef: "synthetic:manual-pause-before-capture",
+      capture: {
+        captureId: canonicalCapture.captureId,
+        manifestHash: canonicalCapture.manifestHash,
+        dataHash: canonicalCapture.dataHash,
+        firstReadAt: new Date(canonicalCapture.firstReadAt).toISOString(),
+        verificationStartedAt: new Date(canonicalCapture.verificationStartedAt).toISOString(),
+        verificationCompletedAt: new Date(canonicalCapture.verificationCompletedAt).toISOString(),
+        cutoffAt: new Date(canonicalCapture.cutoffAt).toISOString(),
+        sourceWriteDetected: false,
+      },
+      expectedHandoffChanges: { disposition: "separate-review", reference: "synthetic:handoff-delta-review" },
+    };
+    const finalDeltaEvidence = {
+      humanEvidence: { reference: "synthetic distinct author and reviewer" },
+      appSheetReplacement: {
+        schemaVersion: 1,
+        captureId: canonicalCapture.captureId,
+        manifestHash: canonicalCapture.manifestHash,
+        dataHash: canonicalCapture.dataHash,
+        captureDefinitionHash: null,
+        appliedDefinitionHash,
+        gateProof: { finalDelta },
+      },
+    };
+    await db.cutoverGate.create({ data: {
+      id: "final-delta-reconciled",
+      status: "approved",
+      evidence: finalDeltaEvidence,
+      captureManifestId: canonicalCapture.captureId,
+      approvedBy: stagerId,
+      reviewedBy: ownerId,
+      approvedAt: now,
+    } });
+
+    const openingLotId = `appsheet-member-eligibility-opening-lot-${randomUUID()}`;
+    const openingRequest = envelope(openingLotId, "StockOpeningRecorded", {
+      skuId: canonicalSku.id,
+      label: "Synthetic reviewed AppSheet stock opening",
+      quantity: "5",
+      unitCost: "10",
+      costCurrency: "ARS",
+      receivedDate: today,
+      locationId,
+      custodianId: ownerId,
+      preparedBy: stagerId,
+      evidence: { note: "Synthetic same-capture D_Stock opening" },
+      sourceRecordId: historySourceRecordId,
+    });
+    const openingAuthorityBefore = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+    const openingAuthorityObjectBefore = await db.operationObject.findUnique({ where: { id: "operations" } });
+    const inactiveSkuBeforeOpening = await db.catalogSku.findUniqueOrThrow({ where: { id: canonicalSku.id } });
+    const inactiveSkuObjectBeforeOpening = await db.operationObject.findUniqueOrThrow({ where: { id: canonicalSku.id } });
+    assert.equal(openingAuthorityBefore.mode, "active");
+    assert.equal(inactiveSkuBeforeOpening.active, false, "la apertura precede la activación del SKU canónico");
+    await db.operationAuthority.update({ where: { id: "operations" }, data: { mode: "shadow" } });
+    try {
+        const openingAuthorityForOpening = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+        const openedStock = await call("/operations/commands", openingRequest);
+        assert.equal(openedStock.response.status, 200, JSON.stringify(openedStock.body));
+        assert.equal(openedStock.body.result.lot.id, openingLotId);
+        assert.equal(openedStock.body.result.lot.skuId, canonicalSku.id);
+        assert.equal(openedStock.body.result.lot.unit, "g");
+        assert.equal(openedStock.body.result.balance.lotId, openingLotId);
+        assert.equal(openedStock.body.result.balance.quantity, "5");
+        assert.equal(openedStock.body.result.opening.quantity, "5");
+        assert.equal(openedStock.body.result.opening.preparedBy, stagerId);
+        assert.equal(openedStock.body.result.opening.approvedBy, ownerId);
+        const openingReceipt = await db.commandReceipt.findUniqueOrThrow({ where: { requestId: openingRequest.requestId } });
+        assert.equal(openingReceipt.actorId, ownerId);
+        assert.equal(openingReceipt.targetId, openingLotId);
+        assert.equal(openingReceipt.command, "StockOpeningRecorded");
+        assert.equal(openingReceipt.bodyHash, canonicalCommandBodyHash(openingRequest));
+        assert.equal(openingReceipt.resultingVersion, 1);
+        const openingFacts = await db.stockFact.findMany({ where: { requestId: openingRequest.requestId } });
+        assert.equal(openingFacts.length, 1);
+        assert.equal(openingFacts[0]!.kind, "opening");
+        assert.equal(openingFacts[0]!.lotId, openingLotId);
+        assert.equal(openingFacts[0]!.sourceRecordId, historySourceRecordId);
+        assert.equal(openingFacts[0]!.quantity.toString(), "5");
+        assert.equal(openingFacts[0]!.unit, "g");
+        assert.equal(openingFacts[0]!.toLocationId, locationId);
+        assert.equal(openingFacts[0]!.toCustodianId, ownerId);
+        assert.equal(openingFacts[0]!.reason, "independently_reconciled_stock_opening");
+        assert.equal(await db.legacySourceRecord.count({ where: { id: historySourceRecordId, sourceTable: "D_Stock" } }), 1);
+        assert.equal(await db.stockFact.count({ where: { sourceRecordId: historySourceRecordId, kind: "opening" } }), 1);
+        const reviewedOpeningSource = await db.legacySourceRecord.findUniqueOrThrow({ where: { id: historySourceRecordId }, include: { snapshot: true } });
+        assert.equal(reviewedOpeningSource.snapshot.captureManifestId, canonicalCapture.captureId);
+        assert.equal(reviewedOpeningSource.snapshot.status, "reviewed");
+        assert.equal(reviewedOpeningSource.snapshot.reviewedBy, ownerId);
+        assert.equal(await db.operationObject.findUniqueOrThrow({ where: { id: openingLotId } }).then(row => row.version), 1);
+        assert.equal(await db.operationAudit.count({ where: { requestId: openingRequest.requestId } }), 2,
+          "la apertura conserva auditoría del efecto y del comando");
+        assert.equal(await db.operationOutbox.count({ where: { requestId: openingRequest.requestId } }), 1);
+        assert.deepEqual(await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } }), openingAuthorityForOpening,
+          "la apertura no activa ni modifica la autoridad");
+        assert.deepEqual(await db.operationObject.findUnique({ where: { id: "operations" } }), openingAuthorityObjectBefore);
+        assert.deepEqual(await db.catalogSku.findUniqueOrThrow({ where: { id: canonicalSku.id } }), inactiveSkuBeforeOpening);
+        assert.deepEqual(await db.operationObject.findUniqueOrThrow({ where: { id: canonicalSku.id } }), inactiveSkuObjectBeforeOpening);
+
+        const openingEffectsAfterFirst = async () => ({
+          authority: await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } }),
+          authorityObject: await db.operationObject.findUnique({ where: { id: "operations" } }),
+          sku: await db.catalogSku.findUniqueOrThrow({ where: { id: canonicalSku.id } }),
+          skuObject: await db.operationObject.findUniqueOrThrow({ where: { id: canonicalSku.id } }),
+          lot: await db.inventoryLot.findUniqueOrThrow({ where: { id: openingLotId } }),
+          lotObject: await db.operationObject.findUniqueOrThrow({ where: { id: openingLotId } }),
+          balances: await db.stockBalance.findMany({ where: { lotId: openingLotId }, orderBy: { id: "asc" } }),
+          facts: await db.stockFact.findMany({ where: { sourceRecordId: historySourceRecordId }, orderBy: { id: "asc" } }),
+          receipt: await db.commandReceipt.findUniqueOrThrow({ where: { requestId: openingRequest.requestId } }),
+          audits: await db.operationAudit.findMany({ where: { requestId: openingRequest.requestId }, orderBy: [{ action: "asc" }, { id: "asc" }] }),
+          outbox: await db.operationOutbox.findMany({ where: { requestId: openingRequest.requestId }, orderBy: { id: "asc" } }),
+          activationReceipts: await db.commandReceipt.count({ where: { targetId: "operations", command: "AuthorityActivated" } }),
+          skuActivationAudits: await db.operationAudit.count({ where: { objectId: canonicalSku.id, action: "appsheet.canonical_sku_activated" } }),
+        });
+        const openingStateBeforeReplay = await openingEffectsAfterFirst();
+        assert.equal(openingStateBeforeReplay.sku.active, false);
+        assert.equal(openingStateBeforeReplay.skuObject.version, 0);
+        assert.equal(openingStateBeforeReplay.authority.mode, "shadow");
+        assert.equal(openingStateBeforeReplay.authority.epoch, openingAuthorityForOpening.epoch);
+        assert.equal(openingStateBeforeReplay.activationReceipts, 0);
+        assert.equal(openingStateBeforeReplay.skuActivationAudits, 0);
+        const exactOpeningReplay = await call("/operations/commands", openingRequest);
+        assert.equal(exactOpeningReplay.response.status, 200, JSON.stringify(exactOpeningReplay.body));
+        assert.equal(exactOpeningReplay.body.replay, true, "el reintento exacto recupera el recibo existente");
+        assert.deepEqual(exactOpeningReplay.body.result, openedStock.body.result);
+        assert.deepEqual(await openingEffectsAfterFirst(), openingStateBeforeReplay, "el replay no duplica lote, saldo, hecho, recibo, auditoría ni outbox");
+
+        const changedOpeningRequest = structuredClone(openingRequest);
+        changedOpeningRequest.data.evidence = { note: "Changed evidence under the same request ID" };
+        assert.notEqual(canonicalCommandBodyHash(changedOpeningRequest), canonicalCommandBodyHash(openingRequest));
+        const changedOpeningReplay = await call("/operations/commands", changedOpeningRequest);
+        assert.equal(changedOpeningReplay.response.status, 409, JSON.stringify(changedOpeningReplay.body));
+        assert.equal(changedOpeningReplay.body.code, "IDEMPOTENCY_KEY_REUSED");
+        assert.equal(changedOpeningReplay.body.result, undefined, "el body distinto no revela el recibo previo");
+        assert.deepEqual(await openingEffectsAfterFirst(), openingStateBeforeReplay, "el UUID reutilizado con otro body no escribe");
+
+        const reviewedFinalDeltaGate = await db.cutoverGate.findUniqueOrThrow({ where: { id: "final-delta-reconciled" } });
+        const publicationBeforeReplayGateChange = await db.legacyHistoryPublication.findUniqueOrThrow({
+          where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM },
+        });
+        await db.cutoverGate.update({ where: { id: "final-delta-reconciled" }, data: { status: "pending" } });
+        try {
+          const replayAfterGateRevocation = await call("/operations/commands", openingRequest);
+          assert.equal(replayAfterGateRevocation.response.status, 200, JSON.stringify(replayAfterGateRevocation.body));
+          assert.equal(replayAfterGateRevocation.body.replay, true,
+            "un recibo propio exacto sigue recuperable aunque cambie la evidencia viva del gate");
+          assert.deepEqual(replayAfterGateRevocation.body.result, openedStock.body.result);
+          assert.deepEqual(await openingEffectsAfterFirst(), openingStateBeforeReplay,
+            "recuperar el recibo con el gate pendiente no duplica ni modifica efectos");
+
+          const newOpeningWithSameData = structuredClone(openingRequest);
+          newOpeningWithSameData.requestId = randomUUID();
+          newOpeningWithSameData.targetId = `${openingLotId}-new-request`;
+          assert.deepEqual(newOpeningWithSameData.data, openingRequest.data);
+          const deniedByPendingGate = await call("/operations/commands", newOpeningWithSameData);
+          assert.equal(deniedByPendingGate.response.status, 423, JSON.stringify(deniedByPendingGate.body));
+          assert.equal(deniedByPendingGate.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
+          assert.deepEqual(deniedByPendingGate.body.details?.blockers, ["final_delta_gate_missing_or_invalid"]);
+          assert.equal(await db.operationObject.findUnique({ where: { id: newOpeningWithSameData.targetId } }), null);
+          assert.equal(await db.commandReceipt.count({ where: { requestId: newOpeningWithSameData.requestId } }), 0);
+          assert.equal(await db.operationAudit.count({ where: { requestId: newOpeningWithSameData.requestId } }), 0);
+          assert.equal(await db.operationOutbox.count({ where: { requestId: newOpeningWithSameData.requestId } }), 0);
+          assert.deepEqual(await openingEffectsAfterFirst(), openingStateBeforeReplay,
+            "un requestId nuevo sigue fail-closed y no vuelve a consumir ni alterar la apertura");
+          assert.deepEqual(await db.legacyHistoryPublication.findUniqueOrThrow({
+            where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM },
+          }), publicationBeforeReplayGateChange, "la prueba del replay no muta la publicación histórica");
+        } finally {
+          await db.cutoverGate.update({
+            where: { id: "final-delta-reconciled" },
+            data: { status: reviewedFinalDeltaGate.status },
+          });
+        }
+    } finally {
+      await db.operationAuthority.update({ where: { id: "operations" }, data: { mode: openingAuthorityBefore.mode } });
+    }
+    const authorityAfterOpeningFixture = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+    assert.equal(authorityAfterOpeningFixture.mode, openingAuthorityBefore.mode);
+    assert.equal(authorityAfterOpeningFixture.cutoverProfile, openingAuthorityBefore.cutoverProfile);
+    assert.equal(authorityAfterOpeningFixture.captureManifestId, openingAuthorityBefore.captureManifestId);
+    assert.equal(authorityAfterOpeningFixture.epoch, openingAuthorityBefore.epoch);
+    assert.equal(authorityAfterOpeningFixture.firstRealWriteAt?.toISOString(), openingAuthorityBefore.firstRealWriteAt?.toISOString());
+    assert.equal(authorityAfterOpeningFixture.approvedBy, openingAuthorityBefore.approvedBy);
+    assert.deepEqual(authorityAfterOpeningFixture.evidence, openingAuthorityBefore.evidence);
+
     const memberUpdate = envelope(canonicalMember.id, "MemberUpdated", {
       name: "Canonical member updated", email: canonicalMember.email, phone: canonicalMember.phone,
       address: canonicalMember.address, preferences: canonicalMember.preferences,
@@ -525,6 +899,94 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
     const permissionReceipt = await db.commandReceipt.findUniqueOrThrow({ where: { requestId: permissionReview.request.requestId } });
     assert.ok(Date.parse((permissionReceipt.response as any).result.permission.reviewedAt) >= permissionReceipt.committedAt.getTime(),
       "la fecha semántica puede ser posterior al now() de inicio de transacción guardado por Postgres");
+    const clinicalDocumentId = randomUUID();
+    await db.operationDocument.create({ data: {
+      id: clinicalDocumentId, memberId: canonicalMember.id, kind: "synthetic-clinical", sensitivity: "clinical",
+      state: "available", objectKey: "synthetic-clinical-object", checksum: hash("synthetic-clinical-bytes"),
+      metadata: { fixture: true }, createdBy: ownerId,
+    } });
+    const clinicalReview = await successfulCommand(canonicalMember.id, "ClinicalRecordReviewed", {
+      status: "verified", evidenceDocumentId: clinicalDocumentId, evidence: { note: "Synthetic eligible clinical review" },
+    }, 2);
+    assert.equal(clinicalReview.body.result.clinical.memberId, canonicalMember.id,
+      "un socio canónico revisado puede recibir una revisión clínica legítima");
+
+    const unreviewedMemberId = `appsheet-member-eligibility-unreviewed-${randomUUID()}`;
+    const unreviewedSourceKey = `unreviewed-source-${randomUUID()}`;
+    await db.operationMember.create({ data: {
+      id: unreviewedMemberId, name: "Imported without identity approval", address: {}, preferences: {},
+      sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM, sourceId: unreviewedSourceKey, legacyCustomerId: unreviewedSourceKey,
+    } });
+    await db.operationObject.create({ data: { id: unreviewedMemberId, kind: "member", version: 0, createdBy: ownerId } });
+
+    const wrongCaptureMemberId = `appsheet-member-eligibility-wrong-capture-${randomUUID()}`;
+    const wrongCaptureSourceKey = `wrong-capture-source-${randomUUID()}`;
+    await db.operationMember.create({ data: {
+      id: wrongCaptureMemberId, name: "Imported with approval for another capture", address: {}, preferences: {},
+      sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM, sourceId: wrongCaptureSourceKey, legacyCustomerId: wrongCaptureSourceKey,
+    } });
+    await db.operationObject.create({ data: { id: wrongCaptureMemberId, kind: "member", version: 0, createdBy: ownerId } });
+    const wrongCaptureIdentityId = `synthetic-wrong-capture-identity-${randomUUID()}`;
+    const wrongCaptureManifestHash = hash("synthetic-other-capture-manifest");
+    const wrongCaptureId = `appsreal-${wrongCaptureManifestHash.slice(0, 16)}`;
+    await db.legacyIdentity.create({ data: {
+      id: wrongCaptureIdentityId, sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM, sourceTable: "C_Cliente",
+      sourceKey: wrongCaptureSourceKey, destinationType: "member", destinationId: wrongCaptureMemberId, approvedBy: ownerId,
+    } });
+    await db.operationAudit.create({ data: {
+      actorId: ownerId, action: "appsheet.canonical_identity_reviewed", objectId: wrongCaptureIdentityId,
+      requestId: randomUUID(), details: {
+        schemaVersion: 1, identityId: wrongCaptureIdentityId, snapshotId: `synthetic-other-snapshot-${randomUUID()}`,
+        captureId: wrongCaptureId, manifestHash: wrongCaptureManifestHash, projectionHash: hash("synthetic-other-projection"),
+        destinationIdentity, sourceRecordId: `synthetic-other-record-${randomUUID()}`, sourceTable: "C_Cliente",
+        sourceKey: wrongCaptureSourceKey, sourceContentHash: hash("synthetic-other-source-row"), destinationType: "member",
+        destinationId: wrongCaptureMemberId, destinationDataHash: hash("synthetic-other-destination"), approvedBy: ownerId,
+      },
+    } });
+
+    const partialProvenanceMemberId = `appsheet-member-eligibility-partial-${randomUUID()}`;
+    await db.operationMember.create({ data: {
+      id: partialProvenanceMemberId, name: "Imported with partial provenance", address: {}, preferences: {},
+      sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM, sourceId: `partial-source-${randomUUID()}`, legacyCustomerId: null,
+    } });
+    await db.operationObject.create({ data: { id: partialProvenanceMemberId, kind: "member", version: 0, createdBy: ownerId } });
+
+    const expectedRejectedMemberState = new Map([
+      [unreviewedMemberId, { name: "Imported without identity approval", sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM,
+        sourceId: unreviewedSourceKey, legacyCustomerId: unreviewedSourceKey }],
+      [wrongCaptureMemberId, { name: "Imported with approval for another capture", sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM,
+        sourceId: wrongCaptureSourceKey, legacyCustomerId: wrongCaptureSourceKey }],
+      [partialProvenanceMemberId, { name: "Imported with partial provenance", sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM,
+        sourceId: (await db.operationMember.findUniqueOrThrow({ where: { id: partialProvenanceMemberId } })).sourceId, legacyCustomerId: null }],
+    ]);
+    for (const [memberId, label] of [
+      [unreviewedMemberId, "sin aprobación de identidad"],
+      [wrongCaptureMemberId, "aprobado sólo para otra captura"],
+      [partialProvenanceMemberId, "con procedencia parcial"],
+    ] as const) {
+      const permissionEvidenceDocumentId = randomUUID();
+      const clinicalEvidenceDocumentId = randomUUID();
+      await db.operationDocument.createMany({ data: [
+        { id: permissionEvidenceDocumentId, memberId, kind: "synthetic-permission", sensitivity: "commercial", state: "available",
+          objectKey: `synthetic-permission-${memberId}`, checksum: hash(`permission-${memberId}`), metadata: { fixture: true }, createdBy: ownerId },
+        { id: clinicalEvidenceDocumentId, memberId, kind: "synthetic-clinical", sensitivity: "clinical", state: "available",
+          objectKey: `synthetic-clinical-${memberId}`, checksum: hash(`clinical-${memberId}`), metadata: { fixture: true }, createdBy: ownerId },
+      ] });
+      const rejectedPermission = envelope(memberId, "PermissionVerified", {
+        kind: "operations", validFrom: permissionDate, validUntil: `${Number(permissionDate.slice(0, 4)) + 1}${permissionDate.slice(4)}`,
+        evidenceDocumentId: permissionEvidenceDocumentId,
+      });
+      const rejectedClinical = envelope(memberId, "ClinicalRecordReviewed", {
+        status: "verified", evidenceDocumentId: clinicalEvidenceDocumentId, evidence: { note: `Synthetic rejection: ${label}` },
+      });
+      await deniedEffects(rejectedPermission, memberId, 0);
+      await deniedEffects(rejectedClinical, memberId, 0);
+      assert.equal(await db.memberPermission.count({ where: { memberId } }), 0, `${label}: no se crea permiso`);
+      assert.equal(await db.memberClinicalRecord.findUnique({ where: { memberId } }), null, `${label}: no se crea ficha clínica`);
+      assert.deepEqual(await db.operationMember.findUniqueOrThrow({ where: { id: memberId } }).then(row => ({
+        name: row.name, sourceSystem: row.sourceSystem, sourceId: row.sourceId, legacyCustomerId: row.legacyCustomerId,
+      })), expectedRejectedMemberState.get(memberId));
+    }
     const canonicalOrderId = `appsheet-member-eligibility-reviewed-order-${randomUUID()}`;
     const canonicalOrder = await successfulCommand(canonicalOrderId, "OrderCreated", {
       memberId: canonicalMember.id, channel: "local", currency: "ARS", address: {}, preorder: false,
@@ -589,6 +1051,11 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
       projectionHash, destinationIdentity, entries: [activationEntry],
     };
     const authorityRequestId = randomUUID();
+    const authorityReplayRequest = envelope("operations", "AuthorityActivated", {
+      cutoverProfile: "appsheet-replacement", captureId: canonicalCapture.captureId,
+      evidence: { reference: "synthetic AuthorityActivated replay fixture" },
+    });
+    authorityReplayRequest.requestId = authorityRequestId;
     const authorityResponse = {
       requestId: authorityRequestId, targetId: "operations", version: 1,
       result: { authority: { id: "operations", mode: "active", cutoverProfile: "appsheet-replacement",
@@ -601,7 +1068,7 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
     });
     await db.commandReceipt.create({ data: {
       requestId: authorityRequestId, actorId: ownerId, targetId: "operations", command: "AuthorityActivated",
-      bodyHash: hash("synthetic AuthorityActivated request"), response: authorityResponse, resultingVersion: 1,
+      bodyHash: canonicalCommandBodyHash(authorityReplayRequest), response: authorityResponse, resultingVersion: 1,
       authorityEpoch: 2, occurredAt: now,
     } });
     await db.operationAudit.create({ data: {
@@ -614,6 +1081,52 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
         projectionHash, destinationIdentity, ...activationEntry, snapshot: activatedSnapshot,
       },
     } });
+
+    // This HTTP path only recovers a synthetic historical receipt. It does not
+    // execute a first activation or certify that the real activation gates pass.
+    const authorityReplayEffects = async () => ({
+      authority: await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } }),
+      authorityObject: await db.operationObject.findUniqueOrThrow({ where: { id: "operations" } }),
+      sku: await db.catalogSku.findUniqueOrThrow({ where: { id: canonicalSku.id } }),
+      skuObject: await db.operationObject.findUniqueOrThrow({ where: { id: canonicalSku.id } }),
+      receipt: await db.commandReceipt.findUniqueOrThrow({ where: { requestId: authorityRequestId } }),
+      audits: await db.operationAudit.count({ where: { requestId: authorityRequestId } }),
+      outbox: await db.operationOutbox.count({ where: { requestId: authorityRequestId } }),
+    });
+    const authorityStateBeforeReplay = await authorityReplayEffects();
+    const previousClubApproval = process.env.CLUB_OPERATIONS_APPROVED;
+    process.env.CLUB_OPERATIONS_APPROVED = "true";
+    try {
+      const replayedAuthority = await call("/operations/commands", authorityReplayRequest);
+      assert.equal(replayedAuthority.response.status, 200, JSON.stringify(replayedAuthority.body));
+      assert.equal(replayedAuthority.body.replay, true, "el HTTP recupera el recibo exacto existente");
+      assert.deepEqual(replayedAuthority.body.result, authorityResponse.result);
+      assert.deepEqual(await authorityReplayEffects(), authorityStateBeforeReplay, "el replay exacto no agrega efectos");
+
+      const ownerBeforeRevocation = await db.user.findUniqueOrThrow({ where: { id: ownerId } });
+      await db.user.update({ where: { id: ownerId }, data: { role: "viewer" } });
+      try {
+        const unauthorizedReplay = await call("/operations/commands", authorityReplayRequest);
+        assert.equal(unauthorizedReplay.response.status, 403, JSON.stringify(unauthorizedReplay.body));
+        assert.equal(unauthorizedReplay.body.code, "CAPABILITY_REQUIRED");
+        assert.equal(unauthorizedReplay.body.replay, undefined, "la falta de permiso actual no revela el recibo");
+        assert.deepEqual(await authorityReplayEffects(), authorityStateBeforeReplay, "el rechazo por capability no escribe estado");
+      } finally {
+        await db.user.update({ where: { id: ownerId }, data: { role: ownerBeforeRevocation.role } });
+      }
+
+      const changedAuthorityRequest = structuredClone(authorityReplayRequest);
+      changedAuthorityRequest.data.evidence = { reference: "changed body under the same request ID" };
+      assert.notEqual(canonicalCommandBodyHash(changedAuthorityRequest), canonicalCommandBodyHash(authorityReplayRequest));
+      const changedBodyReplay = await call("/operations/commands", changedAuthorityRequest);
+      assert.equal(changedBodyReplay.response.status, 409, JSON.stringify(changedBodyReplay.body));
+      assert.equal(changedBodyReplay.body.code, "IDEMPOTENCY_KEY_REUSED");
+      assert.equal(changedBodyReplay.body.result, undefined, "el rechazo no revela el recibo previo");
+      assert.deepEqual(await authorityReplayEffects(), authorityStateBeforeReplay, "el UUID reutilizado con otro body no escribe");
+    } finally {
+      if (previousClubApproval === undefined) delete process.env.CLUB_OPERATIONS_APPROVED;
+      else process.env.CLUB_OPERATIONS_APPROVED = previousClubApproval;
+    }
 
     const approvedSkuUpdate = envelope(canonicalSku.id, "CatalogSkuUpdated", {
       code: activatedSku.code, name: activatedSku.name, variety: activatedSku.variety, category: activatedSku.category,

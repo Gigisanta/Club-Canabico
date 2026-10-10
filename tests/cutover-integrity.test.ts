@@ -211,6 +211,55 @@ test("cutover keeps legacy reviews compatible, rejects an unproven AppSheet gate
     const suspend = envelope("operations", "AuthoritySuspended", { reason: "Pausa operativa por revisión humana" }, 0);
     const suspendedResponse = await call("/operations/commands", "cutover-owner", suspend);
     assert.equal(suspendedResponse.status, 200, await suspendedResponse.clone().text());
+    const suspendedBody = await suspendedResponse.json() as Record<string, unknown>;
+    const suspensionEffects = async () => {
+      const [receiptCount, auditCount, outboxCount, authority, aggregate] = await Promise.all([
+        db.commandReceipt.count({ where: { requestId: suspend.requestId } }),
+        db.operationAudit.count({ where: { requestId: suspend.requestId } }),
+        db.operationOutbox.count({ where: { requestId: suspend.requestId } }),
+        db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" }, select: { mode: true, epoch: true } }),
+        db.operationObject.findUniqueOrThrow({ where: { id: "operations" }, select: { version: true } }),
+      ]);
+      return { receiptCount, auditCount, outboxCount, authority, aggregate };
+    };
+    const committedSuspensionEffects = await suspensionEffects();
+    assert.deepEqual(committedSuspensionEffects, {
+      receiptCount: 1, auditCount: 2, outboxCount: 1,
+      authority: { mode: "shadow", epoch: 8 }, aggregate: { version: 1 },
+    });
+
+    const repeatedSuspension = await call("/operations/commands", "cutover-owner", suspend);
+    assert.equal(repeatedSuspension.status, 200, await repeatedSuspension.clone().text());
+    const repeatedBody = await repeatedSuspension.json() as Record<string, unknown>;
+    assert.equal(repeatedBody.replay, true, "a lost response can be retried after suspension without requiring active authority");
+    const repeatedPayload = Object.fromEntries(Object.entries(repeatedBody).filter(([key]) => key !== "replay"));
+    assert.deepEqual(repeatedPayload, suspendedBody, "the idempotent retry returns the committed command response");
+    assert.deepEqual(await suspensionEffects(), committedSuspensionEffects,
+      "replaying suspension does not add audit/outbox/receipt rows or advance authority epoch/object version");
+
+    const changedReasonSuspension = { ...suspend, data: { ...suspend.data, reason: "Pausa con contenido distinto" } };
+    const changedBodyResponse = await call("/operations/commands", "cutover-owner", changedReasonSuspension);
+    assert.equal(changedBodyResponse.status, 409);
+    const changedBodyError = await changedBodyResponse.json() as Record<string, unknown>;
+    assert.equal(changedBodyError.code, "IDEMPOTENCY_KEY_REUSED");
+    assert.equal(changedBodyError.requestId, undefined);
+    assert.equal(changedBodyError.result, undefined);
+    assert.equal(changedBodyError.replay, undefined);
+    assert.deepEqual(await suspensionEffects(), committedSuspensionEffects,
+      "reusing the request UUID with another body cannot change the suspended authority or its effects");
+
+    const otherOwnerReplay = await call("/operations/commands", "cutover-author", suspend);
+    assert.equal(otherOwnerReplay.status, 409);
+    const otherOwnerError = await otherOwnerReplay.json() as Record<string, unknown>;
+    assert.equal(otherOwnerError.code, "AUTHORITY_NOT_ACTIVE");
+    assert.equal(otherOwnerError.requestId, undefined);
+    assert.equal(otherOwnerError.result, undefined);
+    assert.equal(otherOwnerError.replay, undefined);
+    assert.equal(JSON.stringify(otherOwnerError).includes("Pausa operativa por revisión humana"), false,
+      "a different owner cannot read the original suspension receipt or reason");
+    assert.deepEqual(await suspensionEffects(), committedSuspensionEffects,
+      "another owner's denied retry has no suspension effects");
+
     const suspendedAuthority = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
     assert.equal(suspendedAuthority.mode, "shadow");
     assert.equal(suspendedAuthority.epoch, 8);
@@ -257,6 +306,20 @@ test("cutover keeps legacy reviews compatible, rejects an unproven AppSheet gate
     }
     const stillSuspendedRead = await call("/operations/authority", "cutover-owner");
     assert.equal((await stillSuspendedRead.json()).versions.operations, 1);
+
+    const revokeOwner = envelope("cutover-owner", "AccessRevoked", {
+      userId: "cutover-owner", reason: "synthetic revocation for suspension receipt privacy",
+    });
+    const ownerRevocation = await call("/operations/commands", "cutover-author", revokeOwner);
+    assert.equal(ownerRevocation.status, 200, await ownerRevocation.clone().text());
+    assert.equal((await db.user.findUniqueOrThrow({ where: { id: "cutover-owner" } })).active, false);
+    const revokedOwnerRetry = await call("/operations/commands", "cutover-owner", suspend);
+    assert.equal(revokedOwnerRetry.status, 401);
+    const revokedOwnerError = await revokedOwnerRetry.json() as Record<string, unknown>;
+    assert.deepEqual(revokedOwnerError, { error: "Iniciá sesión para continuar" },
+      "a revoked owner's old session receives no prior command response or receipt details");
+    assert.deepEqual(await suspensionEffects(), committedSuspensionEffects,
+      "revoking the original owner does not create a second suspension effect");
   } finally {
     if (priorApproval === undefined) delete process.env.CLUB_OPERATIONS_APPROVED;
     else process.env.CLUB_OPERATIONS_APPROVED = priorApproval;

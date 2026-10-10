@@ -807,6 +807,14 @@ const membersById=new Map<string,{id:string;legacyCustomerId:string|null;sourceS
  };
 }
 
+/** Bind a stock opening to a SKU included in the exact reviewed canonical capture. */
+export async function requireReviewedCanonicalSkuForAppSheetOpening(ctx:CommandContext,skuId:string,sourceBindingCaptureId:string){
+ const proof=await requireVerifiedAppSheetReplacement(ctx,sourceBindingCaptureId,{allowPendingObjects:true});
+ if(!proof.skuActivationPlan.some(plan=>plan.skuId===skuId))
+  throw appSheetReadinessError("canonical_opening_sku_not_in_reviewed_capture",{skuId,captureId:proof.capture.captureId});
+ return {captureId:proof.capture.captureId,skuId};
+}
+
 const canonicalSkuActivationAuditAction="appsheet.canonical_sku_activated";
 type CanonicalSkuActivationReceiptEntry=Omit<CanonicalSkuActivationPlan,"snapshot">;
 function canonicalSkuActivationReceiptManifest(proof:AppSheetReplacementProof,entries:CanonicalSkuActivationReceiptEntry[]){
@@ -1123,8 +1131,7 @@ export async function requireAppSheetOpeningSourceRecord(ctx:CommandContext,sour
   throw appSheetReadinessError("opening_source_history_publication_or_hash_missing");
  if(expected.kind==="cash"){
   if(["Movimiento","Movimiento_Nueva"].includes(source.sourceTable))throw appSheetReadinessError("cash_opening_source_is_cashflow");
-  if(!["Movimiento","Movimiento_Nueva"].includes(source.sourceTable)||fact.kind!=="cash"||fact.amountState!=="known"||fact.currencyState!=="known"||fact.amountMinor!==expected.amountMinor||fact.currency!==expected.currency)
-   throw appSheetReadinessError("cash_opening_source_value_mismatch");
+  throw appSheetReadinessError("cash_opening_balance_checkpoint_unavailable");
  }else{
   if(source.sourceTable==="Mov_Stock1")throw appSheetReadinessError("stock_opening_source_is_ledger_movement");
   if(fact.quantityState!=="known"||fact.unitState!=="known"||!fact.quantity?.equals(expected.quantity??"")||fact.unit!==expected.unit)
@@ -1233,6 +1240,7 @@ registerCommand("MemberUpdated",{kind:"member",capability:"members.write",
 registerCommand("PermissionVerified",{kind:"member",capability:"permissions.verify",
  schema:z.strictObject({kind:z.string().min(1).max(80),validFrom:civilDate,validUntil:civilDate,evidenceDocumentId:z.uuid()}),
  execute:async ctx=>{
+  await requireEligibleAppSheetReplacementMember(ctx.tx,ctx.envelope.targetId);
   const v=ctx.envelope.data as {kind:string;validFrom:string;validUntil:string;evidenceDocumentId:string};
   if(v.validUntil<v.validFrom)throw new OperationError(400,"PERMISSION_DATES","La vigencia está invertida");
   const document=await ctx.tx.operationDocument.findUnique({where:{id:v.evidenceDocumentId}});
@@ -1243,6 +1251,7 @@ registerCommand("PermissionVerified",{kind:"member",capability:"permissions.veri
  }});
 registerCommand("ClinicalRecordReviewed",{kind:"member",capability:"clinical.review",administrative:true,
  schema:z.strictObject({status:z.enum(["verified","rejected","needs_information"]),evidenceDocumentId:z.uuid(),evidence}),execute:async ctx=>{
+  await requireEligibleAppSheetReplacementMember(ctx.tx,ctx.envelope.targetId);
   const document=await ctx.tx.operationDocument.findUnique({where:{id:ctx.envelope.data.evidenceDocumentId as string}});
   if(!document||document.memberId!==ctx.envelope.targetId||document.sensitivity!=="clinical"||document.state!=="available")throw new OperationError(422,"CLINICAL_EVIDENCE_REQUIRED","La revisión requiere un documento clínico disponible del socio");
   const provenance=json({evidenceDocumentId:document.id,checksum:document.checksum,reference:ctx.envelope.data.evidence});
@@ -1361,17 +1370,25 @@ async function requireReplacementOpeningGateEvidence(ctx:CommandContext,proof:Ap
  }
 }
 const authoritySuspensionSchema=z.strictObject({reason:z.string().trim().min(8).max(1000)});
-async function requireActiveOperationsAuthority(ctx:CommandContext){
+async function requireCurrentOperationsOwnerAuthority(ctx:CommandContext){
  if(ctx.envelope.targetId!=="operations")throw new OperationError(400,"AUTHORITY_ID","Circuito inválido");
  const actor=await ctx.tx.user.findUnique({where:{id:ctx.actor.id},select:{active:true,role:true}});
  if(!actor?.active||actor.role!=="owner")throw new OperationError(403,"OWNER_REQUIRED","Sólo el propietario activo puede suspender la autoridad operativa");
- const authority=await ctx.tx.operationAuthority.findUnique({where:{id:"operations"}});
+ return ctx.tx.operationAuthority.findUnique({where:{id:"operations"}});
+}
+async function hasOwnCommandReceipt(ctx:CommandContext){
+ const receipt=await ctx.tx.commandReceipt.findUnique({where:{requestId:ctx.envelope.requestId},select:{actorId:true,targetId:true,command:true}});
+ return receipt?.actorId===ctx.actor.id&&receipt.targetId===ctx.envelope.targetId&&receipt.command===ctx.envelope.command;
+}
+async function requireActiveOperationsAuthority(ctx:CommandContext,allowOwnSuspensionReplay=false){
+ const authority=await requireCurrentOperationsOwnerAuthority(ctx);
+ if(allowOwnSuspensionReplay&&authority?.mode==="shadow"&&await hasOwnCommandReceipt(ctx))return authority;
  if(authority?.mode!=="active")throw new OperationError(409,"AUTHORITY_NOT_ACTIVE","La autoridad operativa no está activa");
  return authority;
 }
 registerCommand("AuthoritySuspended",{kind:"authority",capability:"cutover.approve",create:true,administrative:true,
  schema:authoritySuspensionSchema,
- authorize:async ctx=>{await requireActiveOperationsAuthority(ctx);},
+ authorize:async ctx=>{await requireActiveOperationsAuthority(ctx,true);},
  execute:async ctx=>{
   const current=await requireActiveOperationsAuthority(ctx);
   const reason=(ctx.envelope.data.reason as string).trim();
@@ -1390,12 +1407,16 @@ registerCommand("AuthorityActivated",{kind:"authority",capability:"cutover.appro
   if(ctx.envelope.targetId!=="operations")throw new OperationError(400,"AUTHORITY_ID","Circuito inválido");
   const input=authorityActivationSchema.parse(ctx.envelope.data);
   await requireCanonicalAppSheetReplacementProfile(ctx.tx,input.cutoverProfile);
+  if(process.env.CLUB_OPERATIONS_APPROVED!=="true")throw new OperationError(423,"CLUB_OPERATIONS_APPROVAL_REQUIRED","La habilitación operativa requiere aprobación documentada");
+  // Keep current target, capability, configuration, and profile checks above.
+  // Revalidate first-activation evidence only for new requests: exact own receipts
+  // are returned by core after it verifies actor and bodyHash below.
+  if(await hasOwnCommandReceipt(ctx))return;
   if(input.cutoverProfile==="appsheet-replacement"){
    const proof=await requireVerifiedAppSheetReplacement(ctx,input.captureId!);
    await requireApprovedCutoverGates(ctx,input.cutoverProfile,input.captureId,proof);
    await requireReplacementOpeningGateEvidence(ctx,proof);
   }else await requireApprovedCutoverGates(ctx,input.cutoverProfile,input.captureId);
-  if(process.env.CLUB_OPERATIONS_APPROVED!=="true")throw new OperationError(423,"CLUB_OPERATIONS_APPROVAL_REQUIRED","La habilitación operativa requiere aprobación documentada");
  },
  execute:async ctx=>{
   if(ctx.envelope.targetId!=="operations")throw new OperationError(400,"AUTHORITY_ID","Circuito inválido");

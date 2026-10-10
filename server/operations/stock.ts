@@ -4,11 +4,13 @@ import { z } from "zod";
 import { formatDecimal, moneyForQuantity, parseDecimal, parseQuantity, roundHalfUp, type QuantityUnit } from "../../shared/operations/exact.js";
 import { audit, civilDate, currency, decimal, evidence, json, objectId, objectScope, registerCommand, touchAggregate, OperationError, type CommandContext } from "./core.js";
 import { resolveStockAvailability, type StockAvailabilityChannel, type StockAvailabilityResolution } from "./stock-availability.js";
+import { APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../../shared/operations/appsheet-canonical.js";
 import {
   recordAppSheetCanonicalSkuMutation,
   requireAppSheetOpeningSourceRecord,
   requireEligibleAppSheetReplacementOrderSkus,
   requireEligibleAppSheetReplacementSkus,
+  requireReviewedCanonicalSkuForAppSheetOpening,
 } from "./access.js";
 
 export interface StockPreparationAllocationInput {
@@ -1210,6 +1212,8 @@ registerCommand("PurchaseOrderApproved", {
     const order = await ctx.tx.purchaseOrder.findUnique({ where: { id: ctx.envelope.targetId } });
     if (!order) throw new OperationError(404, "PURCHASE_NOT_FOUND", "No se encontró la compra");
     if (order.status !== "draft") throw new OperationError(409, "PURCHASE_APPROVAL_STATE", "Sólo se puede aprobar una compra en borrador");
+    const purchaseLines = readPurchaseLines(order.items);
+    await requireEligibleAppSheetReplacementSkus(ctx.tx, [...new Set(purchaseLines.map(line => line.skuId))]);
     const sourceObject = await ctx.tx.operationObject.findUnique({ where: { id: order.id }, select: { createdBy: true } });
     if (sourceObject?.createdBy === ctx.actor.id)
       throw new OperationError(409, "INDEPENDENT_REVIEW_REQUIRED", "La compra debe aprobarla alguien distinto de quien la creó");
@@ -1317,16 +1321,60 @@ const stockOpeningSchema = z.strictObject({
   sourceRecordId: objectId.optional(),
 });
 
+type StockOpeningSku = { id: string; unit: string; sourceId: string | null; sourceSystem: string | null; active: boolean };
+function requireStockOpeningSku(sku: StockOpeningSku | null): StockOpeningSku {
+  if (!sku || (!sku.active && sku.sourceSystem !== APPSHEET_CANONICAL_SOURCE_SYSTEM))
+    throw new OperationError(422, "STOCK_OPENING_SKU_REQUIRED", "Elegí un producto de catálogo activo");
+  return sku;
+}
+
+async function validateStockOpeningSku(
+  ctx: CommandContext,
+  sku: StockOpeningSku | null,
+  sourceRecordId: string | undefined,
+  quantity: string,
+): Promise<StockOpeningSku> {
+  const verifiedSku = requireStockOpeningSku(sku);
+  const sourceBinding = await requireAppSheetOpeningSourceRecord(ctx, sourceRecordId, {
+    kind: "stock", quantity, unit: verifiedSku.unit, skuSourceId: verifiedSku.sourceId ?? undefined,
+  });
+  const hasImportedIdentity = verifiedSku.sourceSystem !== null || verifiedSku.sourceId !== null;
+  if (sourceBinding?.captureId && hasImportedIdentity && verifiedSku.sourceSystem !== APPSHEET_CANONICAL_SOURCE_SYSTEM)
+    throw new OperationError(423, "APPSHEET_SKU_NOT_ELIGIBLE", "El producto ligado a una captura AppSheet debe tener una procedencia canónica completa.");
+  if (!verifiedSku.active) {
+    if (!sourceBinding?.captureId)
+      throw new OperationError(422, "STOCK_OPENING_SKU_REQUIRED", "Elegí un producto de catálogo activo");
+    const authority = await ctx.tx.operationAuthority.findUnique({
+      where: { id: "operations" }, select: { mode: true },
+    });
+    if (authority?.mode === "active")
+      throw new OperationError(423, "APPSHEET_SKU_NOT_ELIGIBLE", "El producto AppSheet debió activarse junto con la autoridad revisada.");
+    await requireReviewedCanonicalSkuForAppSheetOpening(ctx, verifiedSku.id, sourceBinding.captureId);
+  } else if (verifiedSku.sourceSystem === APPSHEET_CANONICAL_SOURCE_SYSTEM) {
+    const authority = await ctx.tx.operationAuthority.findUnique({
+      where: { id: "operations" }, select: { mode: true, cutoverProfile: true, captureManifestId: true },
+    });
+    if (authority?.mode !== "active" || authority.cutoverProfile !== "appsheet-replacement" || authority.captureManifestId !== sourceBinding?.captureId)
+      throw new OperationError(423, "APPSHEET_SKU_NOT_ELIGIBLE", "El producto AppSheet sólo puede abrir stock bajo su captura activa revisada.");
+    await requireEligibleAppSheetReplacementSkus(ctx.tx, [verifiedSku.id]);
+  } else {
+    await requireEligibleAppSheetReplacementSkus(ctx.tx, [verifiedSku.id]);
+  }
+  return verifiedSku;
+}
+
 registerCommand("StockOpeningRecorded", {
   kind: "lot", capability: "openings.approve", create: true, administrative: true,
   schema: stockOpeningSchema,
   authorize: async (ctx) => {
     const input = stockOpeningSchema.parse(ctx.envelope.data);
-    const sku = await ctx.tx.catalogSku.findFirst({ where: { id: input.skuId, active: true }, select: { id: true, unit: true, sourceId: true } });
-    if (!sku) throw new OperationError(422, "STOCK_OPENING_SKU_REQUIRED", "Elegí un producto de catálogo activo");
-    await requireAppSheetOpeningSourceRecord(ctx, input.sourceRecordId, {
-      kind: "stock", quantity: input.quantity, unit: sku.unit, skuSourceId: sku.sourceId ?? undefined,
+    const receipt = await ctx.tx.commandReceipt.findUnique({
+      where: { requestId: ctx.envelope.requestId }, select: { actorId: true, targetId: true, command: true },
     });
+    const ownOpeningReplay = receipt?.actorId === ctx.actor.id && receipt.targetId === ctx.envelope.targetId && receipt.command === ctx.envelope.command;
+    if (ownOpeningReplay) return;
+    const sku = await ctx.tx.catalogSku.findFirst({ where: { id: input.skuId }, select: { id: true, unit: true, sourceId: true, sourceSystem: true, active: true } });
+    await validateStockOpeningSku(ctx, sku, input.sourceRecordId, input.quantity);
   },
   execute: async (ctx) => {
     const input = stockOpeningSchema.parse(ctx.envelope.data);
@@ -1336,27 +1384,25 @@ registerCommand("StockOpeningRecorded", {
       throw new OperationError(422, "STOCK_OPENING_DATE", "La fecha de apertura o vencimiento del lote no es válida");
     const [author, sku, location, custodian] = await Promise.all([
       ctx.tx.user.findFirst({ where: { id: input.preparedBy, active: true }, select: { id: true } }),
-      ctx.tx.catalogSku.findFirst({ where: { id: input.skuId, active: true } }),
+      ctx.tx.catalogSku.findFirst({ where: { id: input.skuId } }),
       ctx.tx.location.findFirst({ where: { id: input.locationId, active: true }, select: { id: true } }),
       ctx.tx.user.findFirst({ where: { id: input.custodianId ?? ctx.actor.id, active: true }, select: { id: true } }),
     ]);
     if (!author) throw new OperationError(422, "STOCK_OPENING_AUTHOR_REQUIRED", "La apertura requiere una persona preparadora activa");
-    if (!sku) throw new OperationError(422, "STOCK_OPENING_SKU_REQUIRED", "Elegí un producto de catálogo activo");
+    const openingSku = requireStockOpeningSku(sku);
     if (!location) throw new OperationError(422, "STOCK_OPENING_LOCATION_REQUIRED", "Elegí una ubicación activa");
     if (!custodian) throw new OperationError(422, "STOCK_OPENING_CUSTODIAN_REQUIRED", "Elegí una persona activa responsable de la custodia");
     await requireStockObjectScope(ctx,[location.id],[custodian.id]);
-    const quantity = positiveQuantity(input.quantity, sku.unit, "Cantidad de apertura");
+    const quantity = positiveQuantity(input.quantity, openingSku.unit, "Cantidad de apertura");
     const sourceRecordId = input.sourceRecordId;
-    await requireAppSheetOpeningSourceRecord(ctx, sourceRecordId, {
-      kind: "stock", quantity: formatQ(quantity, sku.unit), unit: sku.unit, skuSourceId: sku.sourceId ?? undefined,
-    });
+    const verifiedSku = await validateStockOpeningSku(ctx, openingSku, sourceRecordId, formatQ(quantity, openingSku.unit));
     positiveUnitCost(input.unitCost);
-    const costMinor = checkDatabaseMinor(moneyForQuantity(formatQ(quantity, sku.unit), input.unitCost));
+    const costMinor = checkDatabaseMinor(moneyForQuantity(formatQ(quantity, verifiedSku.unit), input.unitCost));
     const lot = await ctx.tx.inventoryLot.create({ data: {
       id: ctx.envelope.targetId,
-      skuId: sku.id,
+      skuId: verifiedSku.id,
       label: input.label,
-      unit: sku.unit,
+      unit: verifiedSku.unit,
       unitCost: new Prisma.Decimal(input.unitCost),
       costCurrency: input.costCurrency,
       receivedAt: new Date(`${input.receivedDate}T12:00:00-03:00`),
@@ -1367,16 +1413,16 @@ registerCommand("StockOpeningRecorded", {
       lotId: lot.id,
       locationId: location.id,
       custodianId: custodian.id,
-      unit: sku.unit,
-      quantity: dbQ(quantity, sku.unit),
-      reserved: dbQ(ZERO, sku.unit),
+      unit: verifiedSku.unit,
+      quantity: dbQ(quantity, verifiedSku.unit),
+      reserved: dbQ(ZERO, verifiedSku.unit),
     } });
     await ctx.tx.stockFact.create({ data: {
       requestId: ctx.envelope.requestId,
       lotId: lot.id,
       kind: "opening",
-      quantity: dbQ(quantity, sku.unit),
-      unit: sku.unit,
+      quantity: dbQ(quantity, verifiedSku.unit),
+      unit: verifiedSku.unit,
       toLocationId: location.id,
       toCustodianId: custodian.id,
       costMinor,
@@ -1390,7 +1436,7 @@ registerCommand("StockOpeningRecorded", {
     return {
       lot,
       balance,
-      opening: { quantity: formatQ(quantity, sku.unit), costMinor: costMinor.toString(), currency: input.costCurrency, preparedBy: author.id, approvedBy: ctx.actor.id },
+      opening: { quantity: formatQ(quantity, verifiedSku.unit), costMinor: costMinor.toString(), currency: input.costCurrency, preparedBy: author.id, approvedBy: ctx.actor.id },
     };
   },
 });

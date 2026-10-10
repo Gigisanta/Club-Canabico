@@ -542,6 +542,32 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       }
     });
 
+    await t.test("inactive native SKU is rejected before a stock opening writes any state", async () => {
+      const inactiveSkuId = `inactive-native-opening-${randomUUID()}`;
+      const lotId = `inactive-native-opening-lot-${randomUUID()}`;
+      await db.catalogSku.create({ data: {
+        id: inactiveSkuId, code: inactiveSkuId, name: "Inactive native opening fixture", variety: "Fixture", category: "Fixture", unit: "g", active: false,
+      } });
+      const request = envelope(lotId, "StockOpeningRecorded", {
+        skuId: inactiveSkuId, label: "Inactive native opening", quantity: "5", unitCost: "10", costCurrency: "ARS",
+        receivedDate: today, locationId, preparedBy: deniedId, evidence: { note: "Inactive native SKU must remain unavailable" },
+      });
+      const effectsBefore = {
+        lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count(),
+        receipts: await db.commandReceipt.count(), audits: await db.operationAudit.count(), outbox: await db.operationOutbox.count(),
+      };
+      const rejected = await send(request);
+      assert.equal(rejected.response.status, 422, JSON.stringify(rejected.body));
+      assert.equal(rejected.body.code, "STOCK_OPENING_SKU_REQUIRED");
+      assert.deepEqual({
+        lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count(),
+        receipts: await db.commandReceipt.count(), audits: await db.operationAudit.count(), outbox: await db.operationOutbox.count(),
+      }, effectsBefore);
+      assert.equal(await db.inventoryLot.findUnique({ where: { id: lotId } }), null);
+      assert.equal(await db.operationObject.findUnique({ where: { id: lotId } }), null);
+      assert.equal((await db.catalogSku.findUniqueOrThrow({ where: { id: inactiveSkuId } })).active, false);
+    });
+
     await t.test("capability and member scope reject before creating any invoice rows", async () => {
       for (const [actor, member, expectedCode] of [
         [deniedId, memberId, "CAPABILITY_REQUIRED"],
@@ -1354,6 +1380,66 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       assert.equal(await db.stockFact.count({ where: { requestId: movementRequest.requestId } }), 0);
       assert.equal(await db.operationObject.findUnique({ where: { id: movementLotId } }), null);
 
+      const canonicalOpeningSkuId = `appsheet-unreviewed-opening-sku-${randomUUID()}`;
+      const unreviewedActiveSkus = [
+        { id: canonicalOpeningSkuId, label: "active canonical SKU before authority review", sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM },
+        { id: `appsheet-partial-opening-sku-${randomUUID()}`, label: "partial-provenance SKU", sourceSystem: null },
+        { id: `appsheet-external-opening-sku-${randomUUID()}`, label: "external-provenance SKU", sourceSystem: "legacy-catalog" },
+      ];
+      const stockStateBeforeUnreviewedActive = {
+        lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count(),
+      };
+      for (const [index, fixture] of unreviewedActiveSkus.entries()) {
+        const activeSkuId = fixture.id;
+        const activeLotId = `appsheet-unreviewed-active-opening-lot-${index}-${randomUUID()}`;
+        await db.catalogSku.create({ data: {
+          id: activeSkuId, code: activeSkuId, name: fixture.label, variety: "Fixture", category: "Fixture", unit: "g",
+          sourceSystem: fixture.sourceSystem, sourceId: "invoice-source-sku", active: true,
+        } });
+        const activeSkuRequest = envelope(activeLotId, "StockOpeningRecorded", {
+          skuId: activeSkuId, label: fixture.label, quantity: "5", unitCost: "10", costCurrency: "ARS",
+          receivedDate: today, locationId, preparedBy: deniedId, evidence: { note: fixture.label }, sourceRecordId: stockSourceRecordId,
+        });
+        const activeSkuRejected = await send(activeSkuRequest);
+        assert.equal(activeSkuRejected.response.status, 423, JSON.stringify(activeSkuRejected.body));
+        assert.equal(activeSkuRejected.body.code, "APPSHEET_SKU_NOT_ELIGIBLE");
+        await assertNoCommandEffects(activeSkuRequest);
+        assert.equal(await db.inventoryLot.findUnique({ where: { id: activeLotId } }), null);
+        assert.equal(await db.stockFact.count({ where: { requestId: activeSkuRequest.requestId } }), 0);
+        assert.equal(await db.operationObject.findUnique({ where: { id: activeLotId } }), null);
+      }
+      assert.deepEqual({
+        lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count(),
+      }, stockStateBeforeUnreviewedActive);
+      assert.equal((await db.catalogSku.findUniqueOrThrow({ where: { id: canonicalOpeningSkuId } })).active, true,
+        "rejecting the pre-authority canonical opening leaves the SKU unchanged");
+      await db.catalogSku.update({ where: { id: canonicalOpeningSkuId }, data: { active: false } });
+
+      const inactiveCanonicalLotId = `appsheet-unreviewed-opening-lot-${randomUUID()}`;
+      const inactiveCanonicalRequest = envelope(inactiveCanonicalLotId, "StockOpeningRecorded", {
+        skuId: canonicalOpeningSkuId, label: "Unreviewed inactive canonical opening", quantity: "5", unitCost: "10", costCurrency: "ARS",
+        receivedDate: today, locationId, preparedBy: deniedId, evidence: { note: "Only a SKU in the exact reviewed capture may open stock" },
+        sourceRecordId: stockSourceRecordId,
+      });
+      const stockStateBeforeCanonical = {
+        lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count(),
+        baselineBalance: await db.stockBalance.findUniqueOrThrow({ where: { id: balanceId }, select: { quantity: true, reserved: true } }),
+      };
+      const inactiveCanonicalRejected = await send(inactiveCanonicalRequest);
+      assert.equal(inactiveCanonicalRejected.response.status, 423, JSON.stringify(inactiveCanonicalRejected.body));
+      assert.equal(inactiveCanonicalRejected.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
+      assert.deepEqual(inactiveCanonicalRejected.body.details?.blockers, ["canonical_master_snapshot_missing_or_ambiguous"]);
+      await assertNoCommandEffects(inactiveCanonicalRequest);
+      assert.deepEqual({
+        lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count(),
+        baselineBalance: await db.stockBalance.findUniqueOrThrow({ where: { id: balanceId }, select: { quantity: true, reserved: true } }),
+      }, stockStateBeforeCanonical);
+      assert.equal(await db.inventoryLot.findUnique({ where: { id: inactiveCanonicalLotId } }), null);
+      assert.equal(await db.stockFact.count({ where: { requestId: inactiveCanonicalRequest.requestId } }), 0);
+      assert.equal(await db.operationObject.findUnique({ where: { id: inactiveCanonicalLotId } }), null);
+      assert.equal((await db.catalogSku.findUniqueOrThrow({ where: { id: canonicalOpeningSkuId } })).active, false,
+        "a failed pre-activation opening does not activate the SKU");
+
       await db.operationAuthority.create({ data: { id: "operations", mode: "shadow", cutoverProfile: "legacy", captureManifestId: null } });
       const canonicalBaselineProjection = syntheticCanonicalProject({
         captureRevision: `before-authority-${randomUUID()}`,
@@ -1429,6 +1515,31 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       assert.equal(activeReplacementAuthority.captureManifestId, captureId);
       assert.equal((await db.appSheetInvoiceSequence.findUniqueOrThrow({ where: { namespace: captureId } })).lastValue, 40n,
         "the active replacement already has a stable, seeded invoice sequence");
+      const purchaseSupplierId = `appsheet-review-supplier-${randomUUID()}`;
+      const purchaseSkuId = `appsheet-unreviewed-purchase-sku-${randomUUID()}`;
+      const purchaseId = `appsheet-unreviewed-purchase-${randomUUID()}`;
+      const purchaseLineId = `appsheet-unreviewed-purchase-line-${randomUUID()}`;
+      await db.supplier.create({ data: { id: purchaseSupplierId, name: "Synthetic purchase supplier", key: purchaseSupplierId } });
+      await db.catalogSku.create({ data: {
+        id: purchaseSkuId, code: purchaseSkuId, name: "Unreviewed imported purchase SKU", variety: "Fixture", category: "Fixture", unit: "g",
+        sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM, sourceId: `unreviewed-${purchaseSkuId}`, active: true,
+      } });
+      await db.purchaseOrder.create({ data: {
+        id: purchaseId, supplierId: purchaseSupplierId, agreementDate: today, currency: "ARS", totalMinor: 500n, status: "draft",
+        items: [{ lineId: purchaseLineId, skuId: purchaseSkuId, unit: "g", quantity: "5", unitCost: "100", lineTotalMinor: "500" }],
+      } });
+      await db.operationObject.create({ data: { id: purchaseId, kind: "purchase", version: 0, createdBy: deniedId } });
+      const approvalRequest = envelope(purchaseId, "PurchaseOrderApproved", { evidence: { note: "Imported SKU has no reviewed capture proof" } });
+      const purchaseBeforeApproval = await db.purchaseOrder.findUniqueOrThrow({ where: { id: purchaseId } });
+      const purchaseObjectBeforeApproval = await db.operationObject.findUniqueOrThrow({ where: { id: purchaseId } });
+      const approvalRejected = await send(approvalRequest);
+      assert.equal(approvalRejected.response.status, 423, JSON.stringify(approvalRejected.body));
+      assert.equal(approvalRejected.body.code, "APPSHEET_SKU_NOT_ELIGIBLE");
+      await assertNoCommandEffects(approvalRequest);
+      assert.deepEqual(await db.purchaseOrder.findUniqueOrThrow({ where: { id: purchaseId } }), purchaseBeforeApproval,
+        "the draft remains untouched when its imported SKU is ineligible");
+      assert.deepEqual(await db.operationObject.findUniqueOrThrow({ where: { id: purchaseId } }), purchaseObjectBeforeApproval,
+        "the aggregate version does not advance on a rejected approval");
       const activeReplayBefore = await canonicalStageStateCounts();
       const activeReplay = await stageAppSheetCanonicalMasters(canonicalBaselineProjection, {
         actorId: ownerId,
