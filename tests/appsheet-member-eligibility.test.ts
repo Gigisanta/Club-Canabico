@@ -838,6 +838,8 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
     assert.equal(await db.operationAudit.count({ where: { requestId: deniedSkuUpdate.requestId } }), 0);
     assert.equal(await db.operationOutbox.count({ where: { requestId: deniedSkuUpdate.requestId } }), 0);
 
+    const orderBeforeDeniedQuote = await db.operationOrder.findUniqueOrThrow({ where: { id: canonicalOrderId } });
+    assert.equal(orderBeforeDeniedQuote.quoteVersion, 0);
     const deniedQuote = envelope(canonicalOrderId, "OrderQuoted", {
       items: [{ id: `canonical-quote-line-${randomUUID()}`, skuId: canonicalSku.id, quantity: "1", manualUnitPrice: "1",
         manualReason: "Synthetic pre-activation denial" }],
@@ -849,7 +851,7 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
     assert.equal(deniedCanonicalQuote.response.status, 423, JSON.stringify(deniedCanonicalQuote.body));
     assert.equal(deniedCanonicalQuote.body.code, "APPSHEET_SKU_NOT_ELIGIBLE");
     assert.equal(await db.operationOrderLine.count({ where: { orderId: canonicalOrderId } }), 0);
-    assert.equal((await db.operationOrder.findUniqueOrThrow({ where: { id: canonicalOrderId } })).quoteVersion, 1);
+    assert.deepEqual(await db.operationOrder.findUniqueOrThrow({ where: { id: canonicalOrderId } }), orderBeforeDeniedQuote);
     assert.equal(await db.commandReceipt.count({ where: { requestId: deniedQuote.requestId } }), 0);
     assert.equal(await db.operationAudit.count({ where: { requestId: deniedQuote.requestId } }), 0);
     assert.equal(await db.operationOutbox.count({ where: { requestId: deniedQuote.requestId } }), 0);
@@ -928,8 +930,8 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
       assert.deepEqual(replayedAuthority.body.result, authorityResponse.result);
       assert.deepEqual(await authorityReplayEffects(), authorityStateBeforeReplay, "el replay exacto no agrega efectos");
 
-      const ownerBeforeRevocation = await db.user.findUniqueOrThrow({ where: { id: ownerId } });
-      await db.user.update({ where: { id: ownerId }, data: { role: "viewer" } });
+      const ownerAccessBeforeRevocation = await db.operationAccess.findUniqueOrThrow({ where: { userId: ownerId } });
+      await db.operationAccess.update({ where: { userId: ownerId }, data: { enabled: false } });
       try {
         const unauthorizedReplay = await call("/operations/commands", authorityReplayRequest);
         assert.equal(unauthorizedReplay.response.status, 403, JSON.stringify(unauthorizedReplay.body));
@@ -937,7 +939,7 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
         assert.equal(unauthorizedReplay.body.replay, undefined, "la falta de permiso actual no revela el recibo");
         assert.deepEqual(await authorityReplayEffects(), authorityStateBeforeReplay, "el rechazo por capability no escribe estado");
       } finally {
-        await db.user.update({ where: { id: ownerId }, data: { role: ownerBeforeRevocation.role } });
+        await db.operationAccess.update({ where: { userId: ownerId }, data: { enabled: ownerAccessBeforeRevocation.enabled } });
       }
 
       const changedAuthorityRequest = structuredClone(authorityReplayRequest);
@@ -989,6 +991,8 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
     positiveQuote.expectedVersion = 1;
     const quotedEligibleSku = await call("/operations/commands", positiveQuote);
     assert.equal(quotedEligibleSku.response.status, 200, JSON.stringify(quotedEligibleSku.body));
+    const quotedOrderBeforeTamper = await db.operationOrder.findUniqueOrThrow({ where: { id: canonicalOrderId } });
+    assert.equal(quotedOrderBeforeTamper.quoteVersion, 1);
     const quotedLinesBeforeTamper = await db.operationOrderLine.findMany({ where: { orderId: canonicalOrderId }, select: { id: true, skuId: true } });
 
     // A malformed parent receipt invalidates the same SKU before a second quote
@@ -1007,7 +1011,7 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
     assert.equal(deniedTamperedParent.response.status, 423, JSON.stringify(deniedTamperedParent.body));
     assert.equal(deniedTamperedParent.body.code, "APPSHEET_SKU_NOT_ELIGIBLE");
     assert.deepEqual(await db.operationOrderLine.findMany({ where: { orderId: canonicalOrderId }, select: { id: true, skuId: true } }), quotedLinesBeforeTamper);
-    assert.equal((await db.operationOrder.findUniqueOrThrow({ where: { id: canonicalOrderId } })).quoteVersion, 2);
+    assert.deepEqual(await db.operationOrder.findUniqueOrThrow({ where: { id: canonicalOrderId } }), quotedOrderBeforeTamper);
     assert.equal(await db.commandReceipt.count({ where: { requestId: deniedTamperedQuote.requestId } }), 0);
     assert.equal(await db.operationAudit.count({ where: { requestId: deniedTamperedQuote.requestId } }), 0);
     assert.equal(await db.operationOutbox.count({ where: { requestId: deniedTamperedQuote.requestId } }), 0);
