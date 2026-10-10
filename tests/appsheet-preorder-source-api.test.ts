@@ -104,6 +104,11 @@ function appendSyntheticPreSales(source: SyntheticPendingHistorySource, token: s
   const oldRowsWithValues = Number((oldManifest.coverage as Record<string, unknown>).rowsWithValues);
   const addedRecordCount = tables.reduce((sum, table) => sum + table.rows.length, 0);
   const pages = [...oldPages, ...added.map(({ ref }) => ref)];
+  const stability = structuredClone(oldManifest.stability) as Record<string, unknown>;
+  for (const key of ["firstPassPages", "verifiedPages", "matchedPages"]) {
+    assert.equal(stability[key], oldPages.length, `la fixture base debe conciliar ${key}`);
+    stability[key] = pages.length;
+  }
   const headersHash = sha256Canonical(capture.headers);
   const dataHash = sha256Canonical(pages.map((page) => ({
     path: page.path,
@@ -135,7 +140,7 @@ function appendSyntheticPreSales(source: SyntheticPendingHistorySource, token: s
     headersHash,
     dataHash,
     definitionHash: oldManifest.definitionHash,
-    stability: oldManifest.stability,
+    stability,
     coverage,
     pages,
     evidence: oldManifest.evidence,
