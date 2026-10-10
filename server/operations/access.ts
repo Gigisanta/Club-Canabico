@@ -939,7 +939,13 @@ async function canonicalSkuMutationChainIds(tx:Tx,candidates:CanonicalSkuMutatio
    if(receipt.resultingVersion!==expectedVersion++||receipt.resultingVersion>currentVersion||receipt.targetId!==sku.id||
       !canonicalSkuMutationCommands.includes(receipt.command as typeof canonicalSkuMutationCommands[number])||
       !(receipt.committedAt instanceof Date)||!Number.isFinite(receipt.committedAt.getTime())){ok=false;break;}
-   const genericRows=commandAuditsByRequest.get(`${sku.id}\0${receipt.requestId}\0${receipt.command}`)??[];
+   const commandAuditRows=commandAuditsByRequest.get(`${sku.id}\0${receipt.requestId}\0${receipt.command}`)??[];
+   // Handlers may add a business audit under the same action. The core receipt
+   // evidence is its version-only audit, which must still be unique.
+   const genericRows=commandAuditRows.filter(row=>{
+    const auditDetails=asJsonObject(row.details);
+    return auditDetails!==null&&Object.keys(auditDetails).length===1&&auditDetails.version===receipt.resultingVersion;
+   });
    const mutationRows=mutationAuditsByRequest.get(`${sku.id}\0${receipt.requestId}`)??[];
    if(genericRows.length!==1||mutationRows.length!==1){ok=false;break;}
    const generic=genericRows[0]!,mutation=mutationRows[0]!,genericDetails=asJsonObject(generic.details),details=asJsonObject(mutation.details);

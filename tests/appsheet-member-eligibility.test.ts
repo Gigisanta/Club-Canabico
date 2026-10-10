@@ -963,6 +963,56 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
     approvedSkuUpdate.expectedVersion = 1;
     const allowedSkuMutation = await call("/operations/commands", approvedSkuUpdate);
     assert.equal(allowedSkuMutation.response.status, 200, JSON.stringify(allowedSkuMutation.body));
+
+    const skuUpdateAudits = await db.operationAudit.findMany({ where: {
+      objectId: canonicalSku.id, requestId: approvedSkuUpdate.requestId, action: "CatalogSkuUpdated",
+    } });
+    const coreSkuUpdateAudit = skuUpdateAudits.find(row => {
+      const details = row.details;
+      return details !== null && typeof details === "object" && !Array.isArray(details) &&
+        Object.keys(details).length === 1 && (details as { version?: unknown }).version === 2;
+    });
+    assert.ok(coreSkuUpdateAudit, "la receipt tiene su audit core de versión y un audit de negocio separado");
+    const catalogueGuardEffects = async (requestId: string) => ({
+      sku: await db.catalogSku.findUniqueOrThrow({ where: { id: canonicalSku.id } }),
+      object: await db.operationObject.findUniqueOrThrow({ where: { id: canonicalSku.id } }),
+      receipts: await db.commandReceipt.count({ where: { requestId } }),
+      audits: await db.operationAudit.count({ where: { requestId } }),
+      outbox: await db.operationOutbox.count({ where: { requestId } }),
+    });
+    const assertCatalogueRejectedWithoutWrites = async (request: CommandEnvelope) => {
+      const before = await catalogueGuardEffects(request.requestId);
+      const rejected = await call("/operations/commands", request);
+      assert.equal(rejected.response.status, 423, JSON.stringify(rejected.body));
+      assert.equal(rejected.body.code, "APPSHEET_SKU_NOT_ELIGIBLE");
+      assert.deepEqual(await catalogueGuardEffects(request.requestId), before);
+    };
+
+    // Fault injection only in this disposable fixture; no replacement evidence
+    // is fabricated for the later positive command chain.
+    const missingCoreAudit = envelope(canonicalSku.id, "CatalogueSheetSaved", { patch: { availability: "Sí" } });
+    missingCoreAudit.expectedVersion = 2;
+    const validCoreAuditDetails = coreSkuUpdateAudit.details;
+    await db.operationAudit.update({ where: { id: coreSkuUpdateAudit.id }, data: { details: { version: 2, syntheticMarker: true } } });
+    try {
+      await assertCatalogueRejectedWithoutWrites(missingCoreAudit);
+    } finally {
+      await db.operationAudit.update({ where: { id: coreSkuUpdateAudit.id }, data: { details: validCoreAuditDetails as Prisma.InputJsonValue } });
+    }
+
+    const duplicateCoreAudit = await db.operationAudit.create({ data: {
+      actorId: coreSkuUpdateAudit.actorId, action: coreSkuUpdateAudit.action, objectId: coreSkuUpdateAudit.objectId,
+      requestId: coreSkuUpdateAudit.requestId, details: coreSkuUpdateAudit.details as Prisma.InputJsonValue,
+      createdAt: coreSkuUpdateAudit.createdAt,
+    } });
+    const duplicateCoreRequest = envelope(canonicalSku.id, "CatalogueSheetSaved", { patch: { availability: "Sí" } });
+    duplicateCoreRequest.expectedVersion = 2;
+    try {
+      await assertCatalogueRejectedWithoutWrites(duplicateCoreRequest);
+    } finally {
+      await db.operationAudit.delete({ where: { id: duplicateCoreAudit.id } });
+    }
+
     const cataloguePatch = envelope(canonicalSku.id, "CatalogueSheetSaved", { patch: { availability: "Sí" } });
     cataloguePatch.expectedVersion = 2;
     const allowedCatalogueMutation = await call("/operations/commands", cataloguePatch);
