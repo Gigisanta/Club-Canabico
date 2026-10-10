@@ -111,7 +111,7 @@ function verifyStableCapture(capture: {
     pageKeys.add(key);
     pageCounts.set(page!.sheetId, (pageCounts.get(page!.sheetId) ?? 0) + 1);
   }
-  if (sheets.some((sheet) => pageCounts.get(sheet!.sheetId as number) !== sheet!.pageCount)) return false;
+  if (sheets.some((sheet) => (pageCounts.get(sheet!.sheetId as number) ?? 0) !== sheet!.pageCount)) return false;
   const pageRefs = pages.map((page) => ({ path: page!.path, sheetId: page!.sheetId, pageIndex: page!.pageIndex,
     startRow: page!.startRow, endRow: page!.endRow, pageHash: page!.pageHash, counts: page!.counts }));
   return digest(pageRefs) === capture.dataHash;
