@@ -1280,6 +1280,11 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
   expect(await financeSnapshot(page)).toEqual(financeBefore);
 
   preorderRow = page.locator("tbody tr").filter({ hasText: `Factura #${shellId.slice(0, 8).toUpperCase()}` });
+  const preorderActions = preorderRow.locator("details.ops-row-actions-disclosure");
+  await expect(preorderActions).toHaveJSProperty("open", false);
+  await expect(preorderActions.locator("summary")).toContainText("Más acciones");
+  await preorderActions.locator("summary").click();
+  await expect(preorderActions).toHaveJSProperty("open", true);
   await preorderRow.getByRole("button", { name: "Confirmar preventa", exact: true }).click();
   const confirmationDialog = page.getByTestId("appsheet-invoice-dialog");
   await expect(confirmationDialog).toBeVisible();
@@ -1638,14 +1643,15 @@ test("an empty AppSheet preorder shell saves as pending, rejects failed writes, 
 
   const malformedOrderId = randomUUID();
   const updatedLinesForMalformedOrder = updatedEnvelope.data.lines as Array<Record<string, unknown>>;
-  const secondMalformedOrderLine = { ...updatedLinesForMalformedOrder[0]!, id: randomUUID() };
+  const malformedOrderLines = updatedLinesForMalformedOrder.map(line => ({ ...line, id: randomUUID() }));
+  const secondMalformedOrderLine = { ...malformedOrderLines[0]!, id: randomUUID() };
   await postCommand(page, {
     ...updatedEnvelope,
     requestId: randomUUID(),
     targetId: malformedOrderId,
     expectedVersion: 0,
     command: "InvoiceSaved",
-    data: { ...updatedEnvelope.data, lines: [...updatedLinesForMalformedOrder, secondMalformedOrderLine] },
+    data: { ...updatedEnvelope.data, lines: [...malformedOrderLines, secondMalformedOrderLine] },
   });
   const malformedOrderBefore = await getJson(page, `orders/${encodeURIComponent(malformedOrderId)}`);
   expect(malformedOrderBefore.order.quote.input.lines).toHaveLength(2);
