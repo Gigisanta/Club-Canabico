@@ -358,7 +358,7 @@ export function appSheetSourceLotCaptureFixture(revision: string) {
     rowsWithValues: pageManifest.reduce((sum, page) => sum + page.counts.rowsWithValues, 0),
     dataRecordCount: 12, failedPages: 0, changedPages: 0, unresolvedFormulaCount: 0,
     sheets: [...pageManifest.map((page) => ({ sheetId: page.sheetId, title: page.title, pageCount: 1, verifiedPageCount: 1,
-      stablePageCount: 1, changedPageCount: 0, bodyRead: page.bodyExcluded !== true, bodyExcluded: page.bodyExcluded === true,
+      stablePageCount: 1, changedPageCount: 0, bodyRead: true, bodyExcluded: false,
       formulaCellCount: 0, unresolvedFormulaCount: 0 })),
       { sheetId: 15, title: "T_Usuarios", pageCount: 0, verifiedPageCount: 0, stablePageCount: 0,
         changedPageCount: 0, bodyRead: false, bodyExcluded: true, bodyExclusionReason: "authentication-table-body-redacted",

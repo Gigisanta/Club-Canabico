@@ -12,6 +12,10 @@ import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MAPPING_ID, APPSHEE
 import { canonicalJson } from "../shared/operations/exact.js";
 import { formatAppSheetInvoiceNumberForYear } from "../shared/operations/appsheet-invoice-rules.js";
 
+function inputJson(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
 function databaseTargetIdentity(url: URL) {
   const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   const normalizedHost = hostname === "localhost" || hostname === "::1" || hostname.startsWith("127.")
@@ -283,8 +287,8 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
       status: "staged",
       createdBy: stagerId,
       captureManifestId: capture.captureId,
-      controls: canonicalConsumerFixture.controls as Prisma.InputJsonValue,
-      coverage: canonicalConsumerFixture.coverage as Prisma.InputJsonValue,
+      controls: inputJson(canonicalConsumerFixture.controls),
+      coverage: inputJson(canonicalConsumerFixture.coverage),
     } });
     for (const record of sourceFixture.projection.records) await db.legacySourceRecord.create({ data: {
       id: record.id,
@@ -330,8 +334,8 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
         id: unsafeSnapshotId, sourceSystem: masterSnapshot.sourceSystem, filename: "synthetic-invalid-effects",
         fileHash: unsafeCapture.manifestHash, importerVersion: masterSnapshot.importerVersion, status: "staged",
         createdBy: stagerId, captureManifestId: unsafeCapture.captureId,
-        controls: { appSheetCanonical: { ...unsafeConsumer.controls.appSheetCanonical, effects } } as Prisma.InputJsonValue,
-        coverage: unsafeConsumer.coverage as Prisma.InputJsonValue,
+        controls: inputJson({ appSheetCanonical: { ...unsafeConsumer.controls.appSheetCanonical, effects } }),
+        coverage: inputJson(unsafeConsumer.coverage),
       } });
       await db.operationObject.create({ data: { id: unsafeSnapshotId, kind: "legacyImport", version: 0, createdBy: stagerId } });
       const denied = await send(envelope(unsafeSnapshotId, "AppSheetCanonicalIdentitiesReviewed", {
@@ -369,7 +373,8 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
     const recordsHash = digestValue(sourceRecords.map(record => ({ id: record.id, sourceTable: record.sourceTable,
       sourceKey: record.sourceKey, contentHash: record.contentHash })));
     const factsHash = digestValue(sourceFacts.map(fact => ({ id: fact.id, sourceRecordId: fact.sourceRecordId,
-      sourceHash: fact.sourceHash, kind: fact.kind, quantity: fact.quantity, unit: fact.unit })));
+      sourceHash: fact.sourceHash, kind: fact.kind, quantityState: fact.quantityState,
+      ...(fact.quantity === null ? {} : { quantity: fact.quantity }), unit: fact.unit })));
     const historyProjectionHash = digestValue({ schemaVersion: "appsheet-history-projection/v1", captureId: capture.captureId,
       manifestHash: capture.manifestHash, dataHash: capture.dataHash, recordsHash, factsHash });
     const inventory = sourceFixture.projection.definitionInventory;
@@ -413,7 +418,7 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
       id: historySnapshotId, sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, filename: "synthetic-source-lot-history",
       fileHash: capture.manifestHash, importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION, status: "reviewed", createdBy: stagerId,
       reviewedBy: ownerId, reviewedAt: new Date(), captureManifestId: capture.captureId,
-      controls: { appSheetHistoryStage: historyStage }, coverage: historyCoverage,
+      controls: inputJson({ appSheetHistoryStage: historyStage }), coverage: inputJson(historyCoverage),
     } });
     for (const record of sourceRecords) await db.legacySourceRecord.create({ data: {
       id: record.id, snapshotId: historySnapshotId, sourceTable: record.sourceTable, sourceKey: record.sourceKey, sourceRow: record.sourceRow,
@@ -607,9 +612,10 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
     assert.equal(confirmedInvoice.body.result.commercialState, "confirmed");
     const savedOrder = await db.operationOrder.findUniqueOrThrow({ where: { id: invoiceTargetId } });
     assert.equal((savedOrder.quote as any).input.lines[0].sourceLotId, selectedSourceLot.sourceLotId);
-    const reservations = await db.stockReservation.findMany({ where: { orderId: invoiceTargetId }, include: { balance: { include: { lot: true } } } });
+    const reservations = await db.stockReservation.findMany({ where: { orderId: invoiceTargetId } });
     assert.equal(reservations.length, 1);
-    assert.equal(reservations[0]!.balance.lot.id, internalLots.get(selectedSourceLot.sourceLotId)!.id,
+    const reservedBalance = await db.stockBalance.findUniqueOrThrow({ where: { id: reservations[0]!.balanceId } });
+    assert.equal(reservedBalance.lotId, internalLots.get(selectedSourceLot.sourceLotId)!.id,
       "explicit selection reserves the second source lot instead of native FIFO's first lot");
     assert.equal(reservations[0]!.quantity.toString(), "3");
     assert.equal((await db.stockBalance.findUniqueOrThrow({ where: { id: internalLots.get(historyRows.sourceLots[0]!.sourceLotId)!.balanceId } })).reserved.toString(), "0");

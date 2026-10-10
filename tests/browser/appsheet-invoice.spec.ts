@@ -73,7 +73,15 @@ async function addProduct(page: Page, invoice: ReturnType<Page["getByTestId"]>, 
   const product = page.getByTestId("appsheet-product-dialog");
   await expect(product).toBeVisible();
   await field(product, "line-date").fill(values.date);
-  await field(product, "line-skuId").selectOption(values.skuId);
+  const productChoice = field(product, "line-skuId");
+  const pendingChoice = productChoice.locator(`option[data-sku-id="${values.skuId}"][data-source-lot-pending="true"]`);
+  if (await pendingChoice.count() === 1) {
+    const value = await pendingChoice.getAttribute("value");
+    if (value === null) throw new Error("La opción pendiente de origen no tiene un valor seleccionable.");
+    await productChoice.selectOption(value);
+  } else {
+    await productChoice.selectOption(values.skuId);
+  }
   await setSelectOrFill(product, "line-scale", values.scale);
   await field(product, "line-quantity").fill(values.quantity);
   await field(product, "line-total").fill(values.total);
@@ -1347,6 +1355,82 @@ test("a late catalog page cannot leak rows or its cursor into a newer search", a
   expect(commandPosts).toEqual([]);
 });
 
+test("an AppSheet source-lot invoice choice transports the explicit non-FIFO SKU and lot pair", async ({ page }) => {
+  const selectedLotId = "source-lot-later-selected";
+  await page.route("**/api/operations/context", async route => {
+    const response = await route.fetch();
+    if (response.status() !== 200) return route.fulfill({ response });
+    const context = await response.json();
+    return route.fulfill({ response, json: {
+      ...context,
+      authority: { ...context.authority, mode: "active", cutoverProfile: "appsheet-replacement" },
+    } });
+  });
+  await page.route("**/api/operations/catalog**", async route => {
+    const response = await route.fetch();
+    if (response.status() !== 200) return route.fulfill({ response });
+    const body = await response.json() as { items?: Array<Record<string, unknown>> };
+    const items = (body.items ?? []).map(item => {
+      if (item.id !== "ops-sku-c") return item;
+      const appSheet = item.appSheet && typeof item.appSheet === "object" && !Array.isArray(item.appSheet)
+        ? item.appSheet as Record<string, unknown>
+        : {};
+      return {
+        ...item,
+        appSheet: { ...appSheet, availability: "Sí" },
+        requiresAppSheetSourceLot: true,
+        appSheetSourceLots: [
+          { sourceLotId: "source-lot-older-fifo", receivedDate: "2026-10-01", availableQuantity: "30" },
+          { sourceLotId: selectedLotId, receivedDate: "2026-10-08", availableQuantity: "18" },
+          { sourceLotId: "source-lot-unavailable", receivedDate: "2026-10-09", availableQuantity: "0" },
+        ],
+      };
+    });
+    return route.fulfill({ response, json: { ...body, items } });
+  });
+
+  let savedEnvelope: CommandEnvelope | null = null;
+  await page.route("**/api/operations/commands", async route => {
+    if (isCommand(route.request(), "InvoiceSaved")) {
+      savedEnvelope = route.request().postDataJSON() as CommandEnvelope;
+      return route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "Rechazo sintético: la prueba verifica el transporte sin escribir." }) });
+    }
+    return route.continue();
+  });
+
+  await enterOrders(page);
+  const invoice = await openInvoice(page);
+  const invoiceDate = "2026-10-09";
+  await field(invoice, "invoiceDate").fill(invoiceDate);
+  await selectMember(invoice, "ops-member", "Socio de ensayo");
+  await invoice.getByTestId("appsheet-add-product").click();
+  const product = page.getByTestId("appsheet-product-dialog");
+  const combinedChoice = field(product, "line-skuId");
+  await expect(field(product, "line-sourceLotId")).toHaveCount(0);
+  const selectedOption = combinedChoice.locator(`option[data-sku-id="ops-sku-c"][data-source-lot-id="${selectedLotId}"]`);
+  await expect(selectedOption).toHaveCount(1);
+  await expect(combinedChoice.locator('option[data-source-lot-id="source-lot-unavailable"]')).toHaveCount(0);
+  const selectedOptionValue = await selectedOption.getAttribute("value");
+  if (selectedOptionValue === null) throw new Error("La opción combinada de variedad y lote no tiene valor.");
+  await combinedChoice.selectOption(selectedOptionValue);
+  await expect(combinedChoice).toHaveValue(selectedOptionValue);
+  await field(product, "line-date").fill(invoiceDate);
+  await field(product, "line-scale").selectOption("Precio_5_Gramos");
+  await field(product, "line-quantity").fill("3");
+  await field(product, "line-total").fill("12.01");
+  await product.getByRole("button", { name: "Añadir producto", exact: true }).click();
+  await expect(product).toHaveCount(0);
+
+  const saveResponsePromise = saveResponse(page, "InvoiceSaved");
+  await invoice.getByTestId("appsheet-save-invoice").click();
+  const response = await saveResponsePromise;
+  expect(response.status()).toBe(422);
+  await expect(invoice.getByRole("alert")).toContainText("Rechazo sintético");
+  expect(savedEnvelope).not.toBeNull();
+  expect(savedEnvelope!.command).toBe("InvoiceSaved");
+  expect(savedEnvelope!.data.lines).toMatchObject([{ skuId: "ops-sku-c", sourceLotId: selectedLotId }]);
+});
+
 test("an empty AppSheet preorder shell saves as pending, rejects failed writes, and blocks an invalid snapshot", async ({ page }) => {
   await page.route("**/api/operations/catalog**", async route => {
     const response = await route.fetch();
@@ -1431,9 +1515,9 @@ test("an empty AppSheet preorder shell saves as pending, rejects failed writes, 
   await productRow.getByRole("button", { name: "Editar producto", exact: true }).click();
   const product = page.getByTestId("appsheet-product-dialog");
   await expect(product).toBeVisible();
-  const sourceLot = field(product, "line-sourceLotId");
-  await expect(sourceLot).toHaveValue("");
-  await expect(sourceLot).not.toHaveAttribute("required", "");
+  const productChoice = field(product, "line-skuId");
+  expect(await productChoice.inputValue()).toContain("appsheet-source-lot-pending:");
+  await expect(field(product, "line-sourceLotId")).toHaveCount(0);
   await product.getByRole("button", { name: "Guardar cambios", exact: true }).click();
   await expect(product).toHaveCount(0);
   await expect(editor.getByTestId("appsheet-save-invoice")).toBeEnabled();
