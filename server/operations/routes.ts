@@ -3,7 +3,8 @@ import { Prisma, type AccountReconciliation } from "@prisma/client";
 import { z } from "zod";
 import { db } from "../db.js";
 import { capabilities, requireCapability, executeCommand, commandSpecs, envelopeSchema, wire, OperationError, requireMemberScope, requireAccountScope, objectScope } from "./core.js";
-import { appSheetReplacementCanonicalMemberIds, requireEligibleAppSheetReplacementMember } from "./access.js";
+import { appSheetReplacementCanonicalMemberIds, eligibleAppSheetCanonicalSkuIds, requireEligibleAppSheetReplacementMember } from "./access.js";
+import { APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../../shared/operations/appsheet-canonical.js";
 import { projectAppSheetCatalogue } from "./appsheet-catalogue.js";
 import { projectInvoiceAmount } from "./invoice-projection.js";
 import "./commercial.js";
@@ -13,6 +14,7 @@ import "./orders.js";
 import { memberHistory } from "./member-history.js";
 import { productHistory } from "./product-history.js";
 import { resolveStockAvailability } from "./stock-availability.js";
+import { listAppSheetSourceLotOptions } from "./stock.js";
 import { manualReferenceDataRoutes } from "./reference-data.js";
 import { buildOperationAccessSnapshot } from "./access-snapshot.js";
 export const operationsRoutes=Router();
@@ -110,10 +112,22 @@ operationsRoutes.get("/catalog",async(req,res)=>{
  const balanceScope:Prisma.StockBalanceWhereInput={...(scope.locationIds?{locationId:{in:scope.locationIds}}:{}),...(scope.custodianIds?{custodianId:{in:scope.custodianIds}}:{})};
  const skus=await db.catalogSku.findMany({where,orderBy:[{category:"asc"},{name:"asc"},{id:"asc"}],include:{lots:{where:{balances:{some:{...balanceScope,OR:[{quantity:{gt:0}},{reserved:{gt:0}}]}}},include:{balances:{where:balanceScope}}}},take:limit+1,...(cursor?{cursor:{id:cursor},skip:1}:{})});
  const visible=skus.slice(0,limit),caps=await capabilities(db,req.user);
- const asOf=new Intl.DateTimeFormat("en-CA",{timeZone:"America/Argentina/Buenos_Aires"}).format(new Date());
+ const now=new Date(),asOf=new Intl.DateTimeFormat("en-CA",{timeZone:"America/Argentina/Buenos_Aires"}).format(now);
  const availability=await resolveStockAvailability(db,{balances:visible.flatMap(s=>s.lots.flatMap(l=>l.balances.map(b=>({...b,lot:{skuId:s.id}})))),channel,asOf,rehearsal:process.env.DEMO_MODE==="true"||process.env.NODE_ENV==="test"||process.env.OPERATIONAL_REHEARSAL==="true"});
  const byBalance=new Map(availability.balances.map(b=>[b.balanceId,b]));
- const items=visible.map(s=>({...s,lots:s.lots.map(l=>({...l,unitCost:caps.includes("finance.read")||caps.includes("stock.read")?l.unitCost:null,balances:l.balances.map(b=>{const a=byBalance.get(b.id);return {...b,availableQuantity:a?.availableQuantity??"0",availabilityState:a?.state??"pending",availabilityReason:a?.reason??"Falta cobertura",availabilityVersion:a?.version??null};})}))}));
+ const authority=await db.operationAuthority.findUnique({where:{id:"operations"},select:{mode:true,cutoverProfile:true,captureManifestId:true}});
+ const activeReplacement=authority?.mode==="active"&&authority.cutoverProfile==="appsheet-replacement";
+ const canonicalSkuIds=visible.filter(s=>s.sourceSystem===APPSHEET_CANONICAL_SOURCE_SYSTEM&&s.sourceId!==null).map(s=>s.id);
+ const eligibleCanonicalSkuIds=activeReplacement?await eligibleAppSheetCanonicalSkuIds(db,authority.captureManifestId,canonicalSkuIds):new Set<string>();
+ const items=await Promise.all(visible.map(async s=>{
+  const lots=s.lots.map(l=>({...l,unitCost:caps.includes("finance.read")||caps.includes("stock.read")?l.unitCost:null,balances:l.balances.map(b=>{const a=byBalance.get(b.id);return {...b,availableQuantity:a?.availableQuantity??"0",availabilityState:a?.state??"pending",availabilityReason:a?.reason??"Falta cobertura",availabilityVersion:a?.version??null};})}));
+  const appSheetSourceLots=activeReplacement?await listAppSheetSourceLotOptions(db,req.user,now,s.id,lots.map(l=>({
+   lot:{id:l.id,skuId:s.id,unit:l.unit,receivedAt:l.receivedAt,sourceSystem:l.sourceSystem,sourceId:l.sourceId},
+   balances:l.balances.map(b=>({unit:b.unit,availabilityState:b.availabilityState,availableQuantity:b.availableQuantity})),
+  }))):undefined;
+  const requiresAppSheetSourceLot=s.sourceSystem===APPSHEET_CANONICAL_SOURCE_SYSTEM&&s.sourceId!==null;
+  return {...s,lots,requiresAppSheetSourceLot,appSheetSourceLotEligible:eligibleCanonicalSkuIds.has(s.id),...(activeReplacement?{appSheetSourceLots}: {})};
+ }));
  res.json(wire({items,versions:await versions(visible.map(s=>s.id)),hasMore:skus.length>limit,nextCursor:skus.length>limit?visible.at(-1)!.id:null,channel,availabilityCoverage:availability.coverage,availability:"approved-location-custody-channel-minus-reservations"}));
 });
 operationsRoutes.get("/catalogue-sheets",async(req,res)=>{

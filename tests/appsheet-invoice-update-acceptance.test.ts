@@ -3,7 +3,7 @@ import test from "node:test";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import bcrypt from "bcryptjs";
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import { splitSqlStatements } from "./migration-sql.js";
 import {
   APPSHEET_HISTORY_IMPORTER_VERSION,
@@ -155,7 +155,7 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
       cutoffAt: captureNow,
       dataCoverage: { syntheticTestFixture: true },
       pageManifest: [],
-      definitionCoverage: null,
+      definitionCoverage: Prisma.DbNull,
       dataSheetCount: 0,
       dataPageCount: 0,
       dataRecordCount: 0,

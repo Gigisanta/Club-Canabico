@@ -439,7 +439,8 @@ test("pending AppSheet captures stay outside official reports while generic orde
     && row.state === "partial" && row.knownCount === 0 && row.expectedCount === 2));
 
   const segmentation = await reportTestSchema!.queries.queryOperationsReport("customer-segmentation", { from: civilDate, to: civilDate });
-  assert.equal(segmentation.metrics.currentOperationOrderCount, 2);
+  // The five confirmed fixtures also supply the current-operation population as of this date.
+  assert.equal(segmentation.metrics.currentOperationOrderCount, 5);
   assert.equal(segmentation.metrics.sourceRowsComplete, true);
   assert.equal(segmentation.metrics.segmentationSummaryComplete, true);
   assert.equal(segmentation.metrics.segmentationDataComplete, false);

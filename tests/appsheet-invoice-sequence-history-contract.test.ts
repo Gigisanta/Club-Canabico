@@ -7,6 +7,7 @@ import { splitSqlStatements } from "./migration-sql.js";
 import { previewAppSheetInvoiceSequenceSeed } from "../server/operations/appsheet-invoice-sequence.js";
 import { OperationError } from "../server/operations/core.js";
 import {
+  AppSheetHistoryStageError,
   prepareAppSheetHistoryProjection,
   stageAppSheetHistoryProjection,
   type AppSheetHistoryDefinition,
@@ -121,13 +122,38 @@ function historyDefinition(): AppSheetHistoryDefinition {
   const descriptorSha256 = sha256("synthetic AppSheet definition descriptor");
   const tableNames = ["C_Cliente", "D_Catalogo_Mercaderia", "C_Facturacion", "C_Detalle_Fact", "Movimiento_Nueva", "T_Usuarios"];
   return {
-    inventory: { source: { sha256: sourceSha256 }, descriptorSha256, app: { id: APPSHEET_EXPECTED_LIVE_APP_ID }, observedCounts: {},
+    inventory: { parserVersion: "bombo-appsheet-definition/1.2.0", source: { sha256: sourceSha256 }, descriptorSha256,
+      app: { id: APPSHEET_EXPECTED_LIVE_APP_ID }, observedCounts: {},
       sections: [{ category: "tables", title: "Tables", sectionPath: ["Tables"], evidenceId: "synthetic-table-inventory",
         records: tableNames.map((name) => ({ category: "tables", name, fields: [], evidenceId: `synthetic-${name}`, children: [] })) }] },
     sourceSha256, descriptorSha256, fileSha256: sha256("synthetic AppSheet definition file"),
     appliedDefinitionHash: sha256(canonicalJson({ sourceSha256, descriptorSha256 })), identityState: "verified",
   } as unknown as AppSheetHistoryDefinition;
 }
+
+test("history staging rejects a missing definition parser version before starting a transaction", async () => {
+  const capture = historyCapture();
+  const definition = historyDefinition();
+  delete (definition.inventory as Partial<typeof definition.inventory>).parserVersion;
+  const prepared = prepareAppSheetHistoryProjection(capture, definition);
+  const actorId = `history-stage-${randomUUID()}`;
+  const commitSha = "a".repeat(40);
+  const destinationIdentity = historyTestDestinationIdentity;
+  const technicalReview = {
+    schemaVersion: 2, reviewKind: "independent-technical", captureId: capture.manifest.captureId,
+    manifestHash: capture.manifest.manifestHash, definitionHash: definition.appliedDefinitionHash,
+    projectionKind: "history", projectionHash: prepared.projectionHash, commitSha,
+    target: "isolated-test", destinationIdentity, importer: APPSHEET_HISTORY_IMPORTER_VERSION,
+    reviewer: "synthetic-independent-reviewer", approved: true, reviewedAt: "2026-10-09T12:00:00.000Z", findings: [],
+  };
+  let transactionCount = 0;
+  const client = { $transaction: async () => { transactionCount++; throw new Error("must_not_start"); } } as unknown as PrismaClient;
+  await assert.rejects(stageAppSheetHistoryProjection(prepared, {
+    actorId, technicalReview, commitSha, target: "isolated-test", destinationIdentity,
+    backupEvidence: { manifestHash: sha256("synthetic backup metadata fixture"), snapshotAt: "2026-10-09T12:05:00.000Z" },
+  }, client), (error) => error instanceof AppSheetHistoryStageError && error.code === "definition_parser_version_invalid");
+  assert.equal(transactionCount, 0);
+});
 
 test("history writer persists its stable top-level coverage for invoice-sequence preview", {
   skip: !process.env.TEST_DATABASE_URL,

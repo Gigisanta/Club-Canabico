@@ -23,31 +23,32 @@ export type AppSheetExactTariffField = (typeof appSheetExactTariffFields)[AppShe
 type ExactMinor = { numerator: string; denominator: string };
 type ProposalPhase = { phase: "initial-value-proposal"; scale: string };
 
+export type AppSheetLineSubtotalProposal =
+  | { status: "defined"; quantityGrams: string; subtotalMinorExact: ExactMinor; subtotalMinor: string }
+  | { status: "pending"; reason: "invalid_quantity" | "needsRoundEvidence" | "subtotal_overflow"; quantityGrams: string; subtotalMinorExact?: ExactMinor };
+
 export type AppSheetLinePricingProposal =
   | (ProposalPhase & {
     status: "defined";
     sourceField: AppSheetExactTariffField;
-    quantityGrams: string;
     unitPriceMinor: string;
     currency: AppSheetCatalogueMoney["currency"];
-    subtotalMinorExact: ExactMinor;
-    subtotalMinor: string;
+    subtotal: AppSheetLineSubtotalProposal;
   })
   | (ProposalPhase & {
     status: "pending";
-    reason: "unknown_scale" | "missing_price" | "invalid_price" | "currency_mismatch" | "invalid_quantity" | "needsRoundEvidence";
+    reason: "unknown_scale" | "missing_price" | "invalid_price" | "currency_mismatch";
     sourceField?: AppSheetExactTariffField;
-    quantityGrams?: string;
     unitPriceMinor?: string;
     currency?: AppSheetCatalogueMoney["currency"];
-    subtotalMinorExact?: ExactMinor;
   });
 
 const MAX_MINOR = 9223372036854775807n;
 
 /**
- * Proposes AppSheet's initial line value from exact catalogue fields only.
- * It does not approve a price or recalculate a line after the initial-value phase.
+ * Proposes AppSheet's current Initial Value from the exact tariff field. AppSheet
+ * reevaluates an Initial Value until the user supplies one, so this function is
+ * intentionally stateless and can be called as the new line changes.
  */
 export function proposeAppSheetLinePricingInitialValue(input: {
   catalogue: AppSheetCatalogueData;
@@ -82,44 +83,31 @@ export function proposeAppSheetLinePricingInitialValue(input: {
     };
   }
 
-  const quantity = parseDecimal(input.quantityGrams);
-  if (!quantity) {
-    return {
-      ...base,
-      status: "pending",
-      reason: "invalid_quantity",
-      sourceField,
-      quantityGrams: input.quantityGrams,
-      unitPriceMinor: selected.amountMinor,
-      currency: selected.currency,
-    };
-  }
-
-  const subtotal = reduce({ numerator: unitPriceMinor * quantity.numerator, denominator: quantity.denominator });
-  const subtotalMinorExact = { numerator: subtotal.numerator.toString(), denominator: subtotal.denominator.toString() };
-  if (subtotal.denominator !== 1n) {
-    return {
-      ...base,
-      status: "pending",
-      reason: "needsRoundEvidence",
-      sourceField,
-      quantityGrams: input.quantityGrams,
-      unitPriceMinor: selected.amountMinor,
-      currency: selected.currency,
-      subtotalMinorExact,
-    };
-  }
-
   return {
     ...base,
     status: "defined",
     sourceField,
-    quantityGrams: input.quantityGrams,
     unitPriceMinor: selected.amountMinor,
     currency: selected.currency,
-    subtotalMinorExact,
-    subtotalMinor: subtotal.numerator.toString(),
+    subtotal: proposeAppSheetLineSubtotal({ unitPriceMinor: selected.amountMinor, quantityGrams: input.quantityGrams }),
   };
+}
+
+/** Proposes the independently editable line total, with no fractional-cent rounding. */
+export function proposeAppSheetLineSubtotal(input: { unitPriceMinor: string; quantityGrams: string }): AppSheetLineSubtotalProposal {
+  if (!/^(0|[1-9]\d{0,18})$/.test(input.unitPriceMinor)) {
+    return { status: "pending", reason: "subtotal_overflow", quantityGrams: input.quantityGrams };
+  }
+  const unitPriceMinor = BigInt(input.unitPriceMinor);
+  if (unitPriceMinor > MAX_MINOR) return { status: "pending", reason: "subtotal_overflow", quantityGrams: input.quantityGrams };
+  const quantity = parseDecimal(input.quantityGrams);
+  if (!quantity) return { status: "pending", reason: "invalid_quantity", quantityGrams: input.quantityGrams };
+
+  const subtotal = reduce({ numerator: unitPriceMinor * quantity.numerator, denominator: quantity.denominator });
+  const subtotalMinorExact = { numerator: subtotal.numerator.toString(), denominator: subtotal.denominator.toString() };
+  if (subtotal.denominator !== 1n) return { status: "pending", reason: "needsRoundEvidence", quantityGrams: input.quantityGrams, subtotalMinorExact };
+  if (subtotal.numerator > MAX_MINOR) return { status: "pending", reason: "subtotal_overflow", quantityGrams: input.quantityGrams, subtotalMinorExact };
+  return { status: "defined", quantityGrams: input.quantityGrams, subtotalMinorExact, subtotalMinor: subtotal.numerator.toString() };
 }
 
 function parseDecimal(value: string): { numerator: bigint; denominator: bigint } | null {

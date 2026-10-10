@@ -3,7 +3,7 @@ import { apiGet, hasCapability, hasCommand, isUncertainCommandOutcome } from "./
 import { amountFormToMinor, formatMinor } from "./money";
 import { calculateAppSheetInvoiceFinancials } from "../../shared/operations/appsheet-invoice-rules";
 import { appSheetCatalogueStoredSchema } from "../../shared/operations/appsheet-catalogue";
-import { proposeAppSheetLinePricingInitialValue } from "../../shared/operations/appsheet-line-pricing";
+import { proposeAppSheetLinePricingInitialValue, proposeAppSheetLineSubtotal } from "../../shared/operations/appsheet-line-pricing";
 import { RemoteSelect } from "./RemoteSelect";
 import type { OperationsContext, RunCommand } from "./types";
 import "./appsheet-invoice-form.css";
@@ -12,7 +12,7 @@ type Row = Record<string, unknown>;
 type EditorMode = "invoice" | "preorder" | "edit-preorder" | "confirm-preorder";
 type Payment = "cash" | "transfer" | "mercado_pago" | "card";
 type NewMemberDraft = { name: string; email: string; phone: string; address: string };
-type InvoiceLineDraft = { id: string; skuId: string; date: string; scale: string; quantity: string; total: string; pricePerGram: string; priceInitialEvaluated: boolean };
+type InvoiceLineDraft = { id: string; skuId: string; sourceLotId: string; date: string; scale: string; quantity: string; total: string; pricePerGram: string; priceManual: boolean; totalManual: boolean };
 type MotoDraft = {
   deliveryDate: string;
   paymentMethod: Payment;
@@ -61,6 +61,10 @@ function civilDate(timeZone: string) {
 }
 
 function objectValue(value: unknown): Row { return value && typeof value === "object" && !Array.isArray(value) ? value as Row : {}; }
+function sourceLotOptions(item: Row | undefined): Row[] {
+  const value = item?.appSheetSourceLots;
+  return Array.isArray(value) ? value.filter((row): row is Row => Boolean(row) && typeof row === "object" && !Array.isArray(row)) : [];
+}
 function stringValue(value: unknown, fallback = "") { return typeof value === "string" ? value : fallback; }
 function minorToForm(value: unknown) {
   if (typeof value !== "string" || !/^\d+$/.test(value)) return "";
@@ -88,9 +92,9 @@ function fromSnapshot(order: Row | undefined, fallbackDate: string): InvoiceDraf
   const input = objectValue(quote.input);
   if (quote.source !== "appsheet-invoice" || !Object.keys(input).length) return null;
   const lines = Array.isArray(input.lines) ? input.lines.filter((item): item is Row => Boolean(item) && typeof item === "object").map(line => ({
-    id: stringValue(line.id, crypto.randomUUID()), skuId: stringValue(line.skuId), date: stringValue(line.date, stringValue(input.invoiceDate, fallbackDate)),
+    id: stringValue(line.id, crypto.randomUUID()), skuId: stringValue(line.skuId), sourceLotId: stringValue(line.sourceLotId), date: stringValue(line.date, stringValue(input.invoiceDate, fallbackDate)),
     scale: stringValue(line.scale), quantity: stringValue(line.quantity), total: minorToForm(line.totalMinor),
-    pricePerGram: minorToForm(line.pricePerGramMinor), priceInitialEvaluated: true,
+    pricePerGram: minorToForm(line.pricePerGramMinor), priceManual: true, totalManual: true,
   })) : [];
   const motoValue = objectValue(input.moto);
   const payment = (value: unknown): Payment => value === "transfer" || value === "mercado_pago" || value === "card" ? value : "cash";
@@ -275,36 +279,48 @@ export function AppSheetInvoiceForm(props: Props) {
   function openProduct(index?: number) {
     const existing = index === undefined ? null : draft.lines[index] ?? null;
     setProductIndex(index ?? null);
-    setProductDraft(existing ? { ...existing } : { id: crypto.randomUUID(), skuId: "", date: draft.invoiceDate, scale: "", quantity: "", total: "", pricePerGram: "", priceInitialEvaluated: false });
+    setProductDraft(existing ? { ...existing } : { id: crypto.randomUUID(), skuId: "", sourceLotId: "", date: draft.invoiceDate, scale: "", quantity: "", total: "", pricePerGram: "", priceManual: false, totalManual: false });
     setStage("product");
     setError("");
   }
   function maybeSetInitialPricePerGram(line: InvoiceLineDraft): InvoiceLineDraft {
-    if (!replacementProfile || mode !== "invoice" || productIndex !== null || line.priceInitialEvaluated || line.pricePerGram.trim()) return line;
-    if (!line.skuId || !line.scale || !invoiceQuantityValid(line.quantity, true)) return line;
+    if (!replacementProfile || mode !== "invoice" || productIndex !== null) return line;
+    let next = line;
+    let proposedPriceMinor: string | undefined;
+    if (!line.priceManual) {
+      const item = line.skuId && line.scale
+        ? catalog.find(candidate => String(candidate.id) === line.skuId && invoiceSkuSelectable(candidate, true))
+        : undefined;
+      const catalogue = item ? appSheetCatalogueStoredSchema.safeParse(objectValue(item.appSheet)) : null;
+      const proposal = catalogue?.success ? proposeAppSheetLinePricingInitialValue({
+        catalogue: catalogue.data,
+        scale: line.scale,
+        quantityGrams: line.quantity.trim().replace(",", "."),
+        expectedCurrency: draft.currency,
+      }) : null;
+      proposedPriceMinor = proposal?.status === "defined" ? proposal.unitPriceMinor : undefined;
+      next = { ...next, pricePerGram: proposedPriceMinor === undefined ? "" : minorToForm(proposedPriceMinor) };
+    }
 
-    // AppSheet Initial Value is a one-time proposal for a new, confirmed invoice line.
-    // Never recalculate it after the line is edited or reopened, and never derive it from Valor total.
-    const evaluated = { ...line, priceInitialEvaluated: true };
-    const item = catalog.find(candidate => String(candidate.id) === line.skuId && invoiceSkuSelectable(candidate, true));
-    if (!item) return evaluated;
-    const catalogue = appSheetCatalogueStoredSchema.safeParse(objectValue(item.appSheet));
-    if (!catalogue.success) return evaluated;
-    const proposal = proposeAppSheetLinePricingInitialValue({
-      catalogue: catalogue.data,
-      scale: line.scale,
-      quantityGrams: line.quantity.trim().replace(",", "."),
-      expectedCurrency: draft.currency,
-    });
-    return proposal.status === "defined"
-      ? { ...evaluated, pricePerGram: minorToForm(proposal.unitPriceMinor) }
-      : evaluated;
+    if (!line.totalManual) {
+      let unitPriceMinor = proposedPriceMinor;
+      if (line.priceManual && line.pricePerGram.trim()) {
+        try { unitPriceMinor = amountFormToMinor(line.pricePerGram); } catch { unitPriceMinor = undefined; }
+      }
+      const subtotal = unitPriceMinor === undefined ? null : proposeAppSheetLineSubtotal({
+        unitPriceMinor,
+        quantityGrams: line.quantity.trim().replace(",", "."),
+      });
+      next = { ...next, total: subtotal?.status === "defined" ? minorToForm(subtotal.subtotalMinor) : "" };
+    }
+    return next;
   }
-  function updateProductField(field: "id" | "skuId" | "date" | "scale" | "quantity" | "total" | "pricePerGram", value: string) {
+  function updateProductField(field: "id" | "skuId" | "sourceLotId" | "date" | "scale" | "quantity" | "total" | "pricePerGram", value: string) {
     setProductDraft(current => {
       if (!current) return current;
-      const updated: InvoiceLineDraft = { ...current, [field]: value };
-      if (field === "pricePerGram") return { ...updated, priceInitialEvaluated: true };
+      const updated: InvoiceLineDraft = { ...current, [field]: value, ...(field === "skuId" ? { sourceLotId: "" } : {}) };
+      if (field === "pricePerGram") return maybeSetInitialPricePerGram({ ...updated, priceManual: Boolean(value.trim()) });
+      if (field === "total") return maybeSetInitialPricePerGram({ ...updated, totalManual: Boolean(value.trim()) });
       if (field === "skuId" || field === "scale" || field === "quantity") return maybeSetInitialPricePerGram(updated);
       return updated;
     });
@@ -321,6 +337,20 @@ export function AppSheetInvoiceForm(props: Props) {
     const retainedHistoricalSku = replacementProfile && mode === "edit-preorder" && productIndex !== null && initial.lines.some(line => line.id === submittedDraft.id && line.skuId === submittedDraft.skuId);
     if (!selected && !retainedHistoricalSku) {
       setError("La variedad seleccionada ya no está disponible para nuevas líneas. Conservamos el borrador; elegí otra o verificá el catálogo antes de continuar.");
+      return;
+    }
+    const requiresSelectedSourceLot = activeReplacement && selected?.requiresAppSheetSourceLot === true && mode !== "preorder";
+    const sourceLotOptionsForLine = sourceLotOptions(selected);
+    if (requiresSelectedSourceLot && (!submittedDraft.sourceLotId || !sourceLotOptionsForLine.some(option => stringValue(option.sourceLotId) === submittedDraft.sourceLotId))) {
+      setError("Elegí un lote de origen con disponibilidad actual para cada producto antes de guardar la factura.");
+      return;
+    }
+    if (activeReplacement && submittedDraft.sourceLotId && selected?.requiresAppSheetSourceLot !== true) {
+      setError("Los productos nativos no usan lotes de origen AppSheet. Volvé a seleccionar el producto para limpiar esa referencia.");
+      return;
+    }
+    if (activeReplacement && selected?.requiresAppSheetSourceLot === true && mode === "preorder" && submittedDraft.sourceLotId && !sourceLotOptionsForLine.some(option => stringValue(option.sourceLotId) === submittedDraft.sourceLotId)) {
+      setError("El lote guardado ya no tiene disponibilidad actual. Elegí otro o dejá la selección vacía para resolverlo al editar la preventa.");
       return;
     }
     if (!submittedDraft.date) { setError("Completá la fecha del producto."); return; }
@@ -341,7 +371,8 @@ export function AppSheetInvoiceForm(props: Props) {
       ...submittedDraft,
       total: minorToForm(totalMinor),
       pricePerGram: pricePerGramMinor === undefined ? "" : minorToForm(pricePerGramMinor),
-      priceInitialEvaluated: true,
+      priceManual: true,
+      totalManual: true,
       skuId: submittedDraft.skuId,
     };
     setDraft(current => {
@@ -461,6 +492,7 @@ export function AppSheetInvoiceForm(props: Props) {
       return {
         id: line.id, skuId: line.skuId, date: line.date, scale: line.scale,
         quantity: line.quantity.trim().replace(",", "."), totalMinor: amountFormToMinor(line.total),
+        ...(line.sourceLotId ? { sourceLotId: line.sourceLotId } : {}),
         ...(pricePerGramMinor === undefined ? {} : { pricePerGramMinor }),
       };
     });
@@ -503,6 +535,24 @@ export function AppSheetInvoiceForm(props: Props) {
             ? "La variedad no aparece entre las páginas cargadas. Cargá más variedades para verificarla; conservamos la línea del borrador."
             : "La variedad seleccionada dejó de estar disponible. Conservamos la línea del borrador; elegí una variedad disponible o quitá esa línea antes de guardar.");
         return;
+      }
+      if (activeReplacement && mode !== "preorder") {
+        if (catalogLoading || catalogError) {
+          setError(catalogError
+            ? "No se pudo verificar la disponibilidad de lotes. Reintentá la carga antes de guardar; conservamos el borrador."
+            : "Esperá a que termine la verificación de lotes antes de guardar; conservamos el borrador.");
+          return;
+        }
+        const missingSourceLot = draft.lines.find(line => {
+          const product = catalog.find(item => String(item.id) === line.skuId);
+          if (product?.requiresAppSheetSourceLot !== true) return false;
+          const options = sourceLotOptions(product);
+          return !line.sourceLotId || !options.some(option => stringValue(option.sourceLotId) === line.sourceLotId);
+        });
+        if (missingSourceLot) {
+          setError("Cada producto necesita un lote de origen con disponibilidad actual. Editá la línea, elegí un lote vigente y guardá de nuevo.");
+          return;
+        }
       }
     }
     submitting.current = true; setBusy(true);
@@ -572,6 +622,9 @@ export function AppSheetInvoiceForm(props: Props) {
   };
   const canCreateMember = mode !== "edit-preorder" && mode !== "confirm-preorder" && hasCommand(context, "MemberCreated") && hasCapability(context, "members.write") && hasCapability(context, "members.read");
   const saleProducts = catalog.filter(item => invoiceSkuSelectable(item, replacementProfile));
+  const activeReplacement = replacementProfile && context.authority.mode === "active";
+  const selectedProduct = productDraft ? catalog.find(item => String(item.id) === productDraft.skuId) : undefined;
+  const selectedSourceLots = sourceLotOptions(selectedProduct);
   const retainedProductIsHistorical = Boolean(productDraft && replacementProfile && mode === "edit-preorder" && initial.lines.some(line => line.id === productDraft.id && line.skuId === productDraft.skuId));
   const isRetainedHistoricalLine = (line: InvoiceLineDraft) =>
     replacementProfile && mode === "edit-preorder" && initial.lines.some(original => original.id === line.id && original.skuId === line.skuId);
@@ -609,6 +662,19 @@ export function AppSheetInvoiceForm(props: Props) {
   }) : null;
   const quote = objectValue(confirmation?.quote);
   const savedLines = Array.isArray(quote.lines) ? quote.lines.filter((item): item is Row => Boolean(item) && typeof item === "object") : [];
+  const savedInput = objectValue(quote.input);
+  const savedInputLines = Array.isArray(savedInput.lines)
+    ? savedInput.lines.filter((item): item is Row => Boolean(item) && typeof item === "object")
+    : savedLines;
+  const unboundConfirmedSourceLot = activeReplacement && !catalogLoading && !catalogError
+    ? savedInputLines.find(line => {
+      const product = catalog.find(item => String(item.id) === stringValue(line.skuId));
+      if (product?.requiresAppSheetSourceLot !== true) return false;
+      const sourceLotId = stringValue(line.sourceLotId);
+      const options = sourceLotOptions(product);
+      return !sourceLotId || !options.some(option => stringValue(option.sourceLotId) === sourceLotId);
+    })
+    : undefined;
   const blankPreorder = confirming && savedLines.length === 0;
 
   return <dialog className="ops-dialog appsheet-invoice-dialog" ref={dialog} data-testid="appsheet-invoice-dialog" aria-labelledby="appsheet-invoice-title" onCancel={event => { event.preventDefault(); close(); }}>
@@ -633,9 +699,13 @@ export function AppSheetInvoiceForm(props: Props) {
           {savedLines.map((line, index) => <p key={stringValue(line.id, String(index))}>{stringValue(line.date)} · {stringValue(line.scale, "Escala sin dato")} · {stringValue(line.quantity, stringValue(line.requested))} g · {formatMinor(line.explicitTotalMinor, quote.currency)}</p>)}
           {Boolean(objectValue(quote.moto).deliveryDate) && <p>Viaje en moto · {stringValue(objectValue(quote.moto).deliveryDate)} · {stringValue(objectValue(quote.moto).destination)}</p>}
         </section>}
+        {unboundConfirmedSourceLot && <p className="ops-inline-error" role="alert">Esta preventa no tiene un lote de origen con disponibilidad actual para cada producto. Abrí «Formulario de venta», elegí un lote vigente y guardá los cambios antes de confirmar.</p>}
+        {unboundConfirmedSourceLot && hasMoreCatalog && !catalog.some(item => String(item.id) === stringValue(unboundConfirmedSourceLot.skuId)) && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={loadMoreCatalog} disabled={catalogLoading}>Cargar más variedades para verificar el lote</button>}
+        {activeReplacement && catalogLoading && <p role="status">Verificando la disponibilidad de lotes de origen…</p>}
+        {activeReplacement && catalogError && <p className="ops-inline-error" role="alert">No se pudo verificar la disponibilidad de lotes. Reintentá cargar el catálogo antes de confirmar.</p>}
         {confirmation && !blankPreorder && <label className="ops-field appsheet-field" htmlFor="appsheet-acceptance"><span>Aceptación registrada</span><textarea id="appsheet-acceptance" name="acceptance" value={confirmationEvidence} onChange={event => setConfirmationEvidence(event.target.value)} maxLength={2000} required disabled={busy || uncertain} /></label>}
         {uncertain && <p className="appsheet-pending" role="alert">Confirmación pendiente: se pudo confirmar la preventa. Conservá la evidencia y reintentá exactamente la misma acción.</p>}
-        <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={close} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" data-testid={uncertain ? "appsheet-retry-confirm-preorder" : "appsheet-confirm-preorder"} disabled={busy || confirmationLoading || !confirmation || blankPreorder || !Number.isSafeInteger(confirmationVersion) || !confirmationEvidence.trim()}>{busy ? "Confirmando…" : uncertain ? "Reintentar confirmación" : "Confirmar preventa"}</button></footer>
+        <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={close} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" data-testid={uncertain ? "appsheet-retry-confirm-preorder" : "appsheet-confirm-preorder"} disabled={busy || confirmationLoading || !confirmation || blankPreorder || Boolean(unboundConfirmedSourceLot) || (activeReplacement && (catalogLoading || Boolean(catalogError))) || !Number.isSafeInteger(confirmationVersion) || !confirmationEvidence.trim()}>{busy ? "Confirmando…" : uncertain ? "Reintentar confirmación" : "Confirmar preventa"}</button></footer>
       </form> : <form className="appsheet-invoice-body" onSubmit={event => void saveInvoice(event)} aria-busy={busy}>
         {creatingShell ? <div className="appsheet-shell-grid">
           <label className="ops-field appsheet-field"><span>Fecha</span><input name="invoiceDate" data-testid="invoiceDate" aria-label="Fecha" type="date" value={draft.invoiceDate} disabled /></label>
@@ -666,10 +736,11 @@ export function AppSheetInvoiceForm(props: Props) {
             <h3>Productos de la factura</h3>
             {draft.lines.length ? <ul className="appsheet-dialog-lines">{draft.lines.map((line, index) => {
               const product = catalog.find(item => String(item.id) === line.skuId);
+              const sourceLot = sourceLotOptions(product).find(option => stringValue(option.sourceLotId) === line.sourceLotId);
               const skuNeedsAttention = replacementProfile && !saleProducts.some(item => String(item.id) === line.skuId);
               const lineTotalMinor = amountMinorOrNull(line.total);
               return <li className="appsheet-dialog-line" key={line.id} data-testid={`appsheet-product-row-${line.id}`}>
-                <div><strong>{stringValue(product?.name, line.skuId || "Producto")}</strong><span>{line.date} · {line.scale || "Escala sin dato"} · {line.quantity} g · {lineTotalMinor === null ? "Importe pendiente de corregir" : formatMinor(lineTotalMinor.toString(), draft.currency)}</span>{skuNeedsAttention && <small className="appsheet-subtle-error" role="alert">{lineSkuAttentionMessage(line)}</small>}</div>
+                <div><strong>{stringValue(product?.name, line.skuId || "Producto")}</strong><span>{line.date} · {line.scale || "Escala sin dato"} · {line.quantity} g · {lineTotalMinor === null ? "Importe pendiente de corregir" : formatMinor(lineTotalMinor.toString(), draft.currency)}{line.sourceLotId ? ` · Lote ${sourceLot?.receivedDate ?? "sin disponibilidad actual"}${sourceLot ? ` · ${sourceLot.availableQuantity} g disponibles` : ""}` : activeReplacement && product?.requiresAppSheetSourceLot === true ? " · lote pendiente" : ""}</span>{skuNeedsAttention && <small className="appsheet-subtle-error" role="alert">{lineSkuAttentionMessage(line)}</small>}</div>
                 <div className="appsheet-line-actions"><button type="button" className="ops-button ops-button-quiet ops-button-small" data-testid={`appsheet-edit-product-${line.id}`} onClick={() => openProduct(index)} disabled={busy || uncertain}>Editar producto</button><button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={() => removeProduct(index)} disabled={busy || uncertain}>Quitar</button></div>
               </li>;
             })}</ul> : <p className="appsheet-footnote">Todavía no agregaste productos.</p>}
@@ -748,13 +819,14 @@ export function AppSheetInvoiceForm(props: Props) {
             <label className="ops-field appsheet-field"><span>ID. Factura</span><input aria-label="ID. Factura" value={draft.invoiceNumber || "Se asigna al guardar"} readOnly /></label>
             <label className="ops-field appsheet-field"><span>Fecha</span><input name="line-date" data-testid="line-date" aria-label="Fecha del producto" type="date" value={productDraft.date} onChange={event => updateProductField("date", event.target.value)} required /></label>
             <label className="ops-field appsheet-field"><span>Variedad</span><select name="line-skuId" data-testid="line-skuId" aria-label="Variedad" value={productDraft.skuId} onChange={event => updateProductField("skuId", event.target.value)} required><option value="">Elegí variedad</option>{productDraft.skuId && !saleProducts.some(item => String(item.id) === productDraft.skuId) && <option value={productDraft.skuId}>{stringValue(catalog.find(item => String(item.id) === productDraft.skuId)?.name, productDraft.skuId)} · {retainedProductIsHistorical ? "guardada en la preventa" : "no disponible; borrador conservado"}</option>}{saleProducts.map(item => <option key={String(item.id)} value={String(item.id)}>{stringValue(item.name, stringValue(item.code, String(item.id)))}</option>)}</select>{catalogLoading && <small role="status">Cargando variedades…</small>}{catalogError && <small className="appsheet-subtle-error">No se pudo cargar catálogo. <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={retryCatalog}>Reintentar</button></small>}{!catalogLoading && !catalogError && !saleProducts.length && <small>No hay variedades activas disponibles para factura.</small>}{hasMoreCatalog && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={loadMoreCatalog} disabled={catalogLoading}>Cargar más variedades</button>}</label>
+            {activeReplacement && selectedProduct?.requiresAppSheetSourceLot === true && <label className="ops-field appsheet-field"><span>Lote de origen</span><select name="line-sourceLotId" data-testid="line-sourceLotId" aria-label="Lote de origen" value={productDraft.sourceLotId} onChange={event => updateProductField("sourceLotId", event.target.value)} required={mode !== "preorder"}><option value="">{mode === "preorder" ? "Elegir más adelante" : "Elegí un lote disponible"}</option>{productDraft.sourceLotId && !selectedSourceLots.some(option => stringValue(option.sourceLotId) === productDraft.sourceLotId) && <option value={productDraft.sourceLotId}>{productDraft.sourceLotId} · no disponible; elegí otro</option>}{selectedSourceLots.map(option => <option key={stringValue(option.sourceLotId)} value={stringValue(option.sourceLotId)}>{stringValue(option.receivedDate)} · {stringValue(option.availableQuantity)} g disponibles · {stringValue(option.sourceLotId).slice(0, 18)}</option>)}</select><small>{mode === "preorder" ? "Podés elegirlo ahora o al editar la preventa antes de confirmar." : "La confirmación reserva únicamente el lote elegido y vuelve a comprobar su disponibilidad."}</small></label>}
             <label className="ops-field appsheet-field"><span>Escala_Tarifaria</span><select name="line-scale" data-testid="line-scale" aria-label="Escala tarifaria" value={productDraft.scale} onChange={event => updateProductField("scale", event.target.value)}><option value="">Elegí una escala</option>{productDraft.scale && !observedScales.includes(productDraft.scale) && <option value={productDraft.scale}>{productDraft.scale}</option>}{observedScales.map(scale => <option key={scale} value={scale}>{scale}</option>)}</select><small>Se conserva la escala elegida; el precio sugerido sólo se propone cuando coincide exactamente el campo del catálogo y la moneda.</small></label>
-            <label className="ops-field appsheet-field"><span>Gramos pedidos</span><input name="line-quantity" data-testid="line-quantity" aria-label="Gramos pedidos" type={replacementProfile ? "number" : "text"} inputMode="decimal" {...(replacementProfile ? { min: 1, max: 99, step: "any", "aria-describedby": "appsheet-quantity-guidance" } : {})} onInvalid={() => { if (replacementProfile) setError("Ingresá entre 1 y 99 gramos, con hasta tres decimales."); }} value={productDraft.quantity} onChange={event => setProductDraft(current => current ? { ...current, quantity: event.target.value } : current)} onBlur={() => setProductDraft(current => current ? maybeSetInitialPricePerGram(current) : current)} required placeholder="Ej.: 3,5" />{replacementProfile && <small id="appsheet-quantity-guidance">1–99 gramos, hasta tres decimales.</small>}</label>
-            <label className="ops-field appsheet-field"><span>Valor total</span><input name="line-total" data-testid="line-total" aria-label="Valor total" inputMode="decimal" value={productDraft.total} onChange={event => updateProductField("total", event.target.value)} required placeholder="Importe editable" /><small>Se conserva como importe total de línea; no se calcula por gramo.</small></label>
+            <label className="ops-field appsheet-field"><span>Gramos pedidos</span><input name="line-quantity" data-testid="line-quantity" aria-label="Gramos pedidos" type={replacementProfile ? "number" : "text"} inputMode="decimal" {...(replacementProfile ? { min: 1, max: 99, step: "any", "aria-describedby": "appsheet-quantity-guidance" } : {})} onInvalid={() => { if (replacementProfile) setError("Ingresá entre 1 y 99 gramos, con hasta tres decimales."); }} value={productDraft.quantity} onChange={event => updateProductField("quantity", event.target.value)} required placeholder="Ej.: 3,5" />{replacementProfile && <small id="appsheet-quantity-guidance">1–99 gramos, hasta tres decimales.</small>}</label>
+            <label className="ops-field appsheet-field"><span>Valor total</span><input name="line-total" data-testid="line-total" aria-label="Valor total" inputMode="decimal" value={productDraft.total} onChange={event => updateProductField("total", event.target.value)} required placeholder="Importe editable" /><small>El total editable se propone si el cálculo es exacto y se actualiza hasta que ingreses un valor.</small></label>
             {mode === "invoice" && <details className="appsheet-field appsheet-optional-price" data-testid="appsheet-line-price-details">
               <summary>Precio por gramo · opcional</summary>
               <label className="ops-field appsheet-field"><span>Precio por gramo</span><input name="line-pricePerGram" data-testid="line-price-per-gram" aria-label="Precio por gramo" inputMode="decimal" value={productDraft.pricePerGram} onChange={event => updateProductField("pricePerGram", event.target.value)} placeholder="Sin dato" /></label>
-              <small>Dato independiente del Valor total. No modifica el importe de la línea; el valor sugerido se propone una sola vez al agregarla.</small>
+              <small>Precio editable e independiente del total. En una línea nueva, la propuesta sigue los cambios de variedad y escala hasta que ingreses un precio.</small>
             </details>}
             <label className="ops-field appsheet-field"><span>N_Factura_Virtual</span><input aria-label="N_Factura_Virtual" value="Se asigna al guardar" disabled /></label>
           </fieldset>

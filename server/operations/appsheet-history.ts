@@ -1954,6 +1954,12 @@ function assertProductionHistoryDefinitionReady(prepared: PreparedAppSheetHistor
   if (!readiness.appMetadataComplete) fail("definition_app_metadata_incomplete");
 }
 
+function assertHistoryDefinitionParserVersion(prepared: PreparedAppSheetHistoryProjection): void {
+  const parserVersion = prepared.definition.inventory?.parserVersion;
+  if (typeof parserVersion !== "string" || parserVersion.trim().length === 0)
+    fail("definition_parser_version_invalid");
+}
+
 function assertHistoryDestinationIdentity(value: string): void {
   if (!/^appsheet-db-v1:[a-f0-9]{64}$/.test(value)) fail("database_destination_identity_invalid");
 }
@@ -2238,6 +2244,7 @@ export async function stageAppSheetHistoryProjection(
   options: AppSheetHistoryStageOptions,
   client?: PrismaClient,
 ): Promise<{ snapshotId: string; captureManifestId: string | null; status: "staged"; replay: boolean; metrics: PreparedAppSheetHistoryProjection["metrics"] }> {
+  assertHistoryDefinitionParserVersion(prepared);
   if (options.target === "production") assertProductionHistoryDefinitionReady(prepared);
   assertHistoryDestinationIdentity(options.destinationIdentity);
   if (options.target === "production" && prepared.capture.mode !== "stable")

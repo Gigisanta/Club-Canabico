@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID, createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import bcrypt from "bcryptjs";
+import { Prisma } from "@prisma/client";
 import type { CommandEnvelope } from "../shared/operations/contracts.js";
 import { canonicalJson } from "../shared/operations/exact.js";
 import { canonicalCommandBodyHash } from "../server/operations/canonical.js";
@@ -90,7 +91,7 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
       cutoffAt: now,
       dataCoverage: {},
       pageManifest: [],
-      definitionCoverage: null,
+      definitionCoverage: Prisma.DbNull,
       dataSheetCount: 0,
       dataPageCount: 0,
       dataRecordCount: 0,
@@ -361,6 +362,7 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
     });
     await db.appSheetCaptureManifest.create({ data: {
       ...canonicalCapture,
+      definitionCoverage: Prisma.DbNull,
       firstReadAt: new Date(canonicalCapture.firstReadAt),
       verificationStartedAt: new Date(canonicalCapture.verificationStartedAt),
       verificationCompletedAt: new Date(canonicalCapture.verificationCompletedAt),

@@ -114,11 +114,18 @@ test("canonical financial commands preserve cash custody, debt and global replay
     await assertNoCommandEffects(request);
     assert.equal(await db.operationAuthority.findUnique({where:{id:"operations"}}),null);
    };
-   await db.user.update({where:{id:"cutover-author"},data:{active:false,authorizationEpoch:{increment:1}}});
-   await assertActivationRejected();
-   await db.user.update({where:{id:"cutover-author"},data:{active:true,authorizationEpoch:{increment:1}}});
-   await db.user.update({where:{id:"cutover-reviewer"},data:{active:false,authorizationEpoch:{increment:1}}});
-   await assertActivationRejected();
+   // Satisfy the independent operational gate so stale-approval checks reach the cutover guard.
+   process.env.CLUB_OPERATIONS_APPROVED="true";
+   try{
+    await db.user.update({where:{id:"cutover-author"},data:{active:false,authorizationEpoch:{increment:1}}});
+    await assertActivationRejected();
+    await db.user.update({where:{id:"cutover-author"},data:{active:true,authorizationEpoch:{increment:1}}});
+    await db.user.update({where:{id:"cutover-reviewer"},data:{active:false,authorizationEpoch:{increment:1}}});
+    await assertActivationRejected();
+   }finally{
+    if(approvalFlagBefore===undefined)delete process.env.CLUB_OPERATIONS_APPROVED;
+    else process.env.CLUB_OPERATIONS_APPROVED=approvalFlagBefore;
+   }
   });
   await t.test("legacy preview is transient and creates no source rows or command receipts",async()=>{
    const workbook=new ExcelJS.Workbook();const sheet=workbook.addWorksheet("C_Cliente");sheet.addRow(["Id_Cliente","Nombre"]);sheet.addRow(["preview-only","Fixture"]);

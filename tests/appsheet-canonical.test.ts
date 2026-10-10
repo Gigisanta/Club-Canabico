@@ -563,9 +563,11 @@ test("technical review is bound to the exact source commit", () => {
     projectionHash: projection.projectionHash,
     commitSha: "9".repeat(40),
     importer: APPSHEET_CANONICAL_IMPORTER_VERSION,
+    target: "isolated-test" as const,
+    destinationIdentity: ISOLATED_TEST_DESTINATION_ID,
   };
   const review = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     reviewKind: "independent-technical",
     ...expected,
     reviewer: "synthetic-independent-reviewer",

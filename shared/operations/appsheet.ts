@@ -45,6 +45,8 @@ export const appsheetInvoiceLine = z.strictObject({
   totalMinor: amountMinor.refine(value => BigInt(value) > 0n, "El total explícito de la línea debe ser positivo"),
   /** Optional explicit `Precio por gramo`; informational and independent from `totalMinor`. */
   pricePerGramMinor: amountMinor.optional(),
+  /** Selected C_Mercaderia source key; the server resolves it to one reviewed internal lot. */
+  sourceLotId: z.string().trim().min(1).max(150).optional(),
 });
 
 export const appsheetMoto = z.strictObject({

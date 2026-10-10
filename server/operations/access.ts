@@ -809,6 +809,20 @@ const membersById=new Map<string,{id:string;legacyCustomerId:string|null;sourceS
 
 /** Bind a stock opening to a SKU included in the exact reviewed canonical capture. */
 export async function requireReviewedCanonicalSkuForAppSheetOpening(ctx:CommandContext,skuId:string,sourceBindingCaptureId:string){
+ const authority=await ctx.tx.operationAuthority.findUnique({where:{id:"operations"},select:{mode:true,cutoverProfile:true,captureManifestId:true}});
+ if(authority?.mode==="active"){
+  if(authority.cutoverProfile!=="appsheet-replacement")
+   throw appSheetReadinessError("canonical_opening_requires_active_replacement_authority",{skuId,captureId:sourceBindingCaptureId});
+  if(!authority.captureManifestId||authority.captureManifestId!==sourceBindingCaptureId)
+   throw appSheetReadinessError("canonical_opening_capture_not_active_authority",{skuId,captureId:sourceBindingCaptureId});
+  const sku=await ctx.tx.catalogSku.findUnique({where:{id:skuId},select:{id:true,active:true,sourceSystem:true,sourceId:true}});
+  if(!sku||!sku.active||sku.sourceSystem!==APPSHEET_CANONICAL_SOURCE_SYSTEM||!sku.sourceId)
+   throw appSheetReadinessError("canonical_opening_sku_not_active_or_canonical",{skuId,captureId:sourceBindingCaptureId});
+  const eligible=await eligibleAppSheetCanonicalSkuIds(ctx.tx,authority.captureManifestId,[skuId]);
+  if(!eligible.has(skuId))
+   throw appSheetReadinessError("canonical_opening_sku_not_in_active_reviewed_capture",{skuId,captureId:sourceBindingCaptureId});
+  return {captureId:authority.captureManifestId,skuId};
+ }
  const proof=await requireVerifiedAppSheetReplacement(ctx,sourceBindingCaptureId,{allowPendingObjects:true});
  if(!proof.skuActivationPlan.some(plan=>plan.skuId===skuId))
   throw appSheetReadinessError("canonical_opening_sku_not_in_reviewed_capture",{skuId,captureId:proof.capture.captureId});
