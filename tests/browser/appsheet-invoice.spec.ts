@@ -1004,13 +1004,6 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
   await expect(field(shell, "invoiceDate")).toBeDisabled();
   await expect(field(shell, "memberId")).toHaveAttribute("required", "");
   await selectMember(shell, "ops-member", "Socio de ensayo", "Buscar nombre del asociado por nombre");
-  await addProduct(page, shell, {
-    date: invoiceDate,
-    skuId: "ops-sku-c",
-    scale: "Precio_5_Gramos",
-    quantity: "3",
-    total: "12.01",
-  });
 
   const shellRefresh = page.waitForResponse(response =>
     response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/orders",
@@ -1022,7 +1015,10 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
   const shellText = shellStatus === 200 ? "" : await shellSaved.text();
   expect(shellStatus, shellText).toBe(200);
   const shellBody = await shellSaved.json();
+  const shellSavedEnvelope = shellSaved.request().postDataJSON() as CommandEnvelope;
   const shellId = shellBody.targetId as string;
+  expect(shellSavedEnvelope.command).toBe("InvoiceSaved");
+  expect(shellSavedEnvelope.data.lines).toEqual([]);
   expect(shellBody.result).toMatchObject({
     orderId: shellId,
     commercialState: "preorder",
@@ -1037,12 +1033,53 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
   await expect(preorderRow).toHaveCount(1);
   const shellDetail = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
   expect(shellDetail.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "preorder" });
-  expect(Object.hasOwn(shellDetail.order.quote.input.lines[0], "pricePerGramMinor")).toBe(false);
-  expect(Object.hasOwn(shellDetail.order.quote.lines[0], "pricePerGramMinor")).toBe(false);
-  expect(shellDetail.order.quote.lines).toHaveLength(1);
-  expect(shellDetail.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201" });
+  expect(shellDetail.order.quote.input.lines).toEqual([]);
+  expect(shellDetail.order.quote.lines).toEqual([]);
   expect(shellDetail.reservations).toHaveLength(0);
   expect(shellDetail.deliveries).toHaveLength(0);
+  expect(await stockSnapshot(page, "ops-sku-c")).toEqual(stockBefore);
+  expect(await financeSnapshot(page)).toEqual(financeBefore);
+
+  await preorderRow.getByRole("button", { name: "Formulario de venta", exact: true }).click();
+  const initialEditor = page.getByTestId("appsheet-invoice-dialog");
+  await expect(initialEditor).toBeVisible();
+  await addProduct(page, initialEditor, {
+    date: invoiceDate,
+    skuId: "ops-sku-c",
+    scale: "Precio_5_Gramos",
+    quantity: "3",
+    total: "12.01",
+  });
+  await expect(initialEditor.locator(".appsheet-dialog-lines li")).toHaveCount(1);
+
+  const initialUpdatePromise = saveResponse(page, "InvoiceUpdated");
+  await initialEditor.getByTestId("appsheet-save-invoice").click();
+  const initialUpdate = await initialUpdatePromise;
+  const initialUpdateStatus = initialUpdate.status();
+  const initialUpdateText = initialUpdateStatus === 200 ? "" : await initialUpdate.text();
+  expect(initialUpdateStatus, initialUpdateText).toBe(200);
+  const initialUpdateBody = await initialUpdate.json();
+  const initialUpdateEnvelope = initialUpdate.request().postDataJSON() as CommandEnvelope;
+  expect(initialUpdateEnvelope.command).toBe("InvoiceUpdated");
+  expect(initialUpdateEnvelope.targetId).toBe(shellId);
+  expect(initialUpdateEnvelope.data).toMatchObject({
+    memberId: "ops-member",
+    invoiceDate,
+    preorder: true,
+    lines: [{ skuId: "ops-sku-c", scale: "Precio_5_Gramos", quantity: "3", totalMinor: "1201" }],
+  });
+  expect(Object.hasOwn((initialUpdateEnvelope.data.lines as Array<Record<string, unknown>>)[0]!, "pricePerGramMinor")).toBe(false);
+  expect(initialUpdateBody.result).toMatchObject({ orderId: shellId, commercialState: "preorder", quoteFrozen: false });
+  await expect(initialEditor).toHaveCount(0);
+  const persistedLineDetail = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
+  expect(persistedLineDetail.order.quote.lines).toHaveLength(1);
+  expect(Object.hasOwn(persistedLineDetail.order.quote.input.lines[0], "pricePerGramMinor")).toBe(false);
+  expect(Object.hasOwn(persistedLineDetail.order.quote.lines[0], "pricePerGramMinor")).toBe(false);
+  expect(persistedLineDetail.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201" });
+  expect(persistedLineDetail.reservations).toHaveLength(0);
+  expect(persistedLineDetail.deliveries).toHaveLength(0);
+  expect(await stockSnapshot(page, "ops-sku-c")).toEqual(stockBefore);
+  expect(await financeSnapshot(page)).toEqual(financeBefore);
 
   await page.route("**/api/operations/orders", async route => {
     const response = await route.fetch();
@@ -1112,10 +1149,10 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
 
   await editor.getByTestId("appsheet-save-invoice").click();
   await expect(editor.locator(".ops-inline-error[role='alert']")).toContainText("requiere disponibilidad actual en el catálogo para confirmar");
-  expect(invoiceUpdatedPosts).toHaveLength(0);
+  expect(invoiceUpdatedPosts).toHaveLength(1);
   const afterBlockedConfirmation = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
   expect(afterBlockedConfirmation.order).toMatchObject({ commercialState: "preorder" });
-  expect(afterBlockedConfirmation.order.quote.lines).toEqual(shellDetail.order.quote.lines);
+  expect(afterBlockedConfirmation.order.quote.lines).toEqual(persistedLineDetail.order.quote.lines);
   expect(afterBlockedConfirmation.reservations).toHaveLength(0);
   expect(afterBlockedConfirmation.deliveries).toHaveLength(0);
   expect(await stockSnapshot(page, "ops-sku-c")).toEqual(stockBefore);
@@ -1132,7 +1169,7 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
   const collisionOrderId = randomUUID();
   const collisionLineId = randomUUID();
   const savedEnvelope = shellSaved.request().postDataJSON() as CommandEnvelope;
-  const savedLines = savedEnvelope.data.lines as Array<Record<string, unknown>>;
+  const savedLines = initialUpdateEnvelope.data.lines as Array<Record<string, unknown>>;
   const collisionEnvelope: CommandEnvelope = {
     ...savedEnvelope,
     requestId: randomUUID(),
@@ -1175,8 +1212,9 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
   await expect(field(editor, "note")).toHaveValue(note);
   await expect(historicalLine).toHaveCount(1);
   const afterRolledBackUpdate = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
+  expect(invoiceUpdatedPosts).toHaveLength(2);
   expect(afterRolledBackUpdate.order).toMatchObject({ commercialState: "preorder" });
-  expect(afterRolledBackUpdate.order.quote.lines).toEqual(shellDetail.order.quote.lines);
+  expect(afterRolledBackUpdate.order.quote.lines).toEqual(persistedLineDetail.order.quote.lines);
   expect(afterRolledBackUpdate.reservations).toHaveLength(0);
   expect(afterRolledBackUpdate.deliveries).toHaveLength(0);
   const collisionAfter = await getJson(page, `orders/${encodeURIComponent(collisionOrderId)}`);
@@ -1192,7 +1230,7 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
   const updatedPromise = saveResponse(page, "InvoiceUpdated");
   await editor.getByTestId("appsheet-retry-invoice").click();
   const updated = await updatedPromise;
-  expect(invoiceUpdatedPosts).toHaveLength(2);
+  expect(invoiceUpdatedPosts).toHaveLength(3);
   const updatedStatus = updated.status();
   const updatedText = updatedStatus === 200 ? "" : await updated.text();
   expect(updatedStatus, updatedText).toBe(200);
@@ -1209,7 +1247,7 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
   expect(Object.hasOwn(updatedEnvelope.data, "acceptance")).toBe(false);
   const updatedLines = updatedEnvelope.data.lines as Array<Record<string, unknown>>;
   expect(updatedLines[0]).toMatchObject({ totalMinor: "1201", pricePerGramMinor: "400" });
-  expect(updatedLines[0]!.id).toBe(shellDetail.order.quote.lines[0].id);
+  expect(updatedLines[0]!.id).toBe(persistedLineDetail.order.quote.lines[0].id);
   expect(updatedLines[0]!.id).not.toBe(collisionLineId);
   expect(updatedBody.result).toMatchObject({ orderId: shellId, commercialState: "preorder", quoteFrozen: false });
   expect(invoiceConfirmedPosts).toHaveLength(0);
@@ -1440,16 +1478,6 @@ test("an AppSheet source-lot invoice choice transports the explicit non-FIFO SKU
 });
 
 test("an empty AppSheet preorder shell saves as pending, rejects failed writes, and blocks an invalid snapshot", async ({ page }) => {
-  await page.route("**/api/operations/catalog**", async route => {
-    const response = await route.fetch();
-    if (response.status() !== 200) return route.fulfill({ response });
-    const body = await response.json() as { items?: Array<Record<string, unknown>> };
-    const items = (body.items ?? []).map(item => {
-      if (item.id !== "ops-sku-c") return item;
-      return { ...item, requiresAppSheetSourceLot: true, appSheetSourceLots: [] };
-    });
-    return route.fulfill({ response, json: { ...body, items } });
-  });
   let rejectNextUpdate = true;
   let rejectedUpdateEnvelope: CommandEnvelope | null = null;
   await page.route("**/api/operations/commands", async route => {
@@ -1524,7 +1552,7 @@ test("an empty AppSheet preorder shell saves as pending, rejects failed writes, 
   const product = page.getByTestId("appsheet-product-dialog");
   await expect(product).toBeVisible();
   const productChoice = field(product, "line-skuId");
-  expect(await productChoice.inputValue()).toContain("appsheet-source-lot-pending:");
+  await expect(productChoice).toHaveValue("ops-sku-c");
   await expect(field(product, "line-sourceLotId")).toHaveCount(0);
   await product.getByRole("button", { name: "Guardar cambios", exact: true }).click();
   await expect(product).toHaveCount(0);

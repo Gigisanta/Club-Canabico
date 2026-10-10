@@ -74,6 +74,11 @@ async function verify(page: Page, collectionId: string, accountId: string) {
   await submit(page, "CollectionVerified");
 }
 const balance = (accounts: { items: Array<{ id: string; balanceMinor: string }> }, id: string) => BigInt(accounts.items.find(account => account.id === id)!.balanceMinor);
+const gramsToMilliunits = (value: string) => {
+  const match = /^(\d+)(?:\.(\d{1,3}))?$/.exec(value);
+  expect(match, `Cantidad en gramos inválida: ${value}`).not.toBeNull();
+  return BigInt(match![1]!) * 1000n + BigInt((match![2] ?? "").padEnd(3, "0"));
+};
 
 // Browser ownership covers form availability, exact serialization, and repeated partial pickup.
 // Server suites own authorization races and accounting invariants; this uses their real HTTP path.
@@ -97,6 +102,14 @@ test("local pre-order keeps its approved price while physical extra and partial 
   const detail = await get(page, "orders/ops-local-draft");
   expect(detail.reservations).toHaveLength(1);
   expect(detail.reservations[0].quantity).toBe("5");
+  const reservedBalanceId = detail.reservations[0].balanceId as string;
+  const catalogBeforePreparation = await get(page, "catalog");
+  const skuBeforePreparation = catalogBeforePreparation.items.find((sku: { id: string }) => sku.id === "ops-sku-b");
+  const balanceBeforePreparation = skuBeforePreparation?.lots
+    .flatMap((lot: { balances: Array<{ id: string; reserved: string }> }) => lot.balances)
+    .find((stockBalance: { id: string }) => stockBalance.id === reservedBalanceId);
+  expect(balanceBeforePreparation).toBeDefined();
+  const reservedBeforePreparation = gramsToMilliunits(balanceBeforePreparation!.reserved);
   await row.getByRole("button", { name: "Preparar por lote", exact: true }).click();
   dialog = page.getByRole("dialog");
   await expect(dialog.getByLabel(/Cantidad reservada · Variedad B/)).toHaveValue("5");
@@ -136,10 +149,14 @@ test("local pre-order keeps its approved price while physical extra and partial 
   expect(picked.order.totalMinor).toBe("2887500");
   expect(picked.allocations[0].actualQuantity).toBe("5.035");
   expect(picked.allocations[0].deliveredQuantity).toBe("5.035");
+  expect(picked.reservations).toHaveLength(0);
   const catalog = await get(page, "catalog");
   const sku = catalog.items.find((sku: { id: string }) => sku.id === "ops-sku-b");
-  expect(sku.lots[0].balances[0].quantity).toBe("94.965");
-  expect(sku.lots[0].balances[0].reserved).toBe("0");
+  const preparedBalance = sku.lots.flatMap((lot: { balances: Array<{ id: string; quantity: string; reserved: string }> }) => lot.balances)
+    .find((stockBalance: { id: string }) => stockBalance.id === reservedBalanceId);
+  expect(preparedBalance).toBeDefined();
+  expect(preparedBalance!.quantity).toBe("94.965");
+  expect(gramsToMilliunits(preparedBalance!.reserved)).toBe(reservedBeforePreparation - gramsToMilliunits(detail.reservations[0].quantity));
   const collectionId = await report(page, "ops-local-draft", "28875");
   expect(balance(await get(page, "accounts"), "ops-cash-ARS")).toBe(balance(accountsBefore, "ops-cash-ARS"));
   await verify(page, collectionId, "ops-cash-ARS");

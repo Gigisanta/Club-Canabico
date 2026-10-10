@@ -75,7 +75,10 @@ test("legacy import progress is a read-only browser workflow without workbook or
 
   await page.getByRole("button", { name: "Importación legado", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Importar libro legado" })).toBeVisible();
-  await expect(page.locator('input[type="file"]')).toHaveCount(0);
+  const progressMonitor = page.getByRole("heading", { name: "Seguir un lote de importación" })
+    .locator("xpath=ancestor::section[1]");
+  await expect(progressMonitor).toBeVisible();
+  await expect(progressMonitor.locator('input[type="file"]')).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Consultar registros protegidos" })).toHaveCount(0);
 
   const batchId = `missing-${crypto.randomUUID()}`;
