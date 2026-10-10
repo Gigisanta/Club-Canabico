@@ -7,7 +7,7 @@ import type { AppSheetReviewTarget } from "./appsheet-review.js";
  * cash, delivery, payment, messaging, or document-operation events.
  */
 export const APPSHEET_HISTORY_SOURCE_SYSTEM = "appsheet-live-verified" as const;
-export const APPSHEET_HISTORY_IMPORTER_VERSION = "bombo-appsheet-history/1.2.0" as const;
+export const APPSHEET_HISTORY_IMPORTER_VERSION = "bombo-appsheet-history/1.2.1" as const;
 export const APPSHEET_HISTORY_MAPPING_ID = "appsheet-live-history-v2" as const;
 export const APPSHEET_HISTORY_STAGE_SCHEMA_VERSION_V1 = "appsheet-history-stage/v1" as const;
 export const APPSHEET_HISTORY_STAGE_SCHEMA_VERSION_V2 = "appsheet-history-stage/v2" as const;

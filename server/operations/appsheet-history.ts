@@ -1808,10 +1808,11 @@ export function prepareAppSheetHistoryProjection(capture: LoadedAppSheetHistoryC
   addDuplicateKeyExceptions(records);
   resolveRelationships(records);
   const movementOverlap = compareMovements(records);
-  attachPendingReconciliation(records, capture);
-  // The first pass records parse and semantic exceptions; then the source hash
-  // is sealed and facts are regenerated against that exact immutable hash.
+  // Complete derived column values before binding pending evidence to the
+  // source JSON that will be persisted. This preparatory pass discards facts.
   for (const record of records) makeHistoricalFact(record);
+  attachPendingReconciliation(records, capture);
+  // Seal the final source hash, then regenerate facts with pending evidence.
   for (const record of records) sealSourceRecord(record);
   const facts = records.map(makeHistoricalFact);
   const globalExceptions = globalDeltaExceptions(snapshotId, capture);
