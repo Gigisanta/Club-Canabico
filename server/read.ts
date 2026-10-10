@@ -43,6 +43,7 @@ export async function productPage(user: User, requested: string | undefined, raw
     filter: z.enum(["all", "low", "expired"]).default("all"),
     type: z.string().trim().max(80).default("all"),
     supplier: z.string().trim().max(100).default("all"),
+    category: z.string().trim().max(100).default("all"),
   }).parse(raw);
   const cursor = decodeCursor(v.cursor);
   if (cursor && !cursor.name) throw new HttpError(400, "Cursor inválido");
@@ -54,18 +55,21 @@ export async function productPage(user: User, requested: string | undefined, raw
   if (v.type !== "all") clauses.push(Prisma.sql`p.type = ${v.type}`);
   if (v.supplier === "unassigned") clauses.push(Prisma.sql`p."supplierId" IS NULL`);
   else if (v.supplier !== "all") clauses.push(Prisma.sql`p."supplierId" = ${v.supplier}`);
+  if (v.category === "unassigned") clauses.push(Prisma.sql`p."categoryId" IS NULL`);
+  else if (v.category !== "all") clauses.push(Prisma.sql`p."categoryId" = ${v.category}`);
   if (v.filter === "low") clauses.push(Prisma.sql`p.stock <= p.minimum`);
   if (v.filter === "expired") clauses.push(Prisma.sql`p.expires <= ${today}`);
   const filters = clauses.length ? Prisma.sql`WHERE ${Prisma.join(clauses, " AND ")}` : Prisma.empty;
   const cursorFilter = cursor ? Prisma.sql`AND (p.name, p.id) > (${cursor.name}, ${cursor.id})` : Prisma.empty;
   const pageFilters = clauses.length ? Prisma.sql`${filters} ${cursorFilter}` : cursor ? Prisma.sql`WHERE (p.name, p.id) > (${cursor.name}, ${cursor.id})` : Prisma.empty;
   const [rows, countRows, summaryRows] = await Promise.all([
-    db.$queryRaw<Array<{ id: string; name: string; strain: string; type: string; unit: string; lot: string; supplier: string; supplierId: string | null; sourceSystem: string | null; sourceId: string | null; stock: number; minimum: number; cost: number; price: number; location: string; locationId: string | null; ownerId: string; expires: string | null; createdAt: Date }>>`
+    db.$queryRaw<Array<{ id: string; name: string; strain: string; type: string; unit: string; lot: string; supplier: string; supplierId: string | null; sourceSystem: string | null; sourceId: string | null; stock: number; minimum: number; cost: number; price: number; location: string; locationId: string | null; categoryId: string | null; category: string | null; ownerId: string; expires: string | null; createdAt: Date }>>`
       SELECT p.id, p.name, p.strain, p.type, p.unit, p.lot, COALESCE(s.name, p.supplier) AS supplier,
              p."supplierId", p."sourceSystem", p."sourceId", p.stock, p.minimum, p.cost, p.price,
-             p.location, p."locationId", p."ownerId", p.expires, p."createdAt"
+             p.location, p."locationId", p."categoryId", c.name AS category, p."ownerId", p.expires, p."createdAt"
       FROM "Product" p JOIN "User" u ON u.id = p."ownerId"
-      LEFT JOIN "Supplier" s ON s.id = p."supplierId" ${pageFilters}
+      LEFT JOIN "Supplier" s ON s.id = p."supplierId"
+      LEFT JOIN "ProductCategory" c ON c.id = p."categoryId" ${pageFilters}
       ORDER BY p.name ASC, p.id ASC LIMIT ${pageSize + 1}`,
     db.$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(*)::bigint AS count FROM "Product" p JOIN "User" u ON u.id = p."ownerId" ${filters}`,
     ownerId
@@ -160,7 +164,8 @@ export async function salesPage(user: User, requested: string | undefined, raw: 
       cost: sale.items.reduce((n, i) => n + i.cost, 0),
       subtotal: sale.items.reduce((n, i) => n + Math.round(i.quantity * i.price / 1000), 0),
       discount: sale.items.reduce((n, i) => n + Math.round(i.quantity * i.price / 1000) - i.revenue, 0),
-      pointsEarned: 0, pointsUsed: 0,
+      // The split covers the whole ticket, which may include other responsibles' lots.
+      pointsEarned: 0, pointsUsed: 0, paymentSplit: null,
     } : sale;
     return { ...scoped, customerName: customer.name,
       cost: user.role === "cashier" ? 0 : scoped.cost,
@@ -191,32 +196,86 @@ export async function customerHistory(user: User, id: string, raw: unknown) {
     discount: ownerId ? s.items.reduce((n, i) => n + Math.round(i.quantity * i.price / 1000) - i.revenue, 0) : s.discount,
     pointsEarned: ownerId ? 0 : s.pointsEarned,
     pointsUsed: ownerId ? 0 : s.pointsUsed,
+    paymentSplit: ownerId ? null : s.paymentSplit,
     items: s.items.map((i) => ({ ...i, cost: user.role === "cashier" ? 0 : i.cost })),
   }));
   return { items, total: await db.sale.count({ where }), nextCursor: hasNext ? encodeCursor({ id: items.at(-1)!.id, createdAt: items.at(-1)!.createdAt }) : null,
     summary: { customerId: id } };
 }
 
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 export async function cashEntryPage(user: User, raw: unknown) {
   if (user.role !== "owner" && user.role !== "admin") throw new HttpError(403, "Acceso restringido");
-  const v = pageQuery.pick({ cursor: true }).parse(raw);
+  const v = pageQuery.extend({
+    account: z.enum(["all", "cash", "bank"]).default("all"),
+    category: z.string().regex(/^[a-z_]{1,40}$/).default("all"),
+    direction: z.enum(["all", "in", "out"]).default("all"),
+    from: isoDate.optional(),
+    to: isoDate.optional(),
+  }).parse(raw);
   const cursor = decodeCursor(v.cursor);
   if (cursor && (!cursor.createdAt || !cursor.name)) throw new HttpError(400, "Cursor inválido");
-  const where: Prisma.CashEntryWhereInput = cursor ? { OR: [
-    { date: { lt: cursor.name } },
-    { date: cursor.name, createdAt: { lt: new Date(cursor.createdAt!) } },
-    { date: cursor.name, createdAt: new Date(cursor.createdAt!), id: { lt: cursor.id } },
-  ] } : {};
-  const [rows, total] = await Promise.all([
-    db.cashEntry.findMany({ where, orderBy: [{ date: "desc" }, { createdAt: "desc" }, { id: "desc" }], take: pageSize + 1,
-      select: { id: true, date: true, account: true, category: true, amount: true, description: true,
-        sourceSystem: true, sourceId: true, saleId: true, userId: true, createdAt: true } }),
-    db.cashEntry.count(),
+  const today = businessDate(await getSettings());
+  const clauses: Prisma.Sql[] = [];
+  if (v.account !== "all") clauses.push(Prisma.sql`account = ${v.account}`);
+  if (v.category !== "all") clauses.push(Prisma.sql`category = ${v.category}`);
+  if (v.direction === "in") clauses.push(Prisma.sql`amount > 0`);
+  if (v.direction === "out") clauses.push(Prisma.sql`amount < 0`);
+  if (v.from) clauses.push(Prisma.sql`date >= ${v.from}`);
+  if (v.to) clauses.push(Prisma.sql`date <= ${v.to}`);
+  if (v.q) clauses.push(Prisma.sql`description ILIKE ${`%${v.q}%`}`);
+  const filters = clauses.length ? Prisma.sql`WHERE ${Prisma.join(clauses, " AND ")}` : Prisma.empty;
+  // Timestamps are stored as UTC without zone; the ISO text cast keeps the cursor independent of the session time zone.
+  const cursorClause = cursor
+    ? Prisma.sql`(date, "createdAt", id) < (${cursor.name}, ${cursor.createdAt}::timestamp(3), ${cursor.id})` : null;
+  const pageFilters = cursorClause ? Prisma.sql`WHERE ${Prisma.join([...clauses, cursorClause], " AND ")}` : filters;
+  // A filtered row still shows its account balance right after that movement. Instead of a window over the whole
+  // ledger, each account adds the sum of everything older than its oldest page row to a running sum over the rows
+  // between its oldest and newest page rows.
+  const [rows, totals, accounts] = await Promise.all([
+    db.$queryRaw<Array<{ id: string; date: string; account: "cash" | "bank"; category: string; amount: number; description: string;
+      sourceSystem: string | null; sourceId: string | null; saleId: string | null; userId: string; createdAt: Date; balanceAfter: bigint }>>`
+      WITH page AS (
+        SELECT id, date, account, category, amount, description, "sourceSystem", "sourceId", "saleId", "userId", "createdAt"
+        FROM "CashEntry" ${pageFilters}
+        ORDER BY date DESC, "createdAt" DESC, id DESC LIMIT ${pageSize + 1}
+      ), bounds AS MATERIALIZED (
+        SELECT o.account, o.date AS "oldDate", o."createdAt" AS "oldAt", o.id AS "oldId",
+               n.date AS "newDate", n."createdAt" AS "newAt", n.id AS "newId"
+        FROM (SELECT DISTINCT ON (account) account, date, "createdAt", id FROM page ORDER BY account, date, "createdAt", id) o
+        JOIN (SELECT DISTINCT ON (account) account, date, "createdAt", id FROM page
+              ORDER BY account, date DESC, "createdAt" DESC, id DESC) n USING (account)
+      ), balances AS (
+        SELECT span.id, (older.amount + span.running)::bigint AS "balanceAfter" FROM bounds b
+        CROSS JOIN LATERAL (SELECT COALESCE(SUM(e.amount), 0) AS amount FROM "CashEntry" e
+          WHERE e.account = b.account AND (e.date, e."createdAt", e.id) < (b."oldDate", b."oldAt", b."oldId")) older
+        CROSS JOIN LATERAL (SELECT e.id,
+            SUM(e.amount) OVER (ORDER BY e.date, e."createdAt", e.id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running
+          FROM "CashEntry" e WHERE e.account = b.account
+            AND (e.date, e."createdAt", e.id) >= (b."oldDate", b."oldAt", b."oldId")
+            AND (e.date, e."createdAt", e.id) <= (b."newDate", b."newAt", b."newId")) span
+      )
+      SELECT page.*, balances."balanceAfter" FROM page JOIN balances USING (id)
+      ORDER BY date DESC, "createdAt" DESC, id DESC`,
+    db.$queryRaw<Array<{ inflow: bigint; outflow: bigint; count: bigint }>>`
+      SELECT COALESCE(SUM(amount) FILTER (WHERE amount > 0), 0)::bigint AS inflow,
+             COALESCE(-SUM(amount) FILTER (WHERE amount < 0), 0)::bigint AS outflow,
+             COUNT(*)::bigint AS count
+      FROM "CashEntry" ${filters}`,
+    db.$queryRaw<Array<{ account: string; balance: bigint; count: bigint }>>`
+      SELECT account, COALESCE(SUM(amount) FILTER (WHERE date <= ${today}), 0)::bigint AS balance, COUNT(*)::bigint AS count
+      FROM "CashEntry" GROUP BY account`,
   ]);
-  const items = rows.slice(0, pageSize);
+  const items = rows.slice(0, pageSize).map((row) => ({ ...row, balanceAfter: Number(row.balanceAfter) }));
   const last = items.at(-1);
-  return { items, total, nextCursor: rows.length > pageSize && last ? encodeCursor({ id: last.id, name: last.date, createdAt: last.createdAt }) : null,
-    summary: { pageCount: items.length } };
+  const account = (key: string) => accounts.find((row) => row.account === key);
+  const inflow = Number(totals[0]?.inflow || 0);
+  const outflow = Number(totals[0]?.outflow || 0);
+  return { items, total: Number(totals[0]?.count || 0),
+    nextCursor: rows.length > pageSize && last ? encodeCursor({ id: last.id, name: last.date, createdAt: last.createdAt }) : null,
+    summary: { pageCount: items.length, inflow, outflow, net: inflow - outflow,
+      cashBalance: Number(account("cash")?.balance || 0), cashCount: Number(account("cash")?.count || 0),
+      bankBalance: Number(account("bank")?.balance || 0), bankCount: Number(account("bank")?.count || 0) } };
 }
 
 export async function expensePage(user: User, requested: string | undefined, raw: unknown) {

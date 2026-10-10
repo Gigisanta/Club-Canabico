@@ -1,0 +1,2105 @@
+import { randomUUID } from "node:crypto";
+import { Prisma, type User } from "@prisma/client";
+import { z } from "zod";
+import { formatDecimal, moneyForQuantity, parseDecimal, parseQuantity, roundHalfUp, type QuantityUnit } from "../../shared/operations/exact.js";
+import { audit, civilDate, currency, decimal, evidence, json, objectId, objectScope, registerCommand, touchAggregate, OperationError, type CommandContext } from "./core.js";
+import { resolveStockAvailability, type StockAvailabilityChannel, type StockAvailabilityResolution } from "./stock-availability.js";
+import { APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../../shared/operations/appsheet-canonical.js";
+import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../../shared/operations/appsheet-history.js";
+import { appsheetInvoiceInput } from "../../shared/operations/appsheet.js";
+import { deriveAppSheetSourceStock } from "./appsheet-source-stock.js";
+import {
+  requireApprovedAppSheetFinalDeltaGate,
+  recordAppSheetCanonicalSkuMutation,
+  requireAppSheetOpeningSourceRecord,
+  requireEligibleAppSheetReplacementOrderSkus,
+  requireEligibleAppSheetReplacementSkus,
+  requireReviewedCanonicalSkuForAppSheetOpening,
+} from "./access.js";
+
+export interface StockPreparationAllocationInput {
+  lineId: string;
+  lotId: string;
+  balanceId: string;
+  requestedQuantity: string;
+  actualQuantity: string;
+}
+
+export interface StockLineDeliveryInput {
+  lineId: string;
+  /** Quantity against the accepted order line. */
+  quantity: string;
+  /** Physical weight delivered; defaults to quantity when omitted. */
+  actualQuantity?: string;
+}
+
+export interface StockReservationResult {
+  orderId: string;
+  reservations: Array<{ lineId: string; lotId: string; balanceId: string; quantity: string }>;
+  availability?: Pick<StockAvailabilityResolution, "coverage" | "configurationId" | "version">;
+  releasedQuantity?: string;
+  returnedPreparedQuantity?: string;
+  returnedPreparedByUnit?: Record<string, string>;
+}
+
+export interface StockLineTotals {
+  lineId: string;
+  requestedQuantity: string;
+  reservedQuantity: string;
+  preparedQuantity: string;
+  deliveredQuantity: string;
+  cancelledQuantity: string;
+  returnedQuantity: string;
+  extraQuantity: string;
+  costMinor: string;
+  costCurrency: string | null;
+  costCoverage: "unknown" | "known" | "mixed_currency";
+}
+
+export interface StockOrderResult {
+  orderId: string;
+  fulfillmentState: string;
+  lines: StockLineTotals[];
+  preparationLimitsCoverage?: "approved" | "demo_missing_approved_rule";
+}
+
+export interface StockReturnInput {
+  lineId: string;
+  allocationId: string;
+  quantity: string;
+  origin: "customer" | "undelivered";
+  disposition: "restock" | "merma";
+  locationId?: string;
+  custodianId?: string;
+  evidence: Record<string, unknown>;
+}
+
+export interface StockReturnResult extends StockOrderResult {
+  returns: Array<{
+    lineId: string;
+    allocationId: string;
+    lotId: string;
+    balanceId?: string;
+    quantity: string;
+    origin: "customer" | "undelivered";
+    disposition: "restock" | "merma";
+    costMinor: string;
+    cogsReversalMinor: string;
+  }>;
+}
+
+type OrderRecord = Prisma.OperationOrderGetPayload<{ include: { lines: true } }>;
+type OrderLine = OrderRecord["lines"][number] & { nominalPreparedQuantity: string };
+type Order = Omit<OrderRecord, "lines"> & { lines: OrderLine[] };
+type BalanceWithLot = Prisma.StockBalanceGetPayload<{ include: { lot: true } }>;
+type StockObjectScope = Awaited<ReturnType<typeof objectScope>>;
+type Preparation = Prisma.PreparationAllocationGetPayload<object>;
+type PreparationLimitCoverage = "approved" | "demo_missing_approved_rule";
+export type AppSheetSourceLotCandidate = Pick<Prisma.InventoryLotGetPayload<object>, "id" | "skuId" | "unit" | "receivedAt" | "sourceSystem" | "sourceId">;
+export type AppSheetSourceLotLabelIdentity = { variety: string; description: string; purchaseLotId: string };
+export type AppSheetSourceLotOption = {
+  origin: "appsheet-history";
+  sourceLotId: string;
+  inventoryLotId: string;
+  receivedDate: string;
+  availableQuantity: string;
+  sourceLabelIdentity: AppSheetSourceLotLabelIdentity | null;
+};
+export type AppSheetNativeLotOption = {
+  origin: "bombo-goods-receipt";
+  stockLotId: string;
+  lotLabel: string;
+  receivedDate: string;
+  availableQuantity: string;
+};
+export type AppSheetNativeLotAvailabilityCandidate = {
+  lot: Pick<Prisma.InventoryLotGetPayload<object>, "id" | "skuId" | "unit" | "receivedAt" | "label" | "receiptId" | "purchaseLineId" | "sourceSystem" | "sourceId">;
+  balances: Array<{ unit: string; availabilityState: string; availableQuantity: string }>;
+};
+
+const ZERO = 0n;
+const DELIVERY_QUANTITY_AUDIT = "order_delivery_quantities_reported";
+
+function quantityUnit(unit: string): QuantityUnit {
+  if (unit === "g" || unit === "ud") return unit;
+  throw new OperationError(422, "STOCK_UNIT_UNSUPPORTED", "La unidad debe ser gramos o unidades enteras");
+}
+
+async function scopedBalance(ctx:CommandContext,id:string){
+  const balance=await ctx.tx.stockBalance.findUnique({where:{id},include:{lot:true}});
+  if(!balance)throw new OperationError(404,"STOCK_BALANCE_NOT_FOUND","Saldo de stock no encontrado");
+  await requireStockObjectScope(ctx,[balance.locationId],[balance.custodianId]);
+  return balance;
+}
+
+function assertStockObjectScope(scope:StockObjectScope,locationIds:string[],custodianIds:string[]):void{
+  if(scope.locationIds&&locationIds.some(id=>!scope.locationIds!.includes(id)))throw new OperationError(403,"LOCATION_SCOPE","Ubicación fuera de tu alcance");
+  if(scope.custodianIds&&custodianIds.some(id=>!scope.custodianIds!.includes(id)))throw new OperationError(403,"STOCK_CUSTODIAN_SCOPE","Saldo fuera de la custodia autorizada");
+}
+
+async function requireStockObjectScope(ctx:CommandContext,locationIds:string[],custodianIds:string[],scope?:StockObjectScope):Promise<StockObjectScope>{
+  const resolved=scope??await objectScope(ctx.tx,ctx.actor);
+  assertStockObjectScope(resolved,locationIds,custodianIds);
+  return resolved;
+}
+
+async function requireAppSheetSourceLotScope(ctx:CommandContext,targetLotId:string):Promise<void>{
+  const [lot,balances,openings]=await Promise.all([
+    ctx.tx.inventoryLot.findUnique({where:{id:targetLotId},select:{id:true}}),
+    ctx.tx.stockBalance.findMany({where:{lotId:targetLotId},select:{locationId:true,custodianId:true}}),
+    ctx.tx.stockFact.findMany({where:{lotId:targetLotId,kind:"opening"},select:{toLocationId:true,toCustodianId:true,sourceRecordId:true}}),
+  ]);
+  const opening=openings[0];
+  if(!lot||openings.length!==1||!opening?.sourceRecordId||!opening.toLocationId||!opening.toCustodianId||
+    balances.some(balance=>!balance.locationId||!balance.custodianId))
+    throw new OperationError(423,"APPSHEET_SOURCE_LOT_SCOPE_UNVERIFIED","No pudo verificarse el alcance físico del lote de origen AppSheet.");
+  await requireStockObjectScope(ctx,[...balances.map(balance=>balance.locationId),opening.toLocationId],
+    [...balances.map(balance=>balance.custodianId),opening.toCustodianId]);
+}
+
+registerCommand("StockWasteRecorded",{kind:"stock",capability:"stock.adjust",create:true,
+  schema:z.strictObject({balanceId:objectId,quantity:decimal,reason:z.string().trim().min(1).max(500),evidence}),
+  execute:async ctx=>{
+    const v=ctx.envelope.data as {balanceId:string;quantity:string;reason:string;evidence:Record<string,unknown>};
+    const b=await scopedBalance(ctx,v.balanceId),quantity=positiveQuantity(v.quantity,b.unit,"Merma");
+    const balance=await updateBalance(ctx,b.id,-quantity,ZERO);
+    const costMinor=checkDatabaseMinor(moneyForQuantity(formatQ(quantity,b.unit),b.lot.unitCost.toString()));
+    const fact=await ctx.tx.stockFact.create({data:{requestId:ctx.envelope.requestId,lotId:b.lotId,kind:"waste",quantity:dbQ(quantity,b.unit),unit:b.unit,fromLocationId:b.locationId,fromCustodianId:b.custodianId,costMinor,currency:b.lot.costCurrency,reason:v.reason,actorId:ctx.actor.id,occurredAt:ctx.now}});
+    await audit(ctx,"StockWasteRecorded",{balanceId:b.id,evidence:v.evidence});return {balance,fact};
+  }});
+registerCommand("StockMoved",{kind:"stock",capability:"stock.adjust",create:true,
+  schema:z.strictObject({balanceId:objectId,quantity:decimal,toLocationId:objectId,toCustodianId:objectId,reason:z.string().trim().min(1).max(500),evidence}),
+  execute:async ctx=>{
+    const v=ctx.envelope.data as {balanceId:string;quantity:string;toLocationId:string;toCustodianId:string;reason:string;evidence:Record<string,unknown>};
+    const b=await scopedBalance(ctx,v.balanceId),quantity=positiveQuantity(v.quantity,b.unit,"Traslado");
+    await requireStockObjectScope(ctx,[v.toLocationId],[v.toCustodianId]);
+    if(b.locationId===v.toLocationId&&b.custodianId===v.toCustodianId)throw new OperationError(422,"STOCK_MOVE_SAME_DESTINATION","Elegí otra ubicación o custodia");
+    const [location,custodian]=await Promise.all([ctx.tx.location.findFirst({where:{id:v.toLocationId,active:true}}),ctx.tx.user.findFirst({where:{id:v.toCustodianId,active:true}})]);
+    if(!location||!custodian)throw new OperationError(422,"STOCK_MOVE_DESTINATION","Destino o custodio no habilitado");
+    const source=await updateBalance(ctx,b.id,-quantity,ZERO);
+    const destination=await ctx.tx.stockBalance.upsert({where:{lotId_locationId_custodianId:{lotId:b.lotId,locationId:v.toLocationId,custodianId:v.toCustodianId}},create:{id:randomUUID(),lotId:b.lotId,unit:b.unit,locationId:v.toLocationId,custodianId:v.toCustodianId,quantity:dbQ(ZERO,b.unit),reserved:dbQ(ZERO,b.unit)},update:{}});
+    const target=await updateBalance(ctx,destination.id,quantity,ZERO);
+    const fact=await ctx.tx.stockFact.create({data:{requestId:ctx.envelope.requestId,lotId:b.lotId,kind:"transfer",quantity:dbQ(quantity,b.unit),unit:b.unit,fromLocationId:b.locationId,toLocationId:v.toLocationId,fromCustodianId:b.custodianId,toCustodianId:v.toCustodianId,reason:v.reason,actorId:ctx.actor.id,occurredAt:ctx.now}});
+    await audit(ctx,"StockMoved",{evidence:v.evidence});return {source,target,fact};
+  }});
+registerCommand("StockCountRecorded",{kind:"stockCount",capability:"stock.adjust",create:true,
+  schema:z.strictObject({balanceId:objectId,countedQuantity:decimal,evidence}),
+  execute:async ctx=>{
+    const v=ctx.envelope.data as {balanceId:string;countedQuantity:string;evidence:Record<string,unknown>},b=await scopedBalance(ctx,v.balanceId);
+    const quantity=parseQ(v.countedQuantity,b.unit,"Conteo");
+    return {count:await ctx.tx.operationalStockCount.create({data:{id:ctx.envelope.targetId,balanceId:b.id,unit:b.unit,recordedQuantity:b.quantity,recordedReserved:b.reserved,countedQuantity:dbQ(quantity,b.unit),countedBy:ctx.actor.id,countedAt:ctx.now,evidence:json(v.evidence)}})};
+  }});
+registerCommand("StockCountAdjustmentApproved",{kind:"stockCount",capability:"openings.approve",
+  schema:z.strictObject({reason:z.string().trim().min(1).max(500),evidence}),
+  execute:async ctx=>{
+    const count=await ctx.tx.operationalStockCount.findUniqueOrThrow({where:{id:ctx.envelope.targetId}}),b=await scopedBalance(ctx,count.balanceId);
+    if(count.status!=="pending")throw new OperationError(409,"STOCK_COUNT_ALREADY_RESOLVED","El conteo ya fue resuelto");
+    if(count.countedBy===ctx.actor.id)throw new OperationError(409,"INDEPENDENT_REVIEW_REQUIRED","El ajuste requiere otra persona revisora");
+    if(!b.quantity.equals(count.recordedQuantity)||!b.reserved.equals(count.recordedReserved))throw new OperationError(409,"STOCK_COUNT_STALE","El stock cambió después del conteo; realizá otro conteo");
+    const delta=parseQ(count.countedQuantity,b.unit,"Contado")-parseQ(b.quantity,b.unit,"Registrado"),balance=await updateBalance(ctx,b.id,delta,ZERO);
+    if(delta!==ZERO)await ctx.tx.stockFact.create({data:{requestId:ctx.envelope.requestId,lotId:b.lotId,kind:"count_adjustment",quantity:dbQ(delta,b.unit),unit:b.unit,...(delta<ZERO?{fromLocationId:b.locationId,fromCustodianId:b.custodianId}:{toLocationId:b.locationId,toCustodianId:b.custodianId}),costMinor:checkDatabaseMinor(moneyForQuantity(formatQ(delta<ZERO?-delta:delta,b.unit),b.lot.unitCost.toString()))*(delta<ZERO?-1n:1n),currency:b.lot.costCurrency,reason:ctx.envelope.data.reason as string,actorId:ctx.actor.id,occurredAt:ctx.now}});
+    const reviewed=await ctx.tx.operationalStockCount.update({where:{id:count.id},data:{status:"approved",reviewedBy:ctx.actor.id,reviewedAt:ctx.now,resolution:json(ctx.envelope.data)}});
+    return {count:reviewed,balance,difference:formatQ(delta,b.unit),classification:"count_difference"};
+  }});
+
+function quantityScale(unit: QuantityUnit): number {
+  return unit === "g" ? 3 : 0;
+}
+
+function parseQ(value: string | Prisma.Decimal, unit: string, field: string): bigint {
+  try {
+    return parseQuantity(typeof value === "string" ? value : value.toString(), quantityUnit(unit));
+  } catch (error) {
+    if (error instanceof OperationError) throw error;
+    throw new OperationError(422, "STOCK_QUANTITY_INVALID", `${field} no respeta la precisión de ${unit}`);
+  }
+}
+
+function formatQ(value: bigint, unit: string): string {
+  return formatDecimal(value, quantityScale(quantityUnit(unit)));
+}
+
+function dbQ(value: bigint, unit: string): Prisma.Decimal {
+  return new Prisma.Decimal(formatQ(value, unit));
+}
+
+function cumulativeAllocationCost(costMinor: bigint, quantity: bigint, actual: bigint): bigint {
+  if (actual <= ZERO || quantity < ZERO || quantity > actual)
+    throw new OperationError(409, "ALLOCATION_COST_QUANTITY", "La cantidad de costo no corresponde a la preparación física");
+  return roundHalfUp(costMinor * quantity, actual);
+}
+
+function incrementalAllocationCost(costMinor: bigint, before: bigint, take: bigint, actual: bigint): bigint {
+  return cumulativeAllocationCost(costMinor, before + take, actual) - cumulativeAllocationCost(costMinor, before, actual);
+}
+
+async function refreshLineCogs(ctx: CommandContext, orderId: string, lineId: string): Promise<void> {
+  const allocations = await ctx.tx.preparationAllocation.findMany({
+    where: { orderId, lineId },
+    select: { id: true, lotId: true, actualQuantity: true, deliveredQuantity: true, returnedDeliveredQuantity: true, costMinor: true },
+    orderBy: [{ id: "asc" }],
+  });
+  const delivered = allocations.filter((allocation) => allocation.deliveredQuantity.gt(0));
+  if (delivered.length === 0) {
+    await ctx.tx.operationOrderLine.update({ where: { id: lineId }, data: { costMinor: ZERO, costCurrency: null, costCoverage: "unknown" } });
+    return;
+  }
+  const lotIds = [...new Set(delivered.map((allocation) => allocation.lotId))];
+  const lots = await ctx.tx.inventoryLot.findMany({ where: { id: { in: lotIds } }, select: { id: true, costCurrency: true } });
+  const currencyByLot = new Map(lots.map((lot) => [lot.id, lot.costCurrency]));
+  if (lots.length !== lotIds.length || delivered.some((allocation) => !currencyByLot.get(allocation.lotId))) {
+    await ctx.tx.operationOrderLine.update({ where: { id: lineId }, data: { costMinor: ZERO, costCurrency: null, costCoverage: "unknown" } });
+    return;
+  }
+  const currencies = new Set(delivered.map((allocation) => currencyByLot.get(allocation.lotId)!));
+  if (currencies.size > 1) {
+    await ctx.tx.operationOrderLine.update({ where: { id: lineId }, data: { costMinor: ZERO, costCurrency: null, costCoverage: "mixed_currency" } });
+    return;
+  }
+  const unit = (await ctx.tx.operationOrderLine.findUniqueOrThrow({ where: { id: lineId }, select: { unit: true } })).unit;
+  let netCost = ZERO;
+  for (const allocation of delivered) {
+    const actual = parseQ(allocation.actualQuantity, unit, "Preparación física");
+    const sold = parseQ(allocation.deliveredQuantity, unit, "Cantidad entregada") - parseQ(allocation.returnedDeliveredQuantity, unit, "Cantidad devuelta por cliente");
+    if (sold < ZERO) throw new OperationError(409, "RETURNED_DELIVERY_INVARIANT", "La devolución del cliente supera la cantidad entregada");
+    netCost += cumulativeAllocationCost(allocation.costMinor, sold, actual);
+  }
+  await ctx.tx.operationOrderLine.update({
+    where: { id: lineId },
+    data: { costMinor: netCost, costCurrency: [...currencies][0]!, costCoverage: "known" },
+  });
+}
+
+function compareId(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function fifoBalances(a: BalanceWithLot, b: BalanceWithLot): number {
+  return a.lot.receivedAt.getTime() - b.lot.receivedAt.getTime() || compareId(a.lotId, b.lotId) || compareId(a.id, b.id);
+}
+
+function fifoPreparations(
+  a: Preparation,
+  b: Preparation,
+  lots: Map<string, Prisma.InventoryLotGetPayload<object>>,
+): number {
+  const lotA = lots.get(a.lotId);
+  const lotB = lots.get(b.lotId);
+  if (!lotA || !lotB) return compareId(a.id, b.id);
+  return lotA.receivedAt.getTime() - lotB.receivedAt.getTime() || compareId(a.lotId, b.lotId) || compareId(a.id, b.id);
+}
+
+async function loadOrder(ctx: CommandContext, orderId: string): Promise<Order> {
+  const order = await ctx.tx.operationOrder.findUnique({
+    where: { id: orderId },
+    include: { lines: { orderBy: { id: "asc" } } },
+  });
+  if (!order) throw new OperationError(404, "ORDER_NOT_FOUND", "No se encontró el pedido");
+  const prepared = await ctx.tx.preparationAllocation.groupBy({
+    by: ["lineId"],
+    where: { orderId },
+    _sum: { requestedQuantity: true },
+  });
+  const nominalByLine = new Map(prepared.map((row) => [row.lineId, row._sum.requestedQuantity?.toString() ?? "0"]));
+  return {
+    ...order,
+    lines: order.lines.map((line) => ({ ...line, nominalPreparedQuantity: nominalByLine.get(line.id) ?? "0" })),
+  };
+}
+
+function civilToday(now: Date): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires" }).format(now);
+}
+
+function rehearsal(): boolean {
+  return process.env.DEMO_MODE === "true" || process.env.NODE_ENV === "test" || process.env.OPERATIONAL_REHEARSAL === "true";
+}
+
+async function requireOperationalPermission(ctx: CommandContext, memberId: string): Promise<void> {
+  const today = civilToday(ctx.now);
+  const permission = await ctx.tx.memberPermission.findFirst({
+    where: { memberId, kind: "operations", status: "verified", validFrom: { lte: today }, validUntil: { gte: today } },
+  });
+  if (!permission) throw new OperationError(423, "MEMBER_PERMISSION_PENDING", "El socio requiere un permiso operativo verificado y vigente");
+}
+
+interface PreparationLimits {
+  maximumGramsPerOrder: bigint;
+  maximumExtraGramsPerLine: bigint;
+  maximumExtraBps: number;
+}
+
+async function activePreparationLimits(ctx: CommandContext): Promise<{ limits: PreparationLimits | null; coverage: PreparationLimitCoverage }> {
+  const today = civilToday(ctx.now);
+  const rows = await ctx.tx.operationalConfiguration.findMany({
+    where: { kind: "preparation_limits", state: "approved", validFrom: { lte: today }, OR: [{ validUntil: null }, { validUntil: { gte: today } }] },
+    orderBy: [{ validFrom: "desc" }, { version: "desc" }],
+    take: 1,
+  });
+  const row = rows[0];
+  if (!row || !row.approvedBy || !row.approvedAt) return { limits: null, coverage: "demo_missing_approved_rule" };
+  const definition = row.definition as Record<string, unknown>;
+  try {
+    const maximumGramsPerOrder = parseQ(String(definition.maximumGramsPerOrder), "g", "Límite de gramos por pedido");
+    const maximumExtraGramsPerLine = parseQ(String(definition.maximumExtraGramsPerLine), "g", "Límite de excedente por renglón");
+    const maximumExtraBps = Number(definition.maximumExtraBps);
+    if (maximumGramsPerOrder <= ZERO || maximumExtraGramsPerLine < ZERO || !Number.isInteger(maximumExtraBps) || maximumExtraBps < 0 || maximumExtraBps > 10000)
+      throw new Error("invalid limits");
+    return { limits: { maximumGramsPerOrder, maximumExtraGramsPerLine, maximumExtraBps }, coverage: "approved" };
+  } catch {
+    throw new OperationError(409, "PREPARATION_LIMITS_INVALID", "La regla aprobada de preparación no tiene límites utilizables");
+  }
+}
+
+function gramsFromLine(line: OrderLine, quantity: bigint): bigint {
+  if (line.unit !== "g") throw new OperationError(422, "STOCK_UNIT_UNSUPPORTED", "Los límites de preparación sólo admiten cantidades en gramos");
+  return quantity;
+}
+
+function stockOrderResult(order: Order, coverage?: PreparationLimitCoverage): StockOrderResult {
+  const lines: StockLineTotals[] = order.lines.map((line) => {
+    const unit = quantityUnit(line.unit);
+    return {
+      lineId: line.id,
+      requestedQuantity: formatQ(parseQ(line.requested, unit, "Cantidad pedida"), unit),
+      reservedQuantity: "0",
+      preparedQuantity: formatQ(parseQ(line.prepared, unit, "Cantidad preparada"), unit),
+      deliveredQuantity: formatQ(parseQ(line.delivered, unit, "Cantidad entregada"), unit),
+      cancelledQuantity: formatQ(parseQ(line.cancelled, unit, "Cantidad cancelada"), unit),
+      returnedQuantity: formatQ(parseQ(line.returned, unit, "Cantidad devuelta"), unit),
+      extraQuantity: formatQ(parseQ(line.extra, unit, "Excedente"), unit),
+      costMinor: line.costMinor.toString(),
+      costCurrency: line.costCurrency,
+      costCoverage: line.costCoverage as StockLineTotals["costCoverage"],
+    };
+  });
+  return { orderId: order.id, fulfillmentState: order.fulfillmentState, lines, ...(coverage ? { preparationLimitsCoverage: coverage } : {}) };
+}
+
+async function stockOrderResultFor(ctx: CommandContext, orderId: string, coverage?: PreparationLimitCoverage): Promise<StockOrderResult> {
+  const order = await loadOrder(ctx, orderId);
+  const reservations = await currentReservations(ctx, orderId);
+  const balances = reservations.length ? await ctx.tx.stockBalance.findMany({ where: { id: { in: [...new Set(reservations.map((row) => row.balanceId))] } } }) : [];
+  await requireStockObjectScope(ctx, balances.map((row) => row.locationId), balances.map((row) => row.custodianId));
+  const balanceById = new Map(balances.map((row) => [row.id, row]));
+  const reservedByLine = new Map<string, bigint>();
+  for (const row of reservations) {
+    const balance = balanceById.get(row.balanceId);
+    if (!balance) continue;
+    reservedByLine.set(row.lineId, (reservedByLine.get(row.lineId) ?? ZERO) + activeRemaining(row, balance.unit));
+  }
+  const result = stockOrderResult(order, coverage);
+  return {
+    ...result,
+    lines: result.lines.map((line) => {
+      const source = order.lines.find((item) => item.id === line.lineId)!;
+      return { ...line, reservedQuantity: formatQ(reservedByLine.get(line.lineId) ?? ZERO, source.unit) };
+    }),
+  };
+}
+
+function roundRatio(numerator: bigint, denominator: bigint): bigint {
+  if (denominator <= ZERO) throw new OperationError(409, "STOCK_RATIO_INVALID", "No se puede calcular una cantidad proporcional");
+  const quotient = numerator / denominator;
+  const remainder = numerator % denominator;
+  return quotient + (remainder * 2n >= denominator ? 1n : 0n);
+}
+
+function maxZero(value: bigint): bigint { return value > ZERO ? value : ZERO; }
+
+async function assertScopedReservationBalances(ctx: CommandContext, rows: Array<{ balanceId: string }>): Promise<void> {
+  const ids = [...new Set(rows.map((row) => row.balanceId))];
+  if (!ids.length) return;
+  const balances = await ctx.tx.stockBalance.findMany({ where: { id: { in: ids } }, select: { id: true, locationId: true, custodianId: true } });
+  if (balances.length !== ids.length) throw new OperationError(409, "STOCK_RESERVATION_BALANCE_MISSING", "Una reserva refiere a un saldo inexistente");
+  await requireStockObjectScope(ctx, balances.map((balance) => balance.locationId), balances.map((balance) => balance.custodianId));
+}
+
+function ensureApprovedLimitsForExtra(
+  limits: PreparationLimits | null,
+  isRehearsal: boolean,
+  line: OrderLine,
+  totalPrepared: bigint,
+): void {
+  const requested = parseQ(line.requested, line.unit, "Cantidad pedida");
+  const extra = maxZero(totalPrepared - requested);
+  if (extra === ZERO) return;
+  if (!limits) {
+    if (!isRehearsal) throw new OperationError(423, "PREPARATION_LIMITS_PENDING", "El peso excedente requiere límites de preparación aprobados");
+    return;
+  }
+  if (line.unit !== "g") throw new OperationError(422, "PREPARATION_EXTRA_UNIT", "El excedente sólo está permitido para renglones medidos en gramos");
+  if (extra > limits.maximumExtraGramsPerLine || extra * 10_000n > requested * BigInt(limits.maximumExtraBps)) {
+    throw new OperationError(422, "PREPARATION_EXTRA_LIMIT", "El peso excedente supera el límite aprobado para el renglón");
+  }
+}
+
+function enforceOrderGramLimit(order: Order, nextPreparedByLine: Map<string, bigint>, limits: PreparationLimits | null): void {
+  if (!limits) return;
+  const total = order.lines.reduce((sum, line) => {
+    if (line.unit !== "g") return sum;
+    return sum + (nextPreparedByLine.get(line.id) ?? parseQ(line.prepared, line.unit, "Cantidad preparada"));
+  }, ZERO);
+  if (total > limits.maximumGramsPerOrder) {
+    throw new OperationError(422, "PREPARATION_ORDER_GRAM_LIMIT", "El peso preparado supera el máximo aprobado por pedido");
+  }
+}
+
+function lineById(order: Order): Map<string, OrderLine> {
+  return new Map(order.lines.map((line) => [line.id, line]));
+}
+
+function positiveQuantity(value: string, unit: string, field: string): bigint {
+  const parsed = parseQ(value, unit, field);
+  if (parsed <= ZERO) throw new OperationError(422, "STOCK_QUANTITY_POSITIVE", `${field} debe ser mayor que cero`);
+  return parsed;
+}
+
+function activeRemaining(reservation: { quantity: Prisma.Decimal; consumed: Prisma.Decimal }, unit: string): bigint {
+  return parseQ(reservation.quantity, unit, "Reserva") - parseQ(reservation.consumed, unit, "Reserva consumida");
+}
+
+async function updateBalance(
+  ctx: CommandContext,
+  balanceId: string,
+  quantityDelta: bigint,
+  reservedDelta: bigint,
+): Promise<Prisma.StockBalanceGetPayload<object>> {
+  const current = await ctx.tx.stockBalance.findUnique({ where: { id: balanceId } });
+  if (!current) throw new OperationError(404, "STOCK_BALANCE_NOT_FOUND", "No se encontró el saldo de stock");
+  const unit = quantityUnit(current.unit);
+  const quantity = parseQ(current.quantity, unit, "Stock");
+  const reserved = parseQ(current.reserved, unit, "Reserva");
+  const nextQuantity = quantity + quantityDelta;
+  const nextReserved = reserved + reservedDelta;
+  if (nextQuantity < ZERO || nextReserved < ZERO || nextReserved > nextQuantity)
+    throw new OperationError(409, "STOCK_BALANCE_INVARIANT", "El movimiento dejaría un saldo o una reserva inválidos");
+  return ctx.tx.stockBalance.update({
+    where: { id: balanceId },
+    data: { quantity: dbQ(nextQuantity, unit), reserved: dbQ(nextReserved, unit) },
+  });
+}
+
+async function currentReservations(ctx: CommandContext, orderId: string) {
+  return ctx.tx.stockReservation.findMany({
+    where: { orderId, status: "active" },
+    orderBy: [{ lineId: "asc" }, { balanceId: "asc" }, { id: "asc" }],
+  });
+}
+
+async function reservationResult(
+  ctx: CommandContext,
+  orderId: string,
+  availability?: StockReservationResult["availability"],
+): Promise<StockReservationResult> {
+  const rows = await currentReservations(ctx, orderId);
+  const balanceIds = [...new Set(rows.map((row) => row.balanceId))];
+  const balances = balanceIds.length ? await ctx.tx.stockBalance.findMany({ where: { id: { in: balanceIds } } }) : [];
+  await requireStockObjectScope(ctx, balances.map((row) => row.locationId), balances.map((row) => row.custodianId));
+  const balanceById = new Map(balances.map((row) => [row.id, row]));
+  return {
+    orderId,
+    ...(availability ? { availability } : {}),
+    reservations: rows.flatMap((row) => {
+      const balance = balanceById.get(row.balanceId);
+      if (!balance) return [];
+      const remaining = activeRemaining(row, balance.unit);
+      if (remaining <= ZERO) return [];
+      return [{ lineId: row.lineId, lotId: balance.lotId, balanceId: balance.id, quantity: formatQ(remaining, balance.unit) }];
+    }),
+  };
+}
+
+function openDemand(line: OrderLine): bigint {
+  const unit = quantityUnit(line.unit);
+  const requested = parseQ(line.requested, unit, "Cantidad pedida");
+  const prepared = parseQ(line.nominalPreparedQuantity, unit, "Cantidad preparada nominal");
+  const cancelled = parseQ(line.cancelled, unit, "Cantidad cancelada");
+  return requested > prepared + cancelled ? requested - prepared - cancelled : ZERO;
+}
+
+export async function reserveOrder(ctx: CommandContext, orderId: string): Promise<StockReservationResult> {
+  const order = await loadOrder(ctx, orderId);
+  await requireOperationalPermission(ctx, order.memberId);
+  if (!["draft", "preorder", "confirmed"].includes(order.commercialState))
+    throw new OperationError(409, "ORDER_RESERVATION_STATE", "El pedido no permite reservar stock");
+  if (!order.lines.length) throw new OperationError(422, "ORDER_LINES_REQUIRED", "El pedido necesita renglones antes de reservar");
+  await requireEligibleAppSheetReplacementOrderSkus(ctx.tx, order.id);
+
+  const skuIds = [...new Set(order.lines.map((line) => line.skuId))];
+  const skus = await ctx.tx.catalogSku.findMany({ where: { id: { in: skuIds } } });
+  const skuById = new Map(skus.map((sku) => [sku.id, sku]));
+  const authority = await ctx.tx.operationAuthority.findUnique({ where: { id: "operations" }, select: { mode: true, cutoverProfile: true } });
+  const replacementLotIdByLine = new Map<string, string>();
+  if (authority?.mode === "active" && authority.cutoverProfile === "appsheet-replacement") {
+    const importedCanonicalLines = order.lines.filter((line) => {
+      const sku = skuById.get(line.skuId);
+      return sku?.sourceSystem === APPSHEET_CANONICAL_SOURCE_SYSTEM && sku.sourceId !== null;
+    });
+    const quote = jsonRecord(order.quote);
+    const isAppSheetInvoice = quote?.source === "appsheet-invoice";
+    if (importedCanonicalLines.length && !isAppSheetInvoice)
+      throw new OperationError(423, "APPSHEET_SOURCE_LOT_REQUIRED", "Las variedades AppSheet requieren una factura de reemplazo con selección explícita de lote de origen.");
+    if (isAppSheetInvoice || importedCanonicalLines.length) {
+      const invoiceInput = appsheetInvoiceInput.safeParse(quote?.input);
+      if (!isAppSheetInvoice || !invoiceInput.success || invoiceInput.data.memberId !== order.memberId)
+        throw new OperationError(409, "INVOICE_SNAPSHOT_INVALID", "La factura activa no conserva su formulario AppSheet válido.");
+      const snapshotLines = new Map(invoiceInput.data.lines.map((line) => [line.id, line]));
+      if (snapshotLines.size !== order.lines.length || order.lines.some((line) => snapshotLines.get(line.id)?.skuId !== line.skuId))
+        throw new OperationError(409, "INVOICE_SNAPSHOT_INVALID", "Los renglones guardados no corresponden a la factura original.");
+      for (const line of order.lines) {
+        const snapshotLine = snapshotLines.get(line.id)!;
+        const sku = skuById.get(line.skuId);
+        const canonicalImported = sku?.sourceSystem === APPSHEET_CANONICAL_SOURCE_SYSTEM && sku.sourceId !== null;
+        if (!canonicalImported) {
+          if (snapshotLine.sourceLotId || snapshotLine.stockLotId)
+            throw new OperationError(409, "APPSHEET_SOURCE_LOT_SKU_MISMATCH", "Un lote AppSheet no puede vincularse a un producto nativo.");
+          continue;
+        }
+        if (snapshotLine.sourceLotId) {
+          const selected = await resolveAppSheetSourceLot(ctx, line.skuId, snapshotLine.sourceLotId);
+          replacementLotIdByLine.set(line.id, selected.inventoryLotId);
+        } else if (snapshotLine.stockLotId) {
+          const selected = await resolveAppSheetNativeLot(ctx, line.skuId, snapshotLine.stockLotId);
+          replacementLotIdByLine.set(line.id, selected.stockLotId);
+        } else {
+          sourceLotFailure("confirmed_invoice_source_lot_missing");
+        }
+      }
+    }
+  }
+
+  const active = await currentReservations(ctx, orderId);
+  const lines = lineById(order);
+  const activeByLine = new Map<string, bigint>();
+  for (const reservation of active) {
+    const line = lines.get(reservation.lineId);
+    if (!line) throw new OperationError(409, "RESERVATION_LINE_MISMATCH", "La reserva refiere a un renglón que ya no existe");
+    const remaining = activeRemaining(reservation, line.unit);
+    if (remaining < ZERO) throw new OperationError(409, "RESERVATION_CORRUPT", "La reserva consumida supera la cantidad reservada");
+    activeByLine.set(reservation.lineId, (activeByLine.get(reservation.lineId) ?? ZERO) + remaining);
+  }
+
+  if (replacementLotIdByLine.size) {
+    const balanceIds = [...new Set(active.map((reservation) => reservation.balanceId))];
+    const reservationBalances = balanceIds.length
+      ? await ctx.tx.stockBalance.findMany({ where: { id: { in: balanceIds } }, include: { lot: true } })
+      : [];
+    const balanceById = new Map(reservationBalances.map((balance) => [balance.id, balance]));
+    for (const reservation of active) {
+      const expectedLotId = replacementLotIdByLine.get(reservation.lineId);
+      if (!expectedLotId) continue;
+      const balance = balanceById.get(reservation.balanceId);
+      if (!balance || balance.lot.id !== expectedLotId)
+        sourceLotFailure("active_reservation_source_lot_mismatch");
+    }
+  }
+
+  const outstandingByLine = new Map<string, bigint>();
+  for (const line of order.lines) {
+    quantityUnit(line.unit);
+    const sku = skuById.get(line.skuId);
+    if (!sku?.active || sku.unit !== line.unit)
+      throw new OperationError(422, "ORDER_SKU_UNAVAILABLE", "El producto del pedido no está activo o cambió de unidad");
+    const outstanding = openDemand(line);
+    const alreadyReserved = activeByLine.get(line.id) ?? ZERO;
+    if (alreadyReserved > outstanding)
+      throw new OperationError(409, "RESERVATION_STATE_CONFLICT", "La reserva activa supera la demanda todavía no preparada");
+    outstandingByLine.set(line.id, outstanding - alreadyReserved);
+  }
+
+  const groups = new Map<string, OrderLine[]>();
+  for (const line of order.lines) {
+    const selectedLotId = replacementLotIdByLine.get(line.id) ?? "";
+    const key = `${line.skuId}\u0000${line.unit}\u0000${selectedLotId}`;
+    groups.set(key, [...(groups.get(key) ?? []), line]);
+  }
+
+  const pendingGroups = [...groups.values()].map((group) => ({
+    lines: group,
+    first: group[0]!,
+    demand: group.reduce((sum, line) => sum + (outstandingByLine.get(line.id) ?? ZERO), ZERO),
+  })).filter((group) => group.demand > ZERO);
+  if (!pendingGroups.length) return reservationResult(ctx, orderId);
+  if (order.channel !== "local" && order.channel !== "delivery")
+    throw new OperationError(409, "ORDER_CHANNEL_INVALID", "El pedido no tiene un canal de cumplimiento válido");
+  const channel: StockAvailabilityChannel = order.channel;
+  const scope = await objectScope(ctx.tx, ctx.actor);
+  const balances = await ctx.tx.stockBalance.findMany({
+    where: {
+      unit: { in: [...new Set(pendingGroups.map((group) => group.first.unit))] },
+      lot: { skuId: { in: [...new Set(pendingGroups.map((group) => group.first.skuId))] } },
+      ...(scope.locationIds !== undefined ? { locationId: { in: scope.locationIds } } : {}),
+      ...(scope.custodianIds !== undefined ? { custodianId: { in: scope.custodianIds } } : {}),
+    },
+    include: { lot: true },
+  });
+  const assessment = await resolveStockAvailability(ctx.tx, {
+    balances,
+    channel,
+    asOf: civilToday(ctx.now),
+    rehearsal: rehearsal(),
+  });
+  if (assessment.coverage === "pending")
+    throw new OperationError(423, "STOCK_AVAILABILITY_PENDING", "La confirmación requiere una regla aprobada de disponibilidad física");
+  const availabilityByBalance = new Map(assessment.balances.map((row) => [row.balanceId, row]));
+  const availabilityEvidence: NonNullable<StockReservationResult["availability"]> = {
+    coverage: assessment.coverage,
+    configurationId: assessment.configurationId,
+    version: assessment.version,
+  };
+
+  for (const group of pendingGroups) {
+    const first = group.first;
+    const groupDemand = group.demand;
+    const selectedLotId = replacementLotIdByLine.get(first.id);
+    let pendingFree = ZERO;
+    const availableByBalance = balances
+      .filter((balance) => balance.unit === first.unit && balance.lot.skuId === first.skuId &&
+        (!selectedLotId || balance.lot.id === selectedLotId))
+      .flatMap((balance) => {
+        const result = availabilityByBalance.get(balance.id);
+        if (!result) throw new OperationError(409, "STOCK_AVAILABILITY_INVARIANT", "Falta la evaluación de disponibilidad de un saldo visible");
+        if (result.state === "pending") pendingFree += parseQ(result.physicalFreeQuantity, balance.unit, "Stock pendiente de disponibilidad");
+        if (result.state !== "available" && result.state !== "rehearsal_compatibility") return [];
+        const free = parseQ(result.availableQuantity, balance.unit, "Stock apto para reservar");
+        return free > ZERO ? [{ balance, free }] : [];
+      });
+    availableByBalance.sort((a, b) => fifoBalances(a.balance, b.balance));
+    const available = availableByBalance.reduce((sum, row) => sum + row.free, ZERO);
+    if (available < groupDemand) {
+      if (pendingFree > ZERO)
+        throw new OperationError(423, "STOCK_AVAILABILITY_PENDING", "Hay stock visible cuya aptitud para este canal todavía no está definida", {
+          skuId: first.skuId,
+          requested: formatQ(groupDemand, first.unit),
+          approvedAvailable: formatQ(available, first.unit),
+          pending: formatQ(pendingFree, first.unit),
+        });
+      throw new OperationError(409, "STOCK_SHORTAGE", "No hay cantidad apta disponible suficiente para reservar el pedido", {
+        skuId: first.skuId,
+        requested: formatQ(groupDemand, first.unit),
+        available: formatQ(available, first.unit),
+      });
+    }
+
+    const linesInOrder = [...group.lines].sort((a, b) => compareId(a.id, b.id));
+    let lineIndex = 0;
+    let lineRemaining = outstandingByLine.get(linesInOrder[0]!.id) ?? ZERO;
+    for (const row of availableByBalance) {
+      let balanceRemaining = row.free;
+      while (balanceRemaining > ZERO && lineIndex < linesInOrder.length) {
+        if (lineRemaining === ZERO) {
+          lineIndex += 1;
+          if (lineIndex >= linesInOrder.length) break;
+          lineRemaining = outstandingByLine.get(linesInOrder[lineIndex]!.id) ?? ZERO;
+          continue;
+        }
+        const allocated = balanceRemaining < lineRemaining ? balanceRemaining : lineRemaining;
+        await ctx.tx.stockReservation.create({
+          data: {
+            id: randomUUID(), orderId, lineId: linesInOrder[lineIndex]!.id,
+            balanceId: row.balance.id, quantity: dbQ(allocated, first.unit), consumed: dbQ(ZERO, first.unit), status: "active",
+          },
+        });
+        await updateBalance(ctx, row.balance.id, ZERO, allocated);
+        balanceRemaining -= allocated;
+        lineRemaining -= allocated;
+      }
+    }
+  }
+  return reservationResult(ctx, orderId, availabilityEvidence);
+}
+
+export async function prepareOrder(
+  ctx: CommandContext,
+  orderId: string,
+  allocations: StockPreparationAllocationInput[],
+): Promise<StockOrderResult> {
+  const order = await loadOrder(ctx, orderId);
+  await requireOperationalPermission(ctx, order.memberId);
+  const { limits, coverage } = await activePreparationLimits(ctx);
+  if (order.commercialState !== "confirmed")
+    throw new OperationError(409, "ORDER_NOT_CONFIRMED", "Confirmá el pedido antes de preparar stock");
+  if (!Array.isArray(allocations) || allocations.length === 0)
+    throw new OperationError(422, "PREPARATION_ALLOCATIONS_REQUIRED", "Indicá las asignaciones físicas de preparación");
+  if (order.fulfillmentState === "dispatched" || order.fulfillmentState === "partially_delivered" || order.fulfillmentState === "delivered")
+    throw new OperationError(409, "PREPARATION_AFTER_DISPATCH", "No se puede preparar stock después del despacho");
+
+  const lines = lineById(order);
+  const inputKeys = new Set<string>();
+  const requestedByReservation = new Map<string, bigint>();
+  const actualByBalance = new Map<string, bigint>();
+  const preparedByLine = new Map<string, bigint>();
+  const nominalPreparedByLine = new Map<string, bigint>();
+  const stockRows: Array<{ input: StockPreparationAllocationInput; line: OrderLine; balance: BalanceWithLot; requested: bigint; actual: bigint; cost: bigint }> = [];
+
+  for (const input of allocations) {
+    const line = lines.get(input.lineId);
+    if (!line) throw new OperationError(422, "PREPARATION_LINE_SCOPE", "El renglón no pertenece al pedido indicado");
+    const key = `${input.lineId}\u0000${input.balanceId}`;
+    if (inputKeys.has(key)) throw new OperationError(422, "PREPARATION_DUPLICATE_ALLOCATION", "Combiná las cantidades repetidas del mismo renglón y lote");
+    inputKeys.add(key);
+    const requested = positiveQuantity(input.requestedQuantity, line.unit, "Cantidad reservada a preparar");
+    const actual = positiveQuantity(input.actualQuantity, line.unit, "Cantidad física preparada");
+    if (actual < requested)
+      throw new OperationError(422, "ACTUAL_BELOW_RESERVED", "La cantidad física preparada no puede ser menor que la cantidad solicitada");
+    if (line.unit === "ud" && actual !== requested)
+      throw new OperationError(422, "UNIT_WEIGHT_EXTRA", "Las unidades enteras no admiten diferencias de pesaje");
+    const extra = actual - requested;
+    if (extra > ZERO) {
+      if (!limits && !rehearsal()) throw new OperationError(423, "PREPARATION_LIMITS_REQUIRED", "El pesaje con excedente requiere límites de preparación aprobados");
+      if (limits && (line.unit !== "g" || extra > limits.maximumExtraGramsPerLine || extra * 10000n > requested * BigInt(limits.maximumExtraBps)))
+        throw new OperationError(422, "PREPARATION_EXTRA_LIMIT", "El excedente supera el límite aprobado para el renglón");
+    }
+    const balance = await ctx.tx.stockBalance.findUnique({ where: { id: input.balanceId }, include: { lot: true } });
+    if (!balance || balance.lotId !== input.lotId || balance.lot.skuId !== line.skuId || balance.unit !== line.unit || balance.lot.unit !== line.unit)
+      throw new OperationError(422, "PREPARATION_STOCK_SCOPE", "El lote y el saldo no corresponden al producto y unidad del renglón");
+    await requireStockObjectScope(ctx, [balance.locationId], [balance.custodianId]);
+    const reservationKey = `${line.id}\u0000${balance.id}`;
+    requestedByReservation.set(reservationKey, (requestedByReservation.get(reservationKey) ?? ZERO) + requested);
+    actualByBalance.set(balance.id, (actualByBalance.get(balance.id) ?? ZERO) + actual);
+    preparedByLine.set(line.id, (preparedByLine.get(line.id) ?? ZERO) + actual);
+    nominalPreparedByLine.set(line.id, (nominalPreparedByLine.get(line.id) ?? ZERO) + requested);
+    const cost = moneyForQuantity(formatQ(actual, line.unit), balance.lot.unitCost.toString());
+    stockRows.push({ input, line, balance, requested, actual, cost });
+  }
+
+  for (const line of order.lines) {
+    const preparedDelta = preparedByLine.get(line.id) ?? ZERO;
+    if (preparedDelta === ZERO) continue;
+    const nominalDelta = nominalPreparedByLine.get(line.id) ?? ZERO;
+    if (nominalDelta > openDemand(line)) throw new OperationError(409, "PREPARATION_DEMAND_EXCEEDED", "La preparación supera la cantidad nominal pendiente");
+    const requested = parseQ(line.nominalPreparedQuantity, line.unit, "Cantidad preparada nominal") + nominalDelta;
+    const totalPrepared = parseQ(line.prepared, line.unit, "Cantidad preparada") + preparedDelta;
+    const extra = totalPrepared > requested ? totalPrepared - requested : ZERO;
+    if (extra > ZERO) {
+      if (!limits && !rehearsal()) throw new OperationError(423, "PREPARATION_LIMITS_REQUIRED", "El pesaje con excedente requiere límites de preparación aprobados");
+      if (limits && (line.unit !== "g" || extra > limits.maximumExtraGramsPerLine || extra * 10000n > requested * BigInt(limits.maximumExtraBps)))
+        throw new OperationError(422, "PREPARATION_EXTRA_LIMIT", "El excedente acumulado supera el límite aprobado para el renglón");
+    }
+  }
+
+  const totalOrderGrams = order.lines.filter((line) => line.unit === "g").reduce((sum, line) => sum + parseQ(line.prepared, "g", "Cantidad preparada"), ZERO)
+    + stockRows.filter((row) => row.line.unit === "g").reduce((sum, row) => sum + row.actual, ZERO);
+  if (limits && totalOrderGrams > limits.maximumGramsPerOrder)
+    throw new OperationError(422, "PREPARATION_ORDER_LIMIT", "El peso total preparado supera el límite aprobado por pedido");
+
+  const reservationRows = await ctx.tx.stockReservation.findMany({
+    where: { orderId, status: "active" },
+    orderBy: [{ lineId: "asc" }, { balanceId: "asc" }, { id: "asc" }],
+  });
+  const reservationByKey = new Map(reservationRows.map((row) => [`${row.lineId}\u0000${row.balanceId}`, row]));
+  for (const [key, requested] of requestedByReservation) {
+    const reservation = reservationByKey.get(key);
+    if (!reservation) throw new OperationError(409, "PREPARATION_RESERVATION_REQUIRED", "Prepará únicamente cantidades reservadas para este pedido y lote");
+    const line = lines.get(reservation.lineId)!;
+    const remaining = activeRemaining(reservation, line.unit);
+    if (remaining < requested) throw new OperationError(409, "PREPARATION_RESERVATION_EXCEEDED", "La preparación supera la reserva activa del lote");
+  }
+
+  for (const row of stockRows) {
+    const reservation = reservationByKey.get(`${row.line.id}\u0000${row.balance.id}`)!;
+    const totalRequested = requestedByReservation.get(`${row.line.id}\u0000${row.balance.id}`)!;
+    const consumedThisCall = stockRows
+      .filter((other) => other.line.id === row.line.id && other.balance.id === row.balance.id)
+      .slice(0, stockRows.indexOf(row) + 1)
+      .reduce((sum, other) => sum + other.requested, ZERO);
+    const reservationBefore = activeRemaining(reservation, row.line.unit);
+    const reservationAfter = reservationBefore - consumedThisCall;
+    const currentBalance = await ctx.tx.stockBalance.findUniqueOrThrow({ where: { id: row.balance.id } });
+    const currentQuantity = parseQ(currentBalance.quantity, row.line.unit, "Stock");
+    const currentReserved = parseQ(currentBalance.reserved, row.line.unit, "Reserva");
+    const stillReservedAfter = currentReserved - row.requested;
+    if (currentReserved < row.requested || stillReservedAfter < ZERO)
+      throw new OperationError(409, "STOCK_RESERVATION_INVARIANT", "La reserva física del lote quedó inconsistente");
+    const free = currentQuantity - currentReserved;
+    const freeAfterReleasingRequested = free + row.requested;
+    if (row.actual > freeAfterReleasingRequested)
+      throw new OperationError(409, "PREPARATION_EXTRA_UNAVAILABLE", "El excedente pesado supera el stock libre del lote");
+    const nextQuantity = currentQuantity - row.actual;
+    if (nextQuantity < stillReservedAfter)
+      throw new OperationError(409, "STOCK_RESERVATION_INVARIANT", "La preparación dejaría otras reservas sin cobertura");
+    await ctx.tx.stockBalance.update({
+      where: { id: row.balance.id },
+      data: { quantity: dbQ(nextQuantity, row.line.unit), reserved: dbQ(stillReservedAfter, row.line.unit) },
+    });
+    await ctx.tx.stockReservation.update({
+      where: { id: reservation.id },
+      data: {
+        consumed: dbQ(parseQ(reservation.consumed, row.line.unit, "Reserva consumida") + consumedThisCall, row.line.unit),
+        status: reservationAfter === ZERO ? "consumed" : "active",
+      },
+    });
+    await ctx.tx.preparationAllocation.create({
+      data: {
+        id: randomUUID(), orderId, lineId: row.line.id, lotId: row.balance.lotId, balanceId: row.balance.id,
+        requestedQuantity: dbQ(row.requested, row.line.unit), actualQuantity: dbQ(row.actual, row.line.unit),
+        costMinor: row.cost, state: "prepared",
+      },
+    });
+    await ctx.tx.stockFact.create({
+      data: {
+        requestId: ctx.envelope.requestId, lotId: row.balance.lotId, orderId, lineId: row.line.id,
+        kind: "preparation", quantity: dbQ(row.actual, row.line.unit), unit: row.line.unit,
+        fromLocationId: row.balance.locationId, fromCustodianId: row.balance.custodianId,
+        costMinor: row.cost, currency: row.balance.lot.costCurrency, reason: "order_preparation",
+        actorId: ctx.actor.id, occurredAt: ctx.now,
+      },
+    });
+    // The balance and reservation are updated once per submitted allocation.
+    // Validate the aggregate above so repeated line/lote requests cannot overspend.
+    if (consumedThisCall > totalRequested)
+      throw new OperationError(409, "PREPARATION_RESERVATION_EXCEEDED", "La preparación supera la reserva agregada");
+  }
+
+  for (const line of order.lines) {
+    const preparedDelta = preparedByLine.get(line.id) ?? ZERO;
+    if (preparedDelta === ZERO) continue;
+    const totalPrepared = parseQ(line.prepared, line.unit, "Cantidad preparada") + preparedDelta;
+    const nominalPrepared = parseQ(line.nominalPreparedQuantity, line.unit, "Cantidad preparada nominal") + (nominalPreparedByLine.get(line.id) ?? ZERO);
+    const extra = totalPrepared - nominalPrepared;
+    await ctx.tx.operationOrderLine.update({
+      where: { id: line.id },
+      data: {
+        prepared: dbQ(totalPrepared, line.unit),
+        extra: dbQ(extra, line.unit),
+      },
+    });
+  }
+  const updated = await loadOrder(ctx, orderId);
+  const complete = updated.lines.every((line) => openDemand(line) === ZERO);
+  const hasPreparation = updated.lines.some((line) => parseQ(line.prepared, line.unit, "Cantidad preparada") > ZERO);
+  const fulfillmentState = complete ? "prepared" : hasPreparation ? "partially_prepared" : "unprepared";
+  await ctx.tx.operationOrder.update({ where: { id: orderId }, data: { fulfillmentState } });
+  return stockOrderResultFor(ctx, orderId, coverage);
+}
+
+export async function releaseOrderReservations(ctx: CommandContext, orderId: string): Promise<StockReservationResult> {
+  const order = await loadOrder(ctx, orderId);
+  const allocations = await ctx.tx.preparationAllocation.findMany({ where: { orderId }, orderBy: [{ lineId: "asc" }, { lotId: "asc" }, { id: "asc" }] });
+  if (allocations.some((row) => ["dispatched", "partially_delivered", "delivered", "partially_returned"].includes(row.state)))
+    throw new OperationError(409, "PHYSICAL_RETURN_REQUIRED", "El stock despachado requiere una devolución física inspeccionada");
+  const rows = await currentReservations(ctx, orderId);
+  const balanceIds = [...new Set([...rows.map((row) => row.balanceId), ...allocations.map((row) => row.balanceId)])];
+  const balances = balanceIds.length ? await ctx.tx.stockBalance.findMany({ where: { id: { in: balanceIds } }, include: { lot: true } }) : [];
+  await requireStockObjectScope(ctx, balances.map((row) => row.locationId), balances.map((row) => row.custodianId));
+  const balanceById = new Map(balances.map((row) => [row.id, row]));
+  const ordered = [...rows].sort((a, b) => {
+    const aa = balanceById.get(a.balanceId), bb = balanceById.get(b.balanceId);
+    if (!aa || !bb) return compareId(a.id, b.id);
+    return fifoBalances(aa, bb) || compareId(a.lineId, b.lineId) || compareId(a.id, b.id);
+  });
+  for (const reservation of ordered) {
+    const balance = balanceById.get(reservation.balanceId);
+    const line = order.lines.find((item) => item.id === reservation.lineId);
+    if (!balance || !line) throw new OperationError(409, "RESERVATION_CORRUPT", "La reserva ya no corresponde al pedido");
+    const remaining = activeRemaining(reservation, line.unit);
+    if (remaining <= ZERO) continue;
+    await updateBalance(ctx, balance.id, ZERO, -remaining);
+    const consumed = parseQ(reservation.consumed, line.unit, "Reserva consumida");
+    await ctx.tx.stockReservation.update({ where: { id: reservation.id }, data: { quantity: dbQ(consumed, line.unit), status: consumed === ZERO ? "released" : "consumed" } });
+  }
+  const returnedPrepared = new Map<string, bigint>();
+  for (const allocation of allocations) {
+    if (! ["prepared", "partially_prepared"].includes(allocation.state)) continue;
+    const balance = balanceById.get(allocation.balanceId);
+    const line = order.lines.find((item) => item.id === allocation.lineId);
+    if (!balance || !line) throw new OperationError(409, "PREPARATION_ALLOCATION_CORRUPT", "La preparación ya no corresponde al pedido");
+    const quantity = parseQ(allocation.actualQuantity, line.unit, "Cantidad preparada");
+    if (quantity <= ZERO) continue;
+    await updateBalance(ctx, balance.id, quantity, ZERO);
+    await ctx.tx.preparationAllocation.update({ where: { id: allocation.id }, data: { state: "cancelled_restocked" } });
+    await ctx.tx.stockFact.create({ data: {
+      requestId: ctx.envelope.requestId, lotId: allocation.lotId, orderId, lineId: line.id, kind: "return",
+      quantity: dbQ(quantity, line.unit), unit: line.unit,
+      fromLocationId: balance.locationId, toLocationId: balance.locationId,
+      fromCustodianId: ctx.actor.id, toCustodianId: balance.custodianId,
+      costMinor: allocation.costMinor, currency: balance.lot.costCurrency,
+      reason: "pre_dispatch_cancellation_restock", actorId: ctx.actor.id, occurredAt: ctx.now,
+    } });
+    returnedPrepared.set(line.unit, (returnedPrepared.get(line.unit) ?? ZERO) + quantity);
+  }
+  const result = await reservationResult(ctx, orderId);
+  const byUnit = Object.fromEntries([...returnedPrepared].map(([unit, quantity]) => [unit, formatQ(quantity, unit)]));
+  return { ...result, ...(Object.keys(byUnit).length ? { returnedPreparedByUnit: byUnit } : {}), ...(Object.keys(byUnit).length === 1 ? { returnedPreparedQuantity: Object.values(byUnit)[0] } : {}) };
+}
+
+export async function cancelOrderLines(
+  ctx: CommandContext,
+  orderId: string,
+  linesInput: Array<{ lineId: string; quantity: string }>,
+): Promise<StockOrderResult> {
+  const order = await loadOrder(ctx, orderId);
+  if (order.commercialState !== "confirmed" || ["dispatched", "partially_delivered", "delivered"].includes(order.fulfillmentState))
+    throw new OperationError(409, "ORDER_LINE_CANCELLATION_STATE", "Sólo se pueden cancelar cantidades aún no preparadas antes del despacho");
+  if (!linesInput.length || new Set(linesInput.map((item) => item.lineId)).size !== linesInput.length)
+    throw new OperationError(422, "ORDER_LINE_CANCELLATION_DUPLICATE", "Indicá renglones únicos para cancelar");
+  const byId = lineById(order);
+  const cancelByLine = new Map<string, bigint>();
+  for (const input of linesInput) {
+    const line = byId.get(input.lineId);
+    if (!line) throw new OperationError(422, "ORDER_LINE_SCOPE", "El renglón no pertenece al pedido");
+    const quantity = positiveQuantity(input.quantity, line.unit, "Cantidad a cancelar");
+    if (quantity > openDemand(line)) throw new OperationError(422, "ORDER_LINE_CANCELLATION_LIMIT", "La cancelación supera la cantidad todavía no preparada");
+    cancelByLine.set(line.id, quantity);
+  }
+  for (const [lineId, quantity] of cancelByLine) {
+    const line = byId.get(lineId)!;
+    const reservations = await ctx.tx.stockReservation.findMany({ where: { orderId, lineId, status: "active" } });
+    const balanceIds = [...new Set(reservations.map((row) => row.balanceId))];
+    const balances = balanceIds.length ? await ctx.tx.stockBalance.findMany({ where: { id: { in: balanceIds } }, include: { lot: true } }) : [];
+    await requireStockObjectScope(ctx, balances.map((row) => row.locationId), balances.map((row) => row.custodianId));
+    const balanceById = new Map(balances.map((row) => [row.id, row]));
+    const fifo = [...reservations].sort((a, b) => {
+      const aa = balanceById.get(a.balanceId), bb = balanceById.get(b.balanceId);
+      return aa && bb ? fifoBalances(aa, bb) || compareId(a.id, b.id) : compareId(a.id, b.id);
+    });
+    let release = quantity;
+    for (const reservation of fifo) {
+      if (release <= ZERO) break;
+      const balance = balanceById.get(reservation.balanceId);
+      if (!balance) throw new OperationError(409, "RESERVATION_CORRUPT", "No se encontró el saldo de una reserva activa");
+      const remaining = activeRemaining(reservation, line.unit);
+      const take = remaining < release ? remaining : release;
+      if (take <= ZERO) continue;
+      await updateBalance(ctx, balance.id, ZERO, -take);
+      const consumed = parseQ(reservation.consumed, line.unit, "Reserva consumida");
+      const quantityAfter = parseQ(reservation.quantity, line.unit, "Reserva") - take;
+      await ctx.tx.stockReservation.update({ where: { id: reservation.id }, data: { quantity: dbQ(quantityAfter, line.unit), status: quantityAfter === consumed ? (consumed === ZERO ? "released" : "consumed") : "active" } });
+      release -= take;
+    }
+    await ctx.tx.operationOrderLine.update({ where: { id: line.id }, data: { cancelled: { increment: dbQ(quantity, line.unit) } } });
+  }
+  const updated = await loadOrder(ctx, orderId);
+  const complete = updated.lines.every((line) => openDemand(line) === ZERO);
+  const hasPreparation = updated.lines.some((line) => parseQ(line.prepared, line.unit, "Preparado") > ZERO);
+  await ctx.tx.operationOrder.update({ where: { id: orderId }, data: { fulfillmentState: complete ? (hasPreparation ? "prepared" : "cancelled") : hasPreparation ? "partially_prepared" : "unprepared" } });
+  return stockOrderResultFor(ctx, orderId);
+}
+
+export async function dispatchOrder(ctx: CommandContext, orderId: string, driverId?: string): Promise<StockOrderResult> {
+  const order = await loadOrder(ctx, orderId);
+  if (order.commercialState !== "confirmed") throw new OperationError(409, "ORDER_NOT_CONFIRMED", "Sólo se despacha un pedido confirmado");
+  await requireOperationalPermission(ctx, order.memberId);
+  const { limits, coverage } = await activePreparationLimits(ctx);
+  if (!limits && !rehearsal()) throw new OperationError(423, "PREPARATION_LIMITS_REQUIRED", "El despacho requiere límites de preparación aprobados");
+  const complete = order.lines.every((line) => openDemand(line) === ZERO);
+  if (!complete) throw new OperationError(409, "ORDER_PREPARATION_INCOMPLETE", "Prepará o cancelá las cantidades pendientes antes del despacho");
+  const grams = order.lines.filter((line) => line.unit === "g").reduce((sum, line) => sum + parseQ(line.prepared, "g", "Preparado"), ZERO);
+  if (limits && grams > limits.maximumGramsPerOrder) throw new OperationError(422, "PREPARATION_ORDER_LIMIT", "El peso total supera el límite aprobado");
+  const allocations = await ctx.tx.preparationAllocation.findMany({ where: { orderId, state: { in: ["prepared", "partially_prepared"] } }, orderBy: [{ lineId: "asc" }, { lotId: "asc" }, { id: "asc" }] });
+  const balances = allocations.length ? await ctx.tx.stockBalance.findMany({ where: { id: { in: [...new Set(allocations.map((row) => row.balanceId))] } } }) : [];
+  const balanceById = new Map(balances.map((row) => [row.id, row]));
+  await requireStockObjectScope(ctx, balances.map((row) => row.locationId), balances.map((row) => row.custodianId));
+  const allocatedByLine = new Map<string, bigint>();
+  for (const allocation of allocations) {
+    const line = order.lines.find((item) => item.id === allocation.lineId);
+    if (!line) throw new OperationError(409, "PREPARATION_ALLOCATION_CORRUPT", "La preparación no pertenece a un renglón del pedido");
+    allocatedByLine.set(line.id, (allocatedByLine.get(line.id) ?? ZERO) + parseQ(allocation.actualQuantity, line.unit, "Cantidad preparada"));
+  }
+  for (const line of order.lines) if ((allocatedByLine.get(line.id) ?? ZERO) !== parseQ(line.prepared, line.unit, "Cantidad preparada"))
+    throw new OperationError(409, "PREPARATION_ALLOCATION_MISMATCH", "Las asignaciones físicas no coinciden con las cantidades preparadas del pedido");
+  if (driverId) {
+    const assignment = await ctx.tx.deliveryAssignment.findFirst({ where: { orderId, driverId } });
+    if (!assignment) throw new OperationError(422, "DELIVERY_DRIVER_SCOPE", "El repartidor no está asignado a este pedido");
+  }
+  for (const allocation of allocations) {
+    const balance = balanceById.get(allocation.balanceId);
+    const line = order.lines.find((item) => item.id === allocation.lineId);
+    if (!balance || !line) throw new OperationError(409, "PREPARATION_ALLOCATION_CORRUPT", "La preparación perdió su saldo de origen");
+    await ctx.tx.preparationAllocation.update({ where: { id: allocation.id }, data: { state: "dispatched" } });
+    await ctx.tx.stockFact.create({ data: {
+      requestId: ctx.envelope.requestId, lotId: allocation.lotId, orderId, lineId: line.id, kind: "dispatch",
+      quantity: allocation.actualQuantity, unit: line.unit, fromLocationId: balance.locationId,
+      toCustodianId: driverId ?? ctx.actor.id, fromCustodianId: balance.custodianId,
+      costMinor: allocation.costMinor, currency: balance.lotId ? (await ctx.tx.inventoryLot.findUniqueOrThrow({ where: { id: allocation.lotId }, select: { costCurrency: true } })).costCurrency : order.currency,
+      reason: driverId ? "delivery_dispatch" : "local_pickup_dispatch", actorId: ctx.actor.id, occurredAt: ctx.now,
+    } });
+  }
+  await ctx.tx.operationOrder.update({ where: { id: orderId }, data: { fulfillmentState: order.lines.every((line) => parseQ(line.cancelled, line.unit, "Cancelado") >= parseQ(line.requested, line.unit, "Pedido")) ? "delivered" : "dispatched" } });
+  return stockOrderResultFor(ctx, orderId, coverage);
+}
+
+export async function deliverOrder(ctx: CommandContext, orderId: string, inputs: StockLineDeliveryInput[]): Promise<StockOrderResult> {
+  const order = await loadOrder(ctx, orderId);
+  if (! ["dispatched", "partially_delivered"].includes(order.fulfillmentState)) {
+    const complete = order.lines.every((line) => parseQ(line.delivered, line.unit, "Entregado") + parseQ(line.cancelled, line.unit, "Cancelado") >= parseQ(line.requested, line.unit, "Pedido"));
+    if (complete) return stockOrderResultFor(ctx, orderId);
+    throw new OperationError(409, "ORDER_NOT_DISPATCHED", "El pedido todavía no está despachado");
+  }
+  await requireOperationalPermission(ctx, order.memberId);
+  const { limits: deliveryLimits, coverage } = await activePreparationLimits(ctx);
+  if (!inputs.length || new Set(inputs.map((row) => row.lineId)).size !== inputs.length)
+    throw new OperationError(422, "DELIVERY_LINE_DUPLICATE", "Indicá renglones únicos para entregar");
+  const lines = lineById(order);
+  const allocations = await ctx.tx.preparationAllocation.findMany({ where: { orderId, state: { in: ["dispatched", "partially_returned"] } }, orderBy: [{ lineId: "asc" }, { id: "asc" }] });
+  const allocationBalances = allocations.length ? await ctx.tx.stockBalance.findMany({ where: { id: { in: [...new Set(allocations.map((row) => row.balanceId))] } }, include: { lot: true } }) : [];
+  const balanceById = new Map(allocationBalances.map((row) => [row.id, row]));
+  await requireStockObjectScope(ctx, allocationBalances.map((row) => row.locationId), allocationBalances.map((row) => row.custodianId));
+  const assignment = await ctx.tx.deliveryAssignment.findFirst({ where: { orderId, status: { in: ["dispatched", "partially_delivered"] } }, select: { driverId: true } });
+  for (const input of inputs) {
+    const line = lines.get(input.lineId);
+    if (!line) throw new OperationError(422, "DELIVERY_LINE_SCOPE", "El renglón no pertenece al pedido");
+    const quantity = positiveQuantity(input.quantity, line.unit, "Cantidad entregada");
+    const physical = positiveQuantity(input.actualQuantity ?? input.quantity, line.unit, "Peso físico entregado");
+    if (line.unit === "ud" && physical !== quantity) throw new OperationError(422, "UNIT_DELIVERY_WEIGHT", "Las unidades enteras no admiten diferencias de pesaje");
+    if (physical > quantity) {
+      const extra = physical - quantity;
+      if (!deliveryLimits && !rehearsal()) throw new OperationError(423, "PREPARATION_LIMITS_REQUIRED", "La entrega con excedente requiere límites de preparación aprobados");
+      if (deliveryLimits && (line.unit !== "g" || extra > deliveryLimits.maximumExtraGramsPerLine || extra * 10000n > quantity * BigInt(deliveryLimits.maximumExtraBps)))
+        throw new OperationError(422, "DELIVERY_EXTRA_LIMIT", "El peso entregado supera el límite aprobado");
+    }
+    const requested = parseQ(line.requested, line.unit, "Pedido"), delivered = parseQ(line.delivered, line.unit, "Entregado"), cancelled = parseQ(line.cancelled, line.unit, "Cancelado");
+    if (quantity > requested - delivered - cancelled) throw new OperationError(422, "DELIVERY_QUANTITY_LIMIT", "La entrega supera la cantidad todavía pendiente");
+    const available = allocations.filter((row) => row.lineId === line.id).reduce((sum, row) => {
+      const actual = parseQ(row.actualQuantity, line.unit, "Preparado");
+      const delivered = parseQ(row.deliveredQuantity, line.unit, "Entregado físicamente");
+      const returned = parseQ(row.returnedQuantity, line.unit, "Devuelto");
+      const returnedDelivered = parseQ(row.returnedDeliveredQuantity, line.unit, "Devuelto por cliente");
+      return sum + actual - delivered - (returned - returnedDelivered);
+    }, ZERO);
+    if (physical > available) throw new OperationError(422, "DELIVERY_PHYSICAL_LIMIT", "La cantidad física supera lo despachado disponible");
+    let remaining = physical;
+    for (const allocation of allocations.filter((row) => row.lineId === line.id)) {
+      if (remaining <= ZERO) break;
+      const actual = parseQ(allocation.actualQuantity, line.unit, "Preparado");
+      const delivered = parseQ(allocation.deliveredQuantity, line.unit, "Entregado físicamente");
+      const returned = parseQ(allocation.returnedQuantity, line.unit, "Devuelto");
+      const returnedDelivered = parseQ(allocation.returnedDeliveredQuantity, line.unit, "Devuelto por cliente");
+      const undeliveredReturned = returned - returnedDelivered;
+      const free = actual - delivered - undeliveredReturned;
+      const take = free < remaining ? free : remaining;
+      if (take <= ZERO) continue;
+      const balance = balanceById.get(allocation.balanceId)!;
+      const nextDelivered = delivered + take;
+      const allocationComplete = nextDelivered + undeliveredReturned >= actual;
+      const nextState = allocationComplete ? (returned >= actual ? "returned" : returned > ZERO ? "partially_returned" : "delivered") : returned > ZERO ? "partially_returned" : "dispatched";
+      const costMinor = incrementalAllocationCost(BigInt(allocation.costMinor), delivered, take, actual);
+      await ctx.tx.preparationAllocation.update({ where: { id: allocation.id }, data: { deliveredQuantity: dbQ(nextDelivered, line.unit), state: nextState } });
+      await ctx.tx.stockFact.create({ data: {
+        requestId: ctx.envelope.requestId, lotId: allocation.lotId, orderId, lineId: line.id, kind: "delivery",
+        quantity: dbQ(take, line.unit), unit: line.unit, fromLocationId: balance.locationId,
+        fromCustodianId: assignment?.driverId ?? ctx.actor.id, costMinor,
+        currency: balance.lot.costCurrency, reason: "order_delivery", actorId: ctx.actor.id, occurredAt: ctx.now,
+      } });
+      remaining -= take;
+    }
+    await ctx.tx.operationOrderLine.update({ where: { id: line.id }, data: { delivered: { increment: dbQ(quantity, line.unit) } } });
+    await refreshLineCogs(ctx, orderId, line.id);
+  }
+  const updated = await loadOrder(ctx, orderId);
+  const complete = updated.lines.every((line) => parseQ(line.delivered, line.unit, "Entregado") + parseQ(line.cancelled, line.unit, "Cancelado") >= parseQ(line.requested, line.unit, "Pedido"));
+  await ctx.tx.operationOrder.update({ where: { id: orderId }, data: { fulfillmentState: complete ? "delivered" : "partially_delivered" } });
+  return stockOrderResultFor(ctx, orderId, coverage);
+}
+
+export async function inspectOrderReturn(ctx: CommandContext, orderId: string, inputs: StockReturnInput[]): Promise<StockReturnResult> {
+  const order = await loadOrder(ctx, orderId);
+  if (!["dispatched", "partially_delivered", "delivered"].includes(order.fulfillmentState))
+    throw new OperationError(409, "ORDER_RETURN_STATE", "Sólo se inspecciona stock que ya salió bajo custodia de reparto");
+  if (!inputs.length) throw new OperationError(422, "ORDER_RETURN_REQUIRED", "Indicá las cantidades físicas inspeccionadas");
+  if (new Set(inputs.map((row) => row.allocationId)).size !== inputs.length)
+    throw new OperationError(422, "ORDER_RETURN_DUPLICATE_ALLOCATION", "Cada preparación se inspecciona una sola vez por comando");
+  await requireOperationalPermission(ctx, order.memberId);
+  const allocations = await ctx.tx.preparationAllocation.findMany({ where: { orderId, state: { in: ["dispatched", "delivered", "partially_returned"] } }, orderBy: [{ lineId: "asc" }, { id: "asc" }] });
+  const assignment = await ctx.tx.deliveryAssignment.findFirst({ where: { orderId, driverId: { not: null } }, orderBy: { dispatchedAt: "desc" }, select: { driverId: true } });
+  if (assignment?.driverId === ctx.actor.id) throw new OperationError(403, "RETURN_INSPECTOR_INDEPENDENCE", "La devolución debe inspeccionarla alguien distinto del repartidor");
+  const sourceCustodianId = assignment?.driverId ?? ctx.actor.id;
+  const balances = allocations.length ? await ctx.tx.stockBalance.findMany({ where: { id: { in: [...new Set(allocations.map((row) => row.balanceId))] } }, include: { lot: true } }) : [];
+  const balanceById = new Map(balances.map((row) => [row.id, row]));
+  await requireStockObjectScope(ctx, balances.map((row) => row.locationId), balances.map((row) => row.custodianId));
+  const returned: StockReturnResult["returns"] = [];
+  const changedLines = new Set<string>();
+  for (const input of inputs) {
+    const line = order.lines.find((row) => row.id === input.lineId);
+    if (!line) throw new OperationError(422, "ORDER_RETURN_LINE_SCOPE", "El renglón no pertenece al pedido");
+    const allocation = allocations.find((row) => row.id === input.allocationId);
+    if (!allocation || allocation.lineId !== line.id)
+      throw new OperationError(422, "ORDER_RETURN_ALLOCATION_SCOPE", "La preparación no pertenece al renglón y pedido indicados");
+    const balance = balanceById.get(allocation.balanceId);
+    if (!balance) throw new OperationError(409, "ORDER_RETURN_BALANCE_MISSING", "No se encontró el saldo de origen de la preparación");
+    const take = positiveQuantity(input.quantity, line.unit, "Cantidad física devuelta");
+    const actual = parseQ(allocation.actualQuantity, line.unit, "Preparado");
+    const delivered = parseQ(allocation.deliveredQuantity, line.unit, "Entregado físicamente");
+    const alreadyReturned = parseQ(allocation.returnedQuantity, line.unit, "Devuelto");
+    const alreadyReturnedDelivered = parseQ(allocation.returnedDeliveredQuantity, line.unit, "Devuelto por cliente");
+    const available = input.origin === "customer"
+      ? delivered - alreadyReturnedDelivered
+      : actual - delivered - (alreadyReturned - alreadyReturnedDelivered);
+    if (take > available)
+      throw new OperationError(422, input.origin === "customer" ? "CUSTOMER_RETURN_LIMIT" : "UNDELIVERED_RETURN_LIMIT",
+        input.origin === "customer" ? "La devolución supera la cantidad ya entregada todavía no devuelta" : "La devolución supera la cantidad preparada que no llegó a entregarse");
+    const locationId = input.locationId ?? balance.locationId;
+    const custodianId = input.custodianId ?? balance.custodianId;
+    await requireStockObjectScope(ctx,[locationId],[custodianId]);
+    let destinationBalanceId: string | undefined;
+    if (input.disposition === "restock") {
+      const destination = await ctx.tx.stockBalance.upsert({
+        where: { lotId_locationId_custodianId: { lotId: allocation.lotId, locationId, custodianId } },
+        create: { id: randomUUID(), lotId: allocation.lotId, locationId, custodianId, unit: line.unit, quantity: dbQ(ZERO, line.unit), reserved: dbQ(ZERO, line.unit) },
+        update: {},
+      });
+      destinationBalanceId = destination.id;
+      await updateBalance(ctx, destination.id, take, ZERO);
+    }
+    const costMinor = incrementalAllocationCost(BigInt(allocation.costMinor), alreadyReturned, take, actual);
+    const cogsReversal = input.origin === "customer"
+      ? incrementalAllocationCost(BigInt(allocation.costMinor), alreadyReturnedDelivered, take, actual)
+      : ZERO;
+    const totalReturned = alreadyReturned + take;
+    const totalReturnedDelivered = alreadyReturnedDelivered + (input.origin === "customer" ? take : ZERO);
+    const undeliveredReturned = totalReturned - totalReturnedDelivered;
+    const allAccountedFor = delivered + undeliveredReturned >= actual;
+    const nextState = allAccountedFor
+      ? totalReturned >= actual ? "returned" : totalReturned > ZERO ? "partially_returned" : "delivered"
+      : totalReturned > ZERO ? "partially_returned" : "dispatched";
+    await ctx.tx.preparationAllocation.update({ where: { id: allocation.id }, data: {
+      returnedQuantity: dbQ(totalReturned, line.unit),
+      returnedDeliveredQuantity: dbQ(totalReturnedDelivered, line.unit),
+      state: nextState,
+    } });
+    await ctx.tx.operationOrderLine.update({ where: { id: line.id }, data: { returned: { increment: dbQ(take, line.unit) } } });
+    await ctx.tx.stockFact.create({ data: {
+      requestId: ctx.envelope.requestId, lotId: allocation.lotId, orderId, lineId: line.id, kind: "return",
+      quantity: dbQ(take, line.unit), unit: line.unit,
+      fromLocationId: input.origin === "undelivered" ? balance.locationId : undefined,
+      toLocationId: input.disposition === "restock" ? locationId : undefined,
+      fromCustodianId: input.origin === "undelivered" ? sourceCustodianId : undefined,
+      toCustodianId: input.disposition === "restock" ? custodianId : undefined,
+      costMinor, currency: balance.lot.costCurrency,
+      reason: `${input.origin}_return_${input.disposition}`,
+      actorId: ctx.actor.id, occurredAt: ctx.now,
+    } });
+    if (cogsReversal > ZERO) {
+      await ctx.tx.stockFact.create({ data: {
+        requestId: ctx.envelope.requestId, lotId: allocation.lotId, orderId, lineId: line.id, kind: "cogs_reversal",
+        quantity: dbQ(take, line.unit), unit: line.unit, costMinor: -cogsReversal,
+        currency: balance.lot.costCurrency, reason: "customer_return_cogs_reversal",
+        actorId: ctx.actor.id, occurredAt: ctx.now,
+      } });
+    }
+    changedLines.add(line.id);
+    returned.push({ lineId: line.id, allocationId: allocation.id, lotId: allocation.lotId, balanceId: destinationBalanceId,
+      quantity: formatQ(take, line.unit), origin: input.origin, disposition: input.disposition,
+      costMinor: costMinor.toString(), cogsReversalMinor: cogsReversal.toString() });
+  }
+  for (const lineId of changedLines) await refreshLineCogs(ctx, orderId, lineId);
+  const result = await stockOrderResultFor(ctx, orderId);
+  return { ...result, returns: returned };
+}
+
+const skuFields = {
+  code: z.string().trim().min(1).max(80),
+  name: z.string().trim().min(1).max(200),
+  variety: z.string().trim().min(1).max(120),
+  category: z.string().trim().min(1).max(100),
+  unit: z.enum(["g", "ud"]),
+  minQuantity: decimal.default("0"),
+  minVarieties: z.number().int().min(0).max(1000).default(0),
+};
+const skuCreateSchema = z.strictObject(skuFields);
+const skuUpdateSchema = z.strictObject({ ...skuFields, minQuantity: decimal, minVarieties: z.number().int().min(0).max(1000), active: z.boolean() });
+
+registerCommand("CatalogSkuCreated", {
+  kind: "sku", capability: "stock.adjust", create: true, schema: z.strictObject({ ...skuFields, evidence }),
+  execute: async (ctx) => {
+    const { evidence: proof, ...skuData } = ctx.envelope.data;
+    const input = skuCreateSchema.parse(skuData);
+    parseQ(input.minQuantity, input.unit, "Stock mínimo");
+    const sku = await ctx.tx.catalogSku.create({ data: { id: ctx.envelope.targetId, ...input, active: true } });
+    await audit(ctx, "CatalogSkuCreated", { skuId: sku.id, evidence: proof });
+    return { sku };
+  },
+});
+
+registerCommand("CatalogSkuUpdated", {
+  kind: "sku", capability: "stock.adjust", schema: z.strictObject({ ...skuUpdateSchema.shape, evidence }),
+  execute: async (ctx) => {
+    const { evidence: proof, ...skuData } = ctx.envelope.data;
+    const input = skuUpdateSchema.parse(skuData);
+    const current = await ctx.tx.catalogSku.findUnique({ where: { id: ctx.envelope.targetId } });
+    if (!current) throw new OperationError(404, "SKU_NOT_FOUND", "No se encontró el producto de catálogo");
+    await requireEligibleAppSheetReplacementSkus(ctx.tx, [current.id]);
+    parseQ(input.minQuantity, input.unit, "Stock mínimo");
+    if (current.unit !== input.unit)
+      throw new OperationError(409, "SKU_UNIT_IMMUTABLE", "La unidad de un SKU es inmutable; creá otro SKU para usar una unidad distinta");
+    const sku = await ctx.tx.catalogSku.update({ where: { id: current.id }, data: input });
+    await audit(ctx, "CatalogSkuUpdated", { skuId: sku.id, evidence: proof });
+    await recordAppSheetCanonicalSkuMutation(ctx, current, sku);
+    return { sku };
+  },
+});
+
+const purchaseLineInput = z.strictObject({
+  lineId: objectId,
+  skuId: objectId,
+  unit: z.enum(["g", "ud"]),
+  quantity: decimal,
+  unitCost: decimal,
+});
+const purchaseLineStored = z.strictObject({
+  lineId: objectId,
+  skuId: objectId,
+  unit: z.enum(["g", "ud"]),
+  quantity: decimal,
+  unitCost: decimal,
+  lineTotalMinor: z.string().regex(/^(0|[1-9]\d{0,18})$/),
+});
+type PurchaseLine = z.infer<typeof purchaseLineStored>;
+
+function readPurchaseLines(value: unknown): PurchaseLine[] {
+  const parsed = z.array(purchaseLineStored).safeParse(value);
+  if (!parsed.success) throw new OperationError(409, "PURCHASE_LINES_CORRUPT", "Los renglones de la compra requieren revisión");
+  return parsed.data;
+}
+
+function checkDatabaseMinor(value: bigint): bigint {
+  if (value < 0n || value > 9223372036854775807n)
+    throw new OperationError(422, "PURCHASE_TOTAL_RANGE", "El costo excede el rango monetario admitido");
+  return value;
+}
+
+function positiveUnitCost(value: string): void {
+  let scaled: bigint;
+  try {
+    scaled = parseDecimal(value, 12);
+  } catch {
+    throw new OperationError(422, "STOCK_UNIT_COST_INVALID", "El costo unitario requiere hasta doce decimales exactos");
+  }
+  if (scaled <= ZERO) throw new OperationError(422, "STOCK_UNIT_COST_REQUIRED", "Registrá un costo unitario conocido mayor que cero");
+}
+
+registerCommand("PurchaseOrderCreated", {
+  kind: "purchase", capability: "purchases.write", create: true,
+  schema: z.strictObject({ supplierId: objectId, agreementDate: civilDate, expectedDate: civilDate.optional(), currency, items: z.array(purchaseLineInput).min(1).max(200), evidence }),
+  execute: async (ctx) => {
+    const input = ctx.envelope.data as { supplierId: string; agreementDate: string; expectedDate?: string; currency: "ARS" | "USD"; items: z.infer<typeof purchaseLineInput>[]; evidence: Record<string, unknown> };
+    if (input.expectedDate && input.expectedDate < input.agreementDate)
+      throw new OperationError(422, "PURCHASE_DATE_ORDER", "La fecha prevista no puede ser anterior al acuerdo");
+    const supplier = await ctx.tx.supplier.findFirst({ where: { id: input.supplierId, active: true }, select: { id: true } });
+    if (!supplier) throw new OperationError(422, "PURCHASE_SUPPLIER_REQUIRED", "Elegí un proveedor activo");
+    if (new Set(input.items.map((item) => item.lineId)).size !== input.items.length)
+      throw new OperationError(422, "PURCHASE_DUPLICATE_LINE", "Cada renglón de compra debe tener un identificador único");
+    await requireEligibleAppSheetReplacementSkus(ctx.tx, [...new Set(input.items.map(item => item.skuId))]);
+    const stored: PurchaseLine[] = [];
+    let totalMinor = ZERO;
+    for (const item of input.items) {
+      const quantity = positiveQuantity(item.quantity, item.unit, "Cantidad comprada");
+      positiveUnitCost(item.unitCost);
+      const sku = await ctx.tx.catalogSku.findUnique({ where: { id: item.skuId } });
+      if (!sku?.active || sku.unit !== item.unit)
+        throw new OperationError(422, "PURCHASE_SKU_SCOPE", "El producto debe estar activo y coincidir con la unidad del renglón");
+      const canonicalQuantity = formatQ(quantity, item.unit);
+      const lineTotalMinor = checkDatabaseMinor(moneyForQuantity(canonicalQuantity, item.unitCost));
+      totalMinor = checkDatabaseMinor(totalMinor + lineTotalMinor);
+      stored.push({ ...item, quantity: canonicalQuantity, lineTotalMinor: lineTotalMinor.toString() });
+    }
+    const order = await ctx.tx.purchaseOrder.create({ data: {
+      id: ctx.envelope.targetId, supplierId: supplier.id, agreementDate: input.agreementDate,
+      expectedDate: input.expectedDate, currency: input.currency, totalMinor, status: "draft", items: json(stored),
+    } });
+    await audit(ctx, "PurchaseOrderCreated", { supplierId: supplier.id, totalMinor: totalMinor.toString(), currency: input.currency, items: stored, evidence: input.evidence });
+    return { purchaseOrder: order };
+  },
+});
+
+registerCommand("PurchaseOrderApproved", {
+  kind: "purchase", capability: "purchases.write", schema: z.strictObject({ evidence }),
+  execute: async (ctx) => {
+    const order = await ctx.tx.purchaseOrder.findUnique({ where: { id: ctx.envelope.targetId } });
+    if (!order) throw new OperationError(404, "PURCHASE_NOT_FOUND", "No se encontró la compra");
+    if (order.status !== "draft") throw new OperationError(409, "PURCHASE_APPROVAL_STATE", "Sólo se puede aprobar una compra en borrador");
+    const purchaseLines = readPurchaseLines(order.items);
+    await requireEligibleAppSheetReplacementSkus(ctx.tx, [...new Set(purchaseLines.map(line => line.skuId))]);
+    const sourceObject = await ctx.tx.operationObject.findUnique({ where: { id: order.id }, select: { createdBy: true } });
+    if (sourceObject?.createdBy === ctx.actor.id)
+      throw new OperationError(409, "INDEPENDENT_REVIEW_REQUIRED", "La compra debe aprobarla alguien distinto de quien la creó");
+    const approved = await ctx.tx.purchaseOrder.update({ where: { id: order.id }, data: { status: "approved" } });
+    await audit(ctx, "PurchaseOrderApproved", { purchaseId: order.id, evidence: ctx.envelope.data.evidence as Record<string, unknown> });
+    return { purchaseOrder: approved, approvedBy: ctx.actor.id, approvedAt: ctx.now };
+  },
+});
+
+const goodsReceiptItem = z.strictObject({ lineId: objectId, quantity: decimal, lotLabel: z.string().trim().min(1).max(200), expiresOn: civilDate.optional() });
+registerCommand("GoodsReceived", {
+  kind: "receipt", capability: "stock.receive", create: true,
+  schema: z.strictObject({ purchaseId: objectId, receivedDate: civilDate, locationId: objectId, custodianId: objectId.optional(), items: z.array(goodsReceiptItem).min(1).max(200), evidence }),
+  execute: async (ctx) => {
+    const input = ctx.envelope.data as { purchaseId: string; receivedDate: string; locationId: string; custodianId?: string; items: z.infer<typeof goodsReceiptItem>[]; evidence: Record<string, unknown> };
+    if (input.receivedDate > civilToday(ctx.now))
+      throw new OperationError(422, "RECEIPT_DATE_FUTURE", "La fecha de recepción no puede ser futura");
+    if (input.items.some((item) => item.expiresOn && item.expiresOn < input.receivedDate))
+      throw new OperationError(422, "RECEIPT_EXPIRY_DATE", "El vencimiento no puede preceder la recepción física");
+    const purchase = await ctx.tx.purchaseOrder.findUnique({ where: { id: input.purchaseId } });
+    if (!purchase || !["approved", "partially_received"].includes(purchase.status))
+      throw new OperationError(409, "PURCHASE_RECEIPT_STATE", "La compra debe estar aprobada y todavía pendiente de recepción");
+    if (new Set(input.items.map((item) => item.lineId)).size !== input.items.length)
+      throw new OperationError(422, "RECEIPT_DUPLICATE_LINE", "Cada renglón puede aparecer una sola vez por recepción");
+    const location = await ctx.tx.location.findFirst({ where: { id: input.locationId, active: true }, select: { id: true } });
+    if (!location) throw new OperationError(422, "RECEIPT_LOCATION_REQUIRED", "Elegí una ubicación activa");
+    const custodianId = input.custodianId ?? ctx.actor.id;
+    const custodian = await ctx.tx.user.findFirst({ where: { id: custodianId, active: true }, select: { id: true } });
+    if (!custodian) throw new OperationError(422, "RECEIPT_CUSTODIAN_REQUIRED", "Elegí una persona activa responsable de la custodia");
+    await requireStockObjectScope(ctx,[location.id],[custodian.id]);
+    const purchaseLines = readPurchaseLines(purchase.items);
+    await requireEligibleAppSheetReplacementSkus(ctx.tx, [...new Set(purchaseLines.map(line => line.skuId))]);
+    const purchaseLineById = new Map(purchaseLines.map((line) => [line.lineId, line]));
+    const existingReceipts = await ctx.tx.goodsReceipt.findMany({ where: { purchaseId: purchase.id }, select: { items: true } });
+    const receivedByLine = new Map<string, bigint>();
+    for (const receipt of existingReceipts) {
+      if (!Array.isArray(receipt.items)) throw new OperationError(409, "RECEIPT_HISTORY_CORRUPT", "El historial de recepción requiere revisión");
+      for (const raw of receipt.items) {
+        if (!raw || typeof raw !== "object" || typeof (raw as { lineId?: unknown }).lineId !== "string" || typeof (raw as { quantity?: unknown }).quantity !== "string")
+          throw new OperationError(409, "RECEIPT_HISTORY_CORRUPT", "El historial de recepción requiere revisión");
+        const line = purchaseLineById.get((raw as { lineId: string }).lineId);
+        if (!line) throw new OperationError(409, "RECEIPT_HISTORY_CORRUPT", "El historial referencia un renglón inexistente");
+        const quantity = parseQ((raw as { quantity: string }).quantity, line.unit, "Cantidad recibida previamente");
+        receivedByLine.set(line.lineId, (receivedByLine.get(line.lineId) ?? ZERO) + quantity);
+      }
+    }
+    const receiptId = ctx.envelope.targetId;
+    const receivedAt = new Date(`${input.receivedDate}T12:00:00-03:00`);
+    const receiptItems: Array<Record<string, unknown>> = [];
+    for (const item of input.items) {
+      const line = purchaseLineById.get(item.lineId);
+      if (!line) throw new OperationError(422, "RECEIPT_LINE_SCOPE", "El renglón no pertenece a esta compra");
+      const sku = await ctx.tx.catalogSku.findUnique({ where: { id: line.skuId } });
+      if (!sku || sku.unit !== line.unit) throw new OperationError(409, "RECEIPT_SKU_CHANGED", "El producto o unidad de la compra requiere revisión");
+      const quantity = positiveQuantity(item.quantity, line.unit, "Cantidad recibida");
+      positiveUnitCost(line.unitCost);
+      const ordered = parseQ(line.quantity, line.unit, "Cantidad comprada");
+      const previouslyReceived = receivedByLine.get(line.lineId) ?? ZERO;
+      if (previouslyReceived + quantity > ordered)
+        throw new OperationError(422, "RECEIPT_QUANTITY_LIMIT", "La recepción supera la cantidad acordada pendiente");
+      const costMinor = checkDatabaseMinor(moneyForQuantity(formatQ(quantity, line.unit), line.unitCost));
+      const lotId = randomUUID();
+      const balanceId = randomUUID();
+      const lot = await ctx.tx.inventoryLot.create({ data: {
+        id: lotId, skuId: sku.id, receiptId, purchaseLineId: line.lineId, label: item.lotLabel,
+        unit: line.unit, unitCost: new Prisma.Decimal(line.unitCost), costCurrency: purchase.currency,
+        receivedAt, expiresOn: item.expiresOn,
+      } });
+      await ctx.tx.stockBalance.create({ data: {
+        id: balanceId, lotId, locationId: location.id, custodianId: custodian.id,
+        unit: line.unit, quantity: dbQ(quantity, line.unit), reserved: dbQ(ZERO, line.unit),
+      } });
+      await ctx.tx.stockFact.create({ data: {
+        requestId: ctx.envelope.requestId, lotId, kind: "receipt", quantity: dbQ(quantity, line.unit), unit: line.unit,
+        toLocationId: location.id, toCustodianId: custodian.id, costMinor, currency: purchase.currency,
+        reason: "purchase_goods_receipt", actorId: ctx.actor.id, occurredAt: ctx.now,
+      } });
+      receiptItems.push({ lineId: line.lineId, skuId: sku.id, lotId: lot.id, balanceId, quantity: formatQ(quantity, line.unit), unit: line.unit, unitCost: line.unitCost, costMinor: costMinor.toString(), currency: purchase.currency, lotLabel: item.lotLabel, expiresOn: item.expiresOn ?? null });
+      receivedByLine.set(line.lineId, previouslyReceived + quantity);
+    }
+    const receipt = await ctx.tx.goodsReceipt.create({ data: {
+      id: receiptId, purchaseId: purchase.id, receivedDate: input.receivedDate, receivedBy: ctx.actor.id,
+      items: json(receiptItems), evidence: json(input.evidence),
+    } });
+    const fullyReceived = purchaseLines.every((line) => (receivedByLine.get(line.lineId) ?? ZERO) >= parseQ(line.quantity, line.unit, "Cantidad comprada"));
+    const updatedPurchase = await ctx.tx.purchaseOrder.update({ where: { id: purchase.id }, data: { status: fullyReceived ? "received" : "partially_received" } });
+    await touchAggregate(ctx, purchase.id);
+    await audit(ctx, "GoodsReceived", { purchaseId: purchase.id, receiptId, receivedDate: input.receivedDate, items: receiptItems, evidence: input.evidence });
+    return { receipt, purchaseOrder: updatedPurchase, lots: receiptItems };
+  },
+});
+
+const stockOpeningSchema = z.strictObject({
+  skuId: objectId,
+  label: z.string().trim().min(1).max(200),
+  quantity: decimal,
+  unitCost: decimal,
+  costCurrency: currency,
+  receivedDate: civilDate,
+  expiresOn: civilDate.optional(),
+  locationId: objectId,
+  custodianId: objectId.optional(),
+  preparedBy: objectId,
+  evidence,
+  sourceRecordId: objectId.optional(),
+});
+
+type StockOpeningSku = { id: string; unit: string; sourceId: string | null; sourceSystem: string | null; active: boolean };
+function requireStockOpeningSku(sku: StockOpeningSku | null): StockOpeningSku {
+  if (!sku || (!sku.active && sku.sourceSystem !== APPSHEET_CANONICAL_SOURCE_SYSTEM))
+    throw new OperationError(422, "STOCK_OPENING_SKU_REQUIRED", "Elegí un producto de catálogo activo");
+  return sku;
+}
+
+async function validateStockOpeningSku(
+  ctx: CommandContext,
+  sku: StockOpeningSku | null,
+  sourceRecordId: string | undefined,
+  quantity: string,
+): Promise<StockOpeningSku> {
+  const verifiedSku = requireStockOpeningSku(sku);
+  const sourceBinding = await requireAppSheetOpeningSourceRecord(ctx, sourceRecordId, {
+    kind: "stock", quantity, unit: verifiedSku.unit, skuSourceId: verifiedSku.sourceId ?? undefined,
+  });
+  const hasImportedIdentity = verifiedSku.sourceSystem !== null || verifiedSku.sourceId !== null;
+  if (sourceBinding?.captureId && hasImportedIdentity && verifiedSku.sourceSystem !== APPSHEET_CANONICAL_SOURCE_SYSTEM)
+    throw new OperationError(423, "APPSHEET_SKU_NOT_ELIGIBLE", "El producto ligado a una captura AppSheet debe tener una procedencia canónica completa.");
+  if (!verifiedSku.active) {
+    if (!sourceBinding?.captureId)
+      throw new OperationError(422, "STOCK_OPENING_SKU_REQUIRED", "Elegí un producto de catálogo activo");
+    const authority = await ctx.tx.operationAuthority.findUnique({
+      where: { id: "operations" }, select: { mode: true },
+    });
+    if (authority?.mode === "active")
+      throw new OperationError(423, "APPSHEET_SKU_NOT_ELIGIBLE", "El producto AppSheet debió activarse junto con la autoridad revisada.");
+    await requireReviewedCanonicalSkuForAppSheetOpening(ctx, verifiedSku.id, sourceBinding.captureId);
+  } else if (verifiedSku.sourceSystem === APPSHEET_CANONICAL_SOURCE_SYSTEM) {
+    const authority = await ctx.tx.operationAuthority.findUnique({
+      where: { id: "operations" }, select: { mode: true, cutoverProfile: true, captureManifestId: true },
+    });
+    if (authority?.mode !== "active" || authority.cutoverProfile !== "appsheet-replacement" || authority.captureManifestId !== sourceBinding?.captureId)
+      throw new OperationError(423, "APPSHEET_SKU_NOT_ELIGIBLE", "El producto AppSheet sólo puede abrir stock bajo su captura activa revisada.");
+    await requireEligibleAppSheetReplacementSkus(ctx.tx, [verifiedSku.id]);
+  } else {
+    await requireEligibleAppSheetReplacementSkus(ctx.tx, [verifiedSku.id]);
+  }
+  return verifiedSku;
+}
+
+type JsonRecord = Record<string, unknown>;
+function jsonRecord(value: unknown): JsonRecord | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : null;
+}
+function sourceLotFailure(reason: string): never {
+  throw new OperationError(423, "APPSHEET_SOURCE_LOT_NOT_ELIGIBLE", "El lote de origen AppSheet requiere una revisión vigente de captura, catálogo y apertura.", { reason });
+}
+function nativeLotFailure(reason: string): never {
+  throw new OperationError(423, "APPSHEET_NATIVE_STOCK_LOT_NOT_ELIGIBLE", "El lote nativo requiere una recepción Bombo íntegra y trazable.", { reason });
+}
+function appSheetToday(now: Date): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires" }).format(now);
+}
+function sourceDateForLot(date: Date): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires" }).format(date);
+}
+
+type SourceLotReviewProof = {
+  schemaVersion: 2;
+  captureId: string;
+  historySnapshotId: string;
+  manifestHash: string;
+  sourceRecordId: string;
+  sourceKey: string;
+  sourceContentHash: string;
+  sourceDataHash: string;
+  sourceRowHash: string;
+  sourceDerivationHash: string;
+  sourceStockDefinitionHash: string;
+  sourceMovementRowsetHash: string;
+  sourceSelectionHash: string;
+  sourceStockActual: string;
+  sourceDeliveryDate: string;
+  targetLotId: string;
+  targetLotVersion: number;
+  skuId: string;
+  skuSourceId: string;
+  openingFactId: string;
+  openingSourceRecordId: string;
+  openingQuantity: string;
+  openingUnit: string;
+  preparedBy: string;
+  reviewerId: string;
+  reviewedAt: string;
+};
+
+type AppSheetSourceLotSource = { id: string; sourceKey: string; sourceTable: string; sourceSystem: string; snapshotId: string; fileHash: string; contentHash: string; treatment: string };
+type AppSheetSourceLotInput = { sourceRecordId: string; sourceKey: string; contentHash: string; preparedBy: string };
+type AppSheetSourceLotReviewPreparation = {
+  lot: AppSheetSourceLotCandidate;
+  sku: StockOpeningSku;
+  source: AppSheetSourceLotSource;
+  sourceLabelIdentity: AppSheetSourceLotLabelIdentity | null;
+  proof: Omit<SourceLotReviewProof, "targetLotVersion">;
+  openingFactId: string;
+  identity: Prisma.LegacyIdentityGetPayload<object> | null;
+};
+
+type SourceCatalogVarietyRelationship = { status: unknown; sourceValue: unknown; targetSourceRecordId: unknown } | null;
+type SourceCatalogSkuRelationship = { sourceKey: string; sourceRecordId: string; variety: SourceCatalogVarietyRelationship };
+
+function sourceRelationSku(attributes: unknown): SourceCatalogSkuRelationship {
+  const relationships = jsonRecord(attributes)?.relationships;
+  if (!Array.isArray(relationships)) return sourceLotFailure("source_catalog_relationship_missing");
+  const relationship = (sourceField: string) => relationships.map(jsonRecord).filter((item) => item?.sourceField === sourceField &&
+    item.targetTable === "D_Catalogo_Mercaderia" && item.targetField === (sourceField === "Codigo_Detalle" ? "Codigo_Detalle" : "CatalogoID"));
+  const codeLinks = relationship("Codigo_Detalle");
+  if (codeLinks.length !== 1 || codeLinks[0]!.status !== "unique" || typeof codeLinks[0]!.targetSourceKey !== "string" ||
+      !codeLinks[0]!.targetSourceKey.trim() || typeof codeLinks[0]!.targetSourceRecordId !== "string" || !codeLinks[0]!.targetSourceRecordId.trim())
+    return sourceLotFailure("source_catalog_code_relationship_not_unique");
+  const varietyLinks = relationship("Variedad_Cann");
+  if (varietyLinks.length > 1) return sourceLotFailure("source_catalog_variety_relationship_ambiguous");
+  if (varietyLinks.length === 1) {
+    const variety = varietyLinks[0]!;
+    if (variety.status !== "not_provided" && (variety.status !== "unique" || variety.targetSourceRecordId !== codeLinks[0]!.targetSourceRecordId))
+      return sourceLotFailure("source_catalog_variety_relationship_not_unique");
+  }
+  const variety = varietyLinks[0];
+  return {
+    sourceKey: codeLinks[0]!.targetSourceKey,
+    sourceRecordId: codeLinks[0]!.targetSourceRecordId,
+    variety: variety ? {
+      status: variety.status,
+      sourceValue: variety.sourceValue,
+      targetSourceRecordId: variety.targetSourceRecordId,
+    } : null,
+  };
+}
+
+/** Read a single verbatim string from a normalized, capture-bound source payload. */
+function normalizedSourceText(normalized: unknown, header: string): string | null {
+  const columns = jsonRecord(normalized)?.columns;
+  if (!Array.isArray(columns)) return null;
+  const matches = columns.filter((column) => jsonRecord(column)?.header === header);
+  if (matches.length !== 1) return null;
+  const value = jsonRecord(matches[0])?.value;
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * The AppSheet label is assembled from the dereferenced catalogue variety,
+ * the captured App formula result, and the captured Initial value. Do not
+ * recreate any of those values from a Bombo SKU or a current stock balance.
+ */
+function appSheetSourceLotLabelIdentity(
+  sourceNormalized: unknown,
+  varietyRelationship: SourceCatalogVarietyRelationship,
+  catalogueNormalized: unknown,
+): AppSheetSourceLotLabelIdentity | null {
+  const sourceReference = normalizedSourceText(sourceNormalized, "Variedad_Cann");
+  const description = normalizedSourceText(sourceNormalized, "Descripcion");
+  const purchaseLotId = normalizedSourceText(sourceNormalized, "Id_Compra_Lote");
+  if (sourceReference === null || description === null || purchaseLotId === null || !varietyRelationship) return null;
+
+  if (sourceReference === "") {
+    if (varietyRelationship.status !== "not_provided" ||
+        (varietyRelationship.sourceValue !== null && varietyRelationship.sourceValue !== "") || description !== "") return null;
+    return { variety: "", description, purchaseLotId };
+  }
+
+  if (varietyRelationship.status !== "unique" || varietyRelationship.sourceValue !== sourceReference ||
+      typeof varietyRelationship.targetSourceRecordId !== "string" || !varietyRelationship.targetSourceRecordId)
+    return null;
+  const variety = normalizedSourceText(catalogueNormalized, "Variedad_Cann");
+  const catalogueDescription = normalizedSourceText(catalogueNormalized, "Descripcion");
+  if (variety === null || catalogueDescription === null || description !== catalogueDescription) return null;
+  return { variety, description, purchaseLotId };
+}
+
+async function prepareAppSheetSourceLotReview(
+  ctx: CommandContext,
+  input: AppSheetSourceLotInput,
+  options: { mode?: "review" | "active"; expectedReviewerId?: string } = {},
+): Promise<AppSheetSourceLotReviewPreparation> {
+  const mode = options.mode ?? "review";
+  const authority = await ctx.tx.operationAuthority.findUnique({ where: { id: "operations" }, select: { mode: true, cutoverProfile: true, captureManifestId: true } });
+  if (!authority?.captureManifestId || authority.cutoverProfile !== "appsheet-replacement" ||
+      (mode === "active" ? authority.mode !== "active" : authority.mode !== "shadow"))
+    sourceLotFailure(mode === "active" ? "source_lot_use_requires_active_replacement" : "source_lot_review_requires_shadow_replacement");
+  const capture = await requireApprovedAppSheetFinalDeltaGate(ctx.tx, authority.captureManifestId);
+  const [historySnapshots, sourceMetadata, lot] = await Promise.all([
+    ctx.tx.legacyImportSnapshot.findMany({ where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, captureManifestId: capture.captureId,
+      fileHash: capture.manifestHash, importerVersion: APPSHEET_HISTORY_IMPORTER_VERSION }, take: 2 }),
+    ctx.tx.legacySourceRecord.findUnique({ where: { id: input.sourceRecordId }, select: { id: true, snapshotId: true, sourceTable: true, sourceKey: true,
+      fileHash: true, contentHash: true, treatment: true, normalized: true } }),
+    ctx.tx.inventoryLot.findUnique({ where: { id: ctx.envelope.targetId } }),
+  ]);
+  if (historySnapshots.length !== 1) sourceLotFailure("source_history_snapshot_missing_or_ambiguous");
+  const history = historySnapshots[0]!;
+  if (history.status !== "reviewed" || !history.reviewedBy || history.createdBy === history.reviewedBy ||
+      !(await ctx.tx.user.findFirst({ where: { id: history.reviewedBy, active: true }, select: { id: true } })))
+    sourceLotFailure("source_history_reviewer_not_active_authority");
+  if (!sourceMetadata || sourceMetadata.snapshotId !== history.id || sourceMetadata.sourceTable !== "C_Mercaderia" || sourceMetadata.sourceKey !== input.sourceKey ||
+      sourceMetadata.fileHash !== capture.manifestHash || sourceMetadata.contentHash !== input.contentHash || sourceMetadata.treatment !== "fact_candidate")
+    sourceLotFailure("source_record_capture_or_hash_mismatch");
+  const source = sourceMetadata;
+  const openExceptions = await ctx.tx.legacyException.count({ where: { snapshotId: history.id, sourceRecordId: source.id, status: "open" } });
+  if (openExceptions !== 0) sourceLotFailure("source_record_has_open_exceptions");
+  const publication = await ctx.tx.legacyHistoryPublication.findUnique({ where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM } });
+  if (!publication || publication.snapshotId !== history.id || publication.fileHash !== capture.manifestHash || publication.mappingId !== APPSHEET_HISTORY_MAPPING_ID)
+    sourceLotFailure("source_history_publication_stale");
+  const duplicateRows = await ctx.tx.legacySourceRecord.count({ where: { snapshotId: history.id, sourceTable: "C_Mercaderia", sourceKey: source.sourceKey } });
+  const exactLink = lot?.sourceSystem === APPSHEET_HISTORY_SOURCE_SYSTEM && lot.sourceId === source.sourceKey;
+  const unlinked = lot?.sourceSystem === null && lot.sourceId === null;
+  if (duplicateRows !== 1 || !lot || lot.unit !== "g" || (!exactLink && !unlinked) || (mode === "active" && !exactLink))
+    sourceLotFailure("source_lot_or_target_not_unlinked");
+  const [identities, facts, openingFacts] = await Promise.all([
+    ctx.tx.legacyIdentity.findMany({ where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, sourceTable: "C_Mercaderia", sourceKey: source.sourceKey, destinationType: "inventoryLot" } }),
+    ctx.tx.legacyHistoricalFact.findMany({ where: { snapshotId: history.id, sourceRecordId: source.id, mappingId: APPSHEET_HISTORY_MAPPING_ID, correctionOf: null } }),
+    ctx.tx.stockFact.findMany({ where: { lotId: lot.id, kind: "opening" }, orderBy: { id: "asc" } }),
+  ]);
+  if (exactLink) {
+    if (identities.length !== 1 || identities[0]!.destinationId !== lot.id ||
+        (options.expectedReviewerId && identities[0]!.approvedBy === null))
+      sourceLotFailure("source_lot_identity_review_missing_or_stale");
+  } else if (identities.length !== 0) sourceLotFailure("source_lot_identity_already_exists");
+  if (facts.length !== 1 || facts[0]!.sourceHash !== source.contentHash || facts[0]!.kind !== "purchase") sourceLotFailure("source_history_fact_missing_or_stale");
+  if (openingFacts.length !== 1 || !openingFacts[0]!.sourceRecordId || openingFacts[0]!.unit !== "g")
+    sourceLotFailure("stock_opening_source_proof_missing_or_ambiguous");
+  const derivation = await deriveAppSheetSourceStock(ctx.tx, source, capture.captureId);
+  if (derivation.status !== "derived") sourceLotFailure(`source_stock_derivation_${derivation.code}`);
+  if (derivation.sourceRecordId !== source.id || derivation.sourceKey !== source.sourceKey ||
+      derivation.sourceContentHash !== source.contentHash || derivation.manifestHash !== capture.manifestHash)
+    sourceLotFailure("source_stock_derivation_binding_mismatch");
+  let sourceStockActual: string;
+  try {
+    const quantity = parseQ(derivation.sourceStockActual, "g", "Stock_Actual");
+    if (quantity <= ZERO) sourceLotFailure("source_stock_actual_not_positive");
+    sourceStockActual = formatQ(quantity, "g");
+  } catch { return sourceLotFailure("source_stock_actual_invalid"); }
+  const sourceDeliveryDate = derivation.sourceDeliveryDate;
+  if (sourceDeliveryDate > appSheetToday(ctx.now)) sourceLotFailure("source_delivery_date_future");
+  if (!openingFacts[0]!.quantity.equals(sourceStockActual) || sourceDateForLot(lot.receivedAt) !== sourceDeliveryDate)
+    sourceLotFailure("stock_opening_does_not_match_source_lot");
+  const sourceSku = sourceRelationSku(facts[0]!.attributes);
+  const skuSourceId = sourceSku.sourceKey;
+  const targetSourceRow = await ctx.tx.legacySourceRecord.findUnique({ where: { id: sourceSku.sourceRecordId }, select: {
+    id: true, snapshotId: true, sourceTable: true, sourceKey: true, normalized: true,
+  } });
+  if (!targetSourceRow || targetSourceRow.snapshotId !== history.id || targetSourceRow.sourceTable !== "D_Catalogo_Mercaderia" || targetSourceRow.sourceKey !== skuSourceId)
+    sourceLotFailure("source_catalog_relationship_target_missing_or_stale");
+  const sourceLabelIdentity = appSheetSourceLotLabelIdentity(sourceMetadata.normalized, sourceSku.variety, targetSourceRow.normalized);
+  const sku = await ctx.tx.catalogSku.findFirst({ where: { id: lot.skuId, sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM, sourceId: skuSourceId, unit: "g" },
+    select: { id: true, unit: true, sourceId: true, sourceSystem: true, active: true } });
+  if (!sku) sourceLotFailure("source_catalog_relationship_does_not_match_canonical_sku");
+  const skuIdentities = await ctx.tx.legacyIdentity.findMany({ where: { sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM, sourceTable: "D_Catalogo_Mercaderia",
+    sourceKey: skuSourceId, destinationType: "sku" } });
+  if (skuIdentities.length !== 1 || skuIdentities[0]!.destinationId !== sku.id) sourceLotFailure("canonical_sku_identity_not_unique");
+  await requireReviewedCanonicalSkuForAppSheetOpening(ctx, sku.id, capture.captureId);
+  const openingSource = await requireAppSheetOpeningSourceRecord(ctx, openingFacts[0]!.sourceRecordId!, {
+    kind: "stock", quantity: sourceStockActual, unit: "g", skuSourceId, allowAlreadyLinked: true,
+  });
+  if (!openingSource || openingSource.captureId !== capture.captureId) sourceLotFailure("stock_opening_capture_mismatch");
+  const openingReceipt = await ctx.tx.commandReceipt.findUnique({ where: { requestId: openingFacts[0]!.requestId } });
+  const openingResponse = jsonRecord(openingReceipt?.response), openingResult = jsonRecord(openingResponse?.result), opening = jsonRecord(openingResult?.opening);
+  const openingAudits = await ctx.tx.operationAudit.findMany({ where: { objectId: lot.id, requestId: openingFacts[0]!.requestId, action: "StockOpeningRecorded" } });
+  const openingAudit = openingAudits.filter((row) => jsonRecord(row.details)?.preparedBy === input.preparedBy);
+  const openingVersionAudit = openingAudits.filter((row) => jsonRecord(row.details)?.version === openingReceipt?.resultingVersion);
+  const preparedBy = input.preparedBy;
+  const activePreparer = await ctx.tx.user.findFirst({ where: { id: preparedBy, active: true }, select: { id: true } });
+  if (!openingReceipt || openingReceipt.command !== "StockOpeningRecorded" || openingReceipt.targetId !== lot.id ||
+      openingFacts[0]!.actorId !== openingReceipt.actorId || openingResponse?.targetId !== lot.id || openingResponse.version !== openingReceipt.resultingVersion ||
+      opening?.quantity !== sourceStockActual || opening?.preparedBy !== preparedBy || opening?.approvedBy !== openingReceipt.actorId || preparedBy === ctx.actor.id ||
+      !activePreparer || openingReceipt.resultingVersion < 1 ||
+      openingAudit.length !== 1 || openingAudit[0]!.actorId !== openingReceipt.actorId ||
+      openingVersionAudit.length !== 1 || openingVersionAudit[0]!.actorId !== openingReceipt.actorId)
+    sourceLotFailure("stock_opening_receipt_or_independent_preparation_missing");
+  if (mode === "active" && (!options.expectedReviewerId || options.expectedReviewerId === preparedBy))
+    sourceLotFailure("source_lot_reviewer_not_independent_of_stock_opening");
+  return {
+    lot: { id: lot.id, skuId: lot.skuId, unit: lot.unit, receivedAt: lot.receivedAt, sourceSystem: lot.sourceSystem, sourceId: lot.sourceId },
+    sku,
+    source: { id: source.id, sourceKey: source.sourceKey, sourceTable: source.sourceTable, sourceSystem: history.sourceSystem,
+      snapshotId: source.snapshotId, fileHash: source.fileHash, contentHash: source.contentHash, treatment: source.treatment },
+    sourceLabelIdentity,
+    proof: { schemaVersion: 2, captureId: capture.captureId, historySnapshotId: history.id, manifestHash: capture.manifestHash,
+      sourceRecordId: source.id, sourceKey: source.sourceKey, sourceContentHash: source.contentHash, sourceStockActual, sourceDeliveryDate,
+      sourceDataHash: derivation.dataHash, sourceRowHash: derivation.sourceRowHash, sourceDerivationHash: derivation.derivationHash,
+      sourceStockDefinitionHash: derivation.definition.bindingHash, sourceMovementRowsetHash: derivation.movementRowsetHash,
+      sourceSelectionHash: derivation.selectionHash,
+      targetLotId: lot.id, skuId: sku.id, skuSourceId, openingFactId: openingFacts[0]!.id, openingSourceRecordId: openingSource.sourceRecordId,
+      openingQuantity: openingFacts[0]!.quantity.toString(), openingUnit: openingFacts[0]!.unit, preparedBy, reviewerId: ctx.actor.id,
+      reviewedAt: ctx.now.toISOString() },
+    openingFactId: openingFacts[0]!.id, identity: null,
+  };
+}
+
+const appSheetSourceLotReviewInput = z.strictObject({
+  sourceRecordId: objectId,
+  sourceKey: z.string().trim().min(1).max(150),
+  contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+  preparedBy: objectId,
+  evidence,
+});
+const appSheetSourceLotProofSchema = z.strictObject({
+  schemaVersion: z.literal(2), captureId: z.string().min(1).max(100), historySnapshotId: objectId,
+  manifestHash: z.string().regex(/^[a-f0-9]{64}$/), sourceRecordId: objectId, sourceKey: z.string().min(1).max(150),
+  sourceContentHash: z.string().regex(/^[a-f0-9]{64}$/), sourceStockActual: decimal, sourceDeliveryDate: civilDate,
+  sourceDataHash: z.string().regex(/^[a-f0-9]{64}$/), sourceRowHash: z.string().regex(/^[a-f0-9]{64}$/),
+  sourceDerivationHash: z.string().regex(/^[a-f0-9]{64}$/), sourceStockDefinitionHash: z.string().regex(/^[a-f0-9]{64}$/),
+  sourceMovementRowsetHash: z.string().regex(/^[a-f0-9]{64}$/), sourceSelectionHash: z.string().regex(/^[a-f0-9]{64}$/),
+  targetLotId: objectId, targetLotVersion: z.number().int().min(1).max(2147483647), skuId: objectId, skuSourceId: z.string().min(1).max(150),
+  openingFactId: z.string().uuid(), openingSourceRecordId: objectId, openingQuantity: decimal, openingUnit: z.string().min(1).max(20),
+  preparedBy: objectId, reviewerId: objectId, reviewedAt: z.iso.datetime({ offset: true }),
+});
+
+function sourceLotReadContext(tx: Prisma.TransactionClient, actor: Pick<User, "id" | "authorizationEpoch">, now: Date, targetId: string): CommandContext {
+  return {
+    tx, actor: { id: actor.id, authorizationEpoch: actor.authorizationEpoch } as User, now, authorityEpoch: actor.authorizationEpoch,
+    envelope: { schemaVersion: 1, requestId: randomUUID(), targetId, expectedVersion: 0, occurredAt: now.toISOString(), command: "AppSheetSourceLotReviewed", data: {} },
+  };
+}
+
+/** Never append a second immutable proof for the same target, source key, and capture. */
+async function hasPriorAppSheetSourceLotProofForCapture(
+  ctx: CommandContext,
+  input: AppSheetSourceLotInput,
+  prepared: AppSheetSourceLotReviewPreparation,
+): Promise<boolean> {
+  const reviews = await ctx.tx.operationAudit.findMany({ where: { objectId: prepared.lot.id, action: "appsheet.source_lot_reviewed" } });
+  for (const auditRow of reviews) {
+    const details = jsonRecord(auditRow.details);
+    const proof = jsonRecord(details?.proof);
+    // An older proof still owns this immutable capture/key. Its inability to certify
+    // the new derivation contract must require recapture, not another approval.
+    if (proof?.captureId === prepared.proof.captureId && proof.sourceKey === input.sourceKey && proof.targetLotId === prepared.lot.id) return true;
+  }
+  return false;
+}
+
+/** Re-read the exact active-capture proof at the point an invoice selects or reserves the lot. */
+export async function resolveAppSheetSourceLot(ctx: CommandContext, skuId: string, sourceLotId: string): Promise<AppSheetSourceLotOption> {
+  const authority = await ctx.tx.operationAuthority.findUnique({ where: { id: "operations" }, select: { mode: true, cutoverProfile: true, captureManifestId: true } });
+  if (authority?.mode !== "active" || authority.cutoverProfile !== "appsheet-replacement" || !authority.captureManifestId)
+    return sourceLotFailure("source_lot_use_requires_active_replacement");
+  const lot = await ctx.tx.inventoryLot.findFirst({ where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, sourceId: sourceLotId, skuId },
+    select: { id: true, skuId: true, unit: true, receivedAt: true, sourceSystem: true, sourceId: true } });
+  if (!lot || lot.unit !== "g") return sourceLotFailure("source_lot_binding_missing_or_sku_mismatch");
+  const [operationObject, identities, reviews] = await Promise.all([
+    ctx.tx.operationObject.findUnique({ where: { id: lot.id }, select: { id: true, kind: true, version: true } }),
+    ctx.tx.legacyIdentity.findMany({ where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, sourceTable: "C_Mercaderia", sourceKey: sourceLotId, destinationType: "inventoryLot" } }),
+    ctx.tx.operationAudit.findMany({ where: { objectId: lot.id, action: "appsheet.source_lot_reviewed" } }),
+  ]);
+  if (!operationObject || operationObject.kind !== "lot" || identities.length !== 1 || identities[0]!.destinationId !== lot.id || identities[0]!.approvedBy === null)
+    return sourceLotFailure("source_lot_identity_or_operation_object_missing");
+  const matchingReviews = reviews.flatMap((auditRow) => {
+    const details = jsonRecord(auditRow.details), parsed = appSheetSourceLotProofSchema.safeParse(details?.proof);
+    return parsed.success && parsed.data.captureId === authority.captureManifestId && parsed.data.sourceKey === sourceLotId
+      ? [{ audit: auditRow, details: details!, proof: parsed.data }]
+      : [];
+  });
+  if (matchingReviews.length !== 1) return sourceLotFailure("source_lot_review_missing_or_ambiguous_for_capture");
+  const selected = matchingReviews[0]!;
+  const reviewer = await ctx.tx.user.findFirst({ where: { id: selected.proof.reviewerId, active: true }, select: { id: true, authorizationEpoch: true } });
+  if (!reviewer || selected.audit.actorId !== reviewer.id || !selected.audit.requestId || selected.proof.targetLotId !== lot.id ||
+      selected.proof.skuId !== skuId || selected.proof.targetLotVersion > operationObject.version)
+    return sourceLotFailure("source_lot_review_actor_or_target_mismatch");
+  const [receipt, commandAudits] = await Promise.all([
+    ctx.tx.commandReceipt.findUnique({ where: { requestId: selected.audit.requestId } }),
+    ctx.tx.operationAudit.findMany({ where: { objectId: lot.id, requestId: selected.audit.requestId, action: "AppSheetSourceLotReviewed" } }),
+  ]);
+  const response = jsonRecord(receipt?.response), result = jsonRecord(response?.result);
+  const responseProof = appSheetSourceLotProofSchema.safeParse(result?.proof);
+  const reviewedAt = new Date(selected.proof.reviewedAt);
+  if (!receipt || receipt.command !== "AppSheetSourceLotReviewed" || receipt.actorId !== reviewer.id || receipt.targetId !== lot.id ||
+      receipt.resultingVersion !== selected.proof.targetLotVersion || response?.requestId !== receipt.requestId || response.targetId !== lot.id ||
+      response.version !== receipt.resultingVersion || result?.sourceLot === null || !jsonRecord(result?.sourceLot) || !responseProof.success ||
+      JSON.stringify(responseProof.data) !== JSON.stringify(selected.proof) || !Number.isFinite(reviewedAt.getTime()) ||
+      commandAudits.length !== 1 || commandAudits[0]!.actorId !== reviewer.id ||
+      jsonRecord(commandAudits[0]!.details)?.version !== receipt.resultingVersion)
+    return sourceLotFailure("source_lot_review_receipt_or_audit_mismatch");
+  const prepared = await prepareAppSheetSourceLotReview(
+    sourceLotReadContext(ctx.tx, reviewer, reviewedAt, lot.id),
+    { sourceRecordId: selected.proof.sourceRecordId, sourceKey: selected.proof.sourceKey, contentHash: selected.proof.sourceContentHash, preparedBy: selected.proof.preparedBy },
+    { mode: "active", expectedReviewerId: selected.proof.reviewerId },
+  );
+  const currentProof = appSheetSourceLotProofSchema.safeParse({ ...prepared.proof, targetLotVersion: selected.proof.targetLotVersion });
+  if (!currentProof.success || JSON.stringify(currentProof.data) !== JSON.stringify(selected.proof) || prepared.lot.id !== lot.id || prepared.sku.id !== skuId)
+    return sourceLotFailure("source_lot_review_proof_stale");
+  const auditSourceLot = jsonRecord(result!.sourceLot);
+  if (auditSourceLot?.sourceLotId !== sourceLotId || auditSourceLot.inventoryLotId !== lot.id ||
+      auditSourceLot.receivedDate !== selected.proof.sourceDeliveryDate)
+    return sourceLotFailure("source_lot_review_result_mismatch");
+  return { origin: "appsheet-history", sourceLotId, inventoryLotId: lot.id, receivedDate: selected.proof.sourceDeliveryDate, availableQuantity: "0",
+    sourceLabelIdentity: prepared.sourceLabelIdentity };
+}
+
+/** Re-read the exact Bombo GoodsReceived chain when a native inventory lot is selected or listed. */
+async function resolveAppSheetNativeLot(ctx: CommandContext, skuId: string, stockLotId: string): Promise<AppSheetNativeLotOption> {
+  const authority = await ctx.tx.operationAuthority.findUnique({ where: { id: "operations" }, select: { mode: true, cutoverProfile: true, captureManifestId: true } });
+  if (authority?.mode !== "active" || authority.cutoverProfile !== "appsheet-replacement" || !authority.captureManifestId)
+    nativeLotFailure("native_lot_use_requires_active_replacement");
+
+  const lot = await ctx.tx.inventoryLot.findFirst({ where: { id: stockLotId, skuId, sourceSystem: null, sourceId: null },
+    select: { id: true, skuId: true, unit: true, receivedAt: true, label: true, receiptId: true, purchaseLineId: true, sourceSystem: true, sourceId: true, unitCost: true, costCurrency: true } });
+  if (!lot || lot.unit !== "g" || !lot.receiptId || !lot.purchaseLineId || lot.sourceSystem !== null || lot.sourceId !== null)
+    nativeLotFailure("native_lot_binding_missing_or_sku_mismatch");
+
+  const receipt = await ctx.tx.goodsReceipt.findUnique({ where: { id: lot.receiptId } });
+  if (!receipt || !Array.isArray(receipt.items) || !civilDate.safeParse(receipt.receivedDate).success ||
+      receipt.receivedDate > civilToday(ctx.now) ||
+      sourceDateForLot(lot.receivedAt) !== receipt.receivedDate)
+    nativeLotFailure("native_goods_receipt_missing_or_date_mismatch");
+  const receiptEntries = receipt.items.flatMap(raw => {
+    const entry = jsonRecord(raw);
+    return entry?.lotId === lot.id ? [entry] : [];
+  });
+  if (receiptEntries.length !== 1) nativeLotFailure("native_goods_receipt_lot_missing_or_ambiguous");
+  const entry = receiptEntries[0]!;
+  const entryText = (key: string) => typeof entry[key] === "string" ? entry[key] as string : null;
+  const lineId = entryText("lineId"), balanceId = entryText("balanceId"), quantityText = entryText("quantity");
+  const unit = entryText("unit"), unitCostText = entryText("unitCost"), costMinorText = entryText("costMinor");
+  const itemCurrency = entryText("currency"), lotLabel = entryText("lotLabel");
+  if (lineId !== lot.purchaseLineId || entryText("skuId") !== lot.skuId || !balanceId || !quantityText || unit !== lot.unit ||
+      !unitCostText || !costMinorText || !/^(0|[1-9]\d{0,18})$/.test(costMinorText) || !currency.safeParse(itemCurrency).success ||
+      lotLabel !== lot.label)
+    nativeLotFailure("native_goods_receipt_item_mismatch");
+
+  let receivedQuantity: bigint;
+  let unitCostMatches = false;
+  let recordedCost: bigint;
+  try {
+    receivedQuantity = parseQ(quantityText, lot.unit, "Cantidad recibida");
+    recordedCost = BigInt(costMinorText);
+    unitCostMatches = new Prisma.Decimal(unitCostText).equals(lot.unitCost);
+  } catch {
+    nativeLotFailure("native_goods_receipt_quantity_or_cost_invalid");
+  }
+  if (receivedQuantity <= ZERO || !unitCostMatches ||
+      checkDatabaseMinor(moneyForQuantity(formatQ(receivedQuantity, lot.unit), unitCostText)) !== recordedCost ||
+      lot.costCurrency !== itemCurrency)
+    nativeLotFailure("native_goods_receipt_quantity_or_cost_mismatch");
+
+  const purchase = await ctx.tx.purchaseOrder.findUnique({ where: { id: receipt.purchaseId }, select: { id: true, status: true, items: true } });
+  const purchaseItems = purchase ? z.array(purchaseLineStored).safeParse(purchase.items) : null;
+  const purchaseLine = purchaseItems?.success ? purchaseItems.data.find(item => item.lineId === lineId) : undefined;
+  if (!purchase || !["partially_received", "received"].includes(purchase.status) || !purchaseLine ||
+      purchaseLine.skuId !== lot.skuId || purchaseLine.unit !== lot.unit || purchaseLine.unitCost !== unitCostText)
+    nativeLotFailure("native_purchase_line_mismatch");
+
+  const [balance, receiptObject, receiptFacts] = await Promise.all([
+    ctx.tx.stockBalance.findUnique({ where: { id: balanceId }, select: { id: true, lotId: true, unit: true, locationId: true, custodianId: true } }),
+    ctx.tx.operationObject.findUnique({ where: { id: receipt.id }, select: { id: true, kind: true, version: true } }),
+    ctx.tx.stockFact.findMany({ where: { lotId: lot.id, kind: "receipt" } }),
+  ]);
+  if (!balance || balance.lotId !== lot.id || balance.unit !== lot.unit || !receiptObject || receiptObject.kind !== "receipt" ||
+      receiptFacts.length !== 1 || !receiptFacts[0]!.requestId)
+    nativeLotFailure("native_receipt_balance_or_fact_missing");
+  const fact = receiptFacts[0]!;
+  if (fact.unit !== unit || !fact.quantity.equals(new Prisma.Decimal(quantityText)) || fact.costMinor !== recordedCost ||
+      fact.currency !== itemCurrency || fact.reason !== "purchase_goods_receipt" || fact.actorId !== receipt.receivedBy ||
+      fact.toLocationId !== balance.locationId || fact.toCustodianId !== balance.custodianId ||
+      fact.fromLocationId !== null || fact.fromCustodianId !== null)
+    nativeLotFailure("native_receipt_stock_fact_mismatch");
+
+  const [commandReceipt, audits] = await Promise.all([
+    ctx.tx.commandReceipt.findUnique({ where: { requestId: fact.requestId } }),
+    ctx.tx.operationAudit.findMany({ where: { objectId: receipt.id, requestId: fact.requestId, action: "GoodsReceived" } }),
+  ]);
+  if (!commandReceipt || commandReceipt.command !== "GoodsReceived" || commandReceipt.targetId !== receipt.id ||
+      commandReceipt.actorId !== receipt.receivedBy || commandReceipt.resultingVersion !== receiptObject.version || audits.length !== 2 ||
+      audits.some(auditRow => auditRow.actorId !== receipt.receivedBy))
+    nativeLotFailure("native_receipt_command_or_audit_missing");
+
+  const receiptAudit = audits.find(auditRow => {
+    const details = jsonRecord(auditRow.details);
+    return details?.purchaseId === receipt.purchaseId && details.receiptId === receipt.id && details.receivedDate === receipt.receivedDate;
+  });
+  const versionAudit = audits.find(auditRow => jsonRecord(auditRow.details)?.version === commandReceipt.resultingVersion);
+  const auditItems = jsonRecord(receiptAudit?.details)?.items;
+  const auditedLotItems = Array.isArray(auditItems) ? auditItems.flatMap(raw => {
+    const auditItem = jsonRecord(raw);
+    return auditItem?.lotId === lot.id ? [auditItem] : [];
+  }) : [];
+  if (!receiptAudit || !versionAudit || !Array.isArray(auditItems) || auditedLotItems.length !== 1 ||
+      auditedLotItems[0]!.balanceId !== balanceId || auditedLotItems[0]!.lineId !== lineId ||
+      auditedLotItems[0]!.skuId !== lot.skuId || auditedLotItems[0]!.quantity !== quantityText ||
+      auditedLotItems[0]!.unit !== unit || auditedLotItems[0]!.lotLabel !== lotLabel)
+    nativeLotFailure("native_receipt_audit_payload_mismatch");
+
+  const response = jsonRecord(commandReceipt.response);
+  const result = jsonRecord(response?.result);
+  const responseReceipt = jsonRecord(result?.receipt);
+  const responseReceiptItems = responseReceipt && Array.isArray(responseReceipt.items) ? responseReceipt.items : [];
+  const responseLots = Array.isArray(result?.lots) ? result.lots : [];
+  const responseHasLot = (rows: unknown[]) => rows.filter(raw => {
+    const row = jsonRecord(raw);
+    return row?.lotId === lot.id && row.balanceId === balanceId && row.lineId === lineId && row.skuId === lot.skuId &&
+      row.quantity === quantityText && row.unit === unit && row.lotLabel === lotLabel;
+  }).length === 1;
+  if (response?.requestId !== commandReceipt.requestId || response.targetId !== receipt.id ||
+      response.version !== commandReceipt.resultingVersion || responseReceipt?.id !== receipt.id ||
+      responseReceipt.purchaseId !== receipt.purchaseId || responseReceipt.receivedBy !== receipt.receivedBy ||
+      responseReceipt.receivedDate !== receipt.receivedDate ||
+      !responseHasLot(responseReceiptItems) || !responseHasLot(responseLots))
+    nativeLotFailure("native_receipt_command_response_mismatch");
+
+  return { origin: "bombo-goods-receipt", stockLotId: lot.id, lotLabel, receivedDate: receipt.receivedDate, availableQuantity: "0" };
+}
+
+export type AppSheetSourceLotAvailabilityCandidate = {
+  lot: AppSheetSourceLotCandidate;
+  balances: Array<{ unit: string; availabilityState: string; availableQuantity: string }>;
+};
+
+/** Options exposed to the replacement invoice selector are current-scope, current-capture, positive-availability lots only. */
+export async function listAppSheetSourceLotOptions(
+  tx: Prisma.TransactionClient,
+  actor: User,
+  now: Date,
+  skuId: string,
+  candidates: AppSheetSourceLotAvailabilityCandidate[],
+): Promise<AppSheetSourceLotOption[]> {
+  const output: AppSheetSourceLotOption[] = [];
+  for (const candidate of candidates) {
+    const { lot } = candidate;
+    if (lot.skuId !== skuId || lot.unit !== "g" || lot.sourceSystem !== APPSHEET_HISTORY_SOURCE_SYSTEM || !lot.sourceId) continue;
+    let available = ZERO;
+    for (const balance of candidate.balances) {
+      if (balance.unit !== lot.unit || (balance.availabilityState !== "available" && balance.availabilityState !== "rehearsal_compatibility")) continue;
+      try { available += parseQ(balance.availableQuantity, balance.unit, "Stock apto para factura"); }
+      catch { return sourceLotFailure("source_lot_availability_invalid"); }
+    }
+    if (available <= ZERO) continue;
+    try {
+      const option = await resolveAppSheetSourceLot(sourceLotReadContext(tx, actor, now, lot.id), skuId, lot.sourceId);
+      output.push({ ...option, availableQuantity: formatQ(available, lot.unit) });
+    } catch (error) {
+      if (error instanceof OperationError && error.code === "APPSHEET_SOURCE_LOT_NOT_ELIGIBLE") continue;
+      throw error;
+    }
+  }
+  return output.sort((a, b) => a.receivedDate.localeCompare(b.receivedDate) || a.sourceLotId.localeCompare(b.sourceLotId));
+}
+
+/** Native invoice options require a current-scope balance and the immutable Bombo receipt proof. */
+export async function listAppSheetNativeLotOptions(
+  tx: Prisma.TransactionClient,
+  actor: User,
+  now: Date,
+  skuId: string,
+  candidates: AppSheetNativeLotAvailabilityCandidate[],
+): Promise<AppSheetNativeLotOption[]> {
+  const output: AppSheetNativeLotOption[] = [];
+  for (const candidate of candidates) {
+    const { lot } = candidate;
+    if (lot.skuId !== skuId || lot.unit !== "g" || lot.sourceSystem !== null || lot.sourceId !== null) continue;
+    let available = ZERO;
+    for (const balance of candidate.balances) {
+      if (balance.unit !== lot.unit || (balance.availabilityState !== "available" && balance.availabilityState !== "rehearsal_compatibility")) continue;
+      try { available += parseQ(balance.availableQuantity, balance.unit, "Stock apto para factura"); }
+      catch { nativeLotFailure("native_lot_availability_invalid"); }
+    }
+    if (available <= ZERO) continue;
+    try {
+      const option = await resolveAppSheetNativeLot(sourceLotReadContext(tx, actor, now, lot.id), skuId, lot.id);
+      output.push({ ...option, availableQuantity: formatQ(available, lot.unit) });
+    } catch (error) {
+      if (error instanceof OperationError && error.code === "APPSHEET_NATIVE_STOCK_LOT_NOT_ELIGIBLE") continue;
+      throw error;
+    }
+  }
+  return output.sort((a, b) => a.receivedDate.localeCompare(b.receivedDate) || a.stockLotId.localeCompare(b.stockLotId));
+}
+
+registerCommand("AppSheetSourceLotReviewed", {
+  kind: "lot", capability: "openings.approve", administrative: true,
+  schema: appSheetSourceLotReviewInput,
+  authorize: async (ctx) => requireAppSheetSourceLotScope(ctx, ctx.envelope.targetId),
+  execute: async (ctx) => {
+    const input = appSheetSourceLotReviewInput.parse(ctx.envelope.data);
+    const prepared = await prepareAppSheetSourceLotReview(ctx, input, { mode: "review" });
+    if (await hasPriorAppSheetSourceLotProofForCapture(ctx, input, prepared))
+      throw new OperationError(409, "APPSHEET_SOURCE_LOT_RECAPTURE_REQUIRED", "La captura ya tiene una revisión para este lote; generá una captura nueva antes de volver a revisar su origen.", {
+        captureId: prepared.proof.captureId, sourceKey: input.sourceKey, targetLotId: prepared.lot.id, recaptureRequired: true,
+      });
+    const targetLotVersion = ctx.envelope.expectedVersion + 1;
+    const proof: SourceLotReviewProof = { ...prepared.proof, targetLotVersion };
+    const linked = prepared.lot.sourceSystem === APPSHEET_HISTORY_SOURCE_SYSTEM && prepared.lot.sourceId === input.sourceKey;
+    if (linked) {
+      await ctx.tx.legacyIdentity.upsert({
+        where: { sourceSystem_sourceTable_sourceKey_destinationType: {
+          sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, sourceTable: "C_Mercaderia", sourceKey: input.sourceKey, destinationType: "inventoryLot",
+        } },
+        create: { id: randomUUID(), sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, sourceTable: "C_Mercaderia", sourceKey: input.sourceKey,
+          destinationType: "inventoryLot", destinationId: prepared.lot.id, approvedBy: ctx.actor.id },
+        update: { destinationId: prepared.lot.id, approvedBy: ctx.actor.id },
+      });
+    } else {
+      await ctx.tx.inventoryLot.update({ where: { id: prepared.lot.id }, data: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, sourceId: input.sourceKey } });
+      await ctx.tx.legacyIdentity.create({ data: {
+        id: randomUUID(), sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, sourceTable: "C_Mercaderia", sourceKey: input.sourceKey,
+        destinationType: "inventoryLot", destinationId: prepared.lot.id, approvedBy: ctx.actor.id,
+      } });
+    }
+    await ctx.tx.operationAudit.create({ data: {
+      actorId: ctx.actor.id, action: "appsheet.source_lot_reviewed", objectId: prepared.lot.id, requestId: ctx.envelope.requestId,
+      details: json({ proof, evidence: input.evidence }),
+    } });
+    return {
+      sourceLot: { sourceLotId: input.sourceKey, inventoryLotId: prepared.lot.id, receivedDate: proof.sourceDeliveryDate },
+      proof,
+    };
+  },
+});
+
+registerCommand("StockOpeningRecorded", {
+  kind: "lot", capability: "openings.approve", create: true, administrative: true,
+  schema: stockOpeningSchema,
+  authorize: async (ctx) => {
+    const input = stockOpeningSchema.parse(ctx.envelope.data);
+    const receipt = await ctx.tx.commandReceipt.findUnique({
+      where: { requestId: ctx.envelope.requestId }, select: { actorId: true, targetId: true, command: true },
+    });
+    const ownOpeningReplay = receipt?.actorId === ctx.actor.id && receipt.targetId === ctx.envelope.targetId && receipt.command === ctx.envelope.command;
+    if (ownOpeningReplay) return;
+    const sku = await ctx.tx.catalogSku.findFirst({ where: { id: input.skuId }, select: { id: true, unit: true, sourceId: true, sourceSystem: true, active: true } });
+    await validateStockOpeningSku(ctx, sku, input.sourceRecordId, input.quantity);
+  },
+  execute: async (ctx) => {
+    const input = stockOpeningSchema.parse(ctx.envelope.data);
+    if (input.preparedBy === ctx.actor.id)
+      throw new OperationError(409, "INDEPENDENT_REVIEW_REQUIRED", "La apertura requiere una persona preparadora y otra aprobadora");
+    if (input.receivedDate > civilToday(ctx.now) || (input.expiresOn && input.expiresOn < input.receivedDate))
+      throw new OperationError(422, "STOCK_OPENING_DATE", "La fecha de apertura o vencimiento del lote no es válida");
+    const [author, sku, location, custodian] = await Promise.all([
+      ctx.tx.user.findFirst({ where: { id: input.preparedBy, active: true }, select: { id: true } }),
+      ctx.tx.catalogSku.findFirst({ where: { id: input.skuId } }),
+      ctx.tx.location.findFirst({ where: { id: input.locationId, active: true }, select: { id: true } }),
+      ctx.tx.user.findFirst({ where: { id: input.custodianId ?? ctx.actor.id, active: true }, select: { id: true } }),
+    ]);
+    if (!author) throw new OperationError(422, "STOCK_OPENING_AUTHOR_REQUIRED", "La apertura requiere una persona preparadora activa");
+    const openingSku = requireStockOpeningSku(sku);
+    if (!location) throw new OperationError(422, "STOCK_OPENING_LOCATION_REQUIRED", "Elegí una ubicación activa");
+    if (!custodian) throw new OperationError(422, "STOCK_OPENING_CUSTODIAN_REQUIRED", "Elegí una persona activa responsable de la custodia");
+    await requireStockObjectScope(ctx,[location.id],[custodian.id]);
+    const quantity = positiveQuantity(input.quantity, openingSku.unit, "Cantidad de apertura");
+    const sourceRecordId = input.sourceRecordId;
+    const verifiedSku = await validateStockOpeningSku(ctx, openingSku, sourceRecordId, formatQ(quantity, openingSku.unit));
+    positiveUnitCost(input.unitCost);
+    const costMinor = checkDatabaseMinor(moneyForQuantity(formatQ(quantity, verifiedSku.unit), input.unitCost));
+    const lot = await ctx.tx.inventoryLot.create({ data: {
+      id: ctx.envelope.targetId,
+      skuId: verifiedSku.id,
+      label: input.label,
+      unit: verifiedSku.unit,
+      unitCost: new Prisma.Decimal(input.unitCost),
+      costCurrency: input.costCurrency,
+      receivedAt: new Date(`${input.receivedDate}T12:00:00-03:00`),
+      expiresOn: input.expiresOn,
+    } });
+    const balance = await ctx.tx.stockBalance.create({ data: {
+      id: randomUUID(),
+      lotId: lot.id,
+      locationId: location.id,
+      custodianId: custodian.id,
+      unit: verifiedSku.unit,
+      quantity: dbQ(quantity, verifiedSku.unit),
+      reserved: dbQ(ZERO, verifiedSku.unit),
+    } });
+    await ctx.tx.stockFact.create({ data: {
+      requestId: ctx.envelope.requestId,
+      lotId: lot.id,
+      kind: "opening",
+      quantity: dbQ(quantity, verifiedSku.unit),
+      unit: verifiedSku.unit,
+      toLocationId: location.id,
+      toCustodianId: custodian.id,
+      costMinor,
+      currency: input.costCurrency,
+      reason: "independently_reconciled_stock_opening",
+      actorId: ctx.actor.id,
+      occurredAt: ctx.now,
+      ...(sourceRecordId ? { sourceRecordId } : {}),
+    } });
+    await audit(ctx, "StockOpeningRecorded", { preparedBy: author.id, custodianId: custodian.id, ...(sourceRecordId ? { sourceRecordId } : {}), evidence: input.evidence });
+    return {
+      lot,
+      balance,
+      opening: { quantity: formatQ(quantity, verifiedSku.unit), costMinor: costMinor.toString(), currency: input.costCurrency, preparedBy: author.id, approvedBy: ctx.actor.id },
+    };
+  },
+});

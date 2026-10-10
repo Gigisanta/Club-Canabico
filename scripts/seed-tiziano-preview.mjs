@@ -13,21 +13,26 @@ const sourceSystem = "bombo_preview_tiziano";
 const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const ago = (days) => { const d = new Date(`${today}T12:00:00Z`); d.setUTCDate(d.getUTCDate() - days); return d.toISOString().slice(0, 10); };
 const products = [
-  ["Amnesia Haze", "Sativa", "Flor", 96, 30, 380, 1000],
-  ["Gorilla Glue", "Híbrida", "Flor", 78, 25, 420, 1200],
-  ["Purple Punch", "Índica", "Flor", 62, 25, 450, 1300],
-  ["Lemon Haze", "Sativa", "Flor", 12, 30, 360, 1000],
-  ["CBD Balance", "CBD", "Flor", 54, 20, 280, 800],
-  ["Rosin Premium", "Híbrida", "Extracto", 7, 10, 1600, 3500],
+  ["Amnesia Haze", "Sativa", "Flor", 96, 30, 380, 1000, "Interior Premium"],
+  ["Gorilla Glue", "Híbrida", "Flor", 78, 25, 420, 1200, "Interior Premium"],
+  ["Purple Punch", "Índica", "Flor", 62, 25, 450, 1300, "Interior Premium"],
+  ["Lemon Haze", "Sativa", "Flor", 12, 30, 360, 1000, "Exterior"],
+  ["CBD Balance", "CBD", "Flor", 54, 20, 280, 800, "Exterior"],
+  ["Rosin Premium", "Híbrida", "Extracto", 7, 10, 1600, 3500, null],
 ];
+// Example minimums: Interior Premium has 3 of 5 varieties, as in the 29/09 meeting.
+const categories = [["Interior Premium", 5], ["Exterior", 2]];
 const names = ["Mateo Álvarez", "Valentina Costa", "Nicolás Romero", "Julieta Ríos", "Santiago Méndez", "Florencia Silva", "Joaquín Díaz", "Agustina Vega", "Bruno Sosa", "Clara Ortiz"];
 
 try {
-  const counts = await Promise.all(["product", "customer", "sale", "saleItem", "movement", "expense", "cashEntry", "closure", "historicalImportBatch"].map((model) => db[model].count()));
+  const counts = await Promise.all(["product", "productCategory", "customer", "sale", "saleItem", "movement", "expense", "cashEntry", "closure", "historicalImportBatch"].map((model) => db[model].count()));
   if (counts.some(Boolean)) throw new Error(`La base ya tiene registros operativos (${counts.join(",")}); se canceló para evitar mezclas o duplicados.`);
   const owner = await db.user.findUnique({ where: { id: "tiziano" }, select: { role: true } });
   if (owner?.role !== "owner") throw new Error("No existe la cuenta owner de Tiziano.");
   await db.$transaction(async (tx) => {
+    const categoryIds = new Map();
+    for (const [name, minVarieties] of categories)
+      categoryIds.set(name, (await tx.productCategory.create({ data: { name, key: name.toLowerCase(), minVarieties } })).id);
     for (const [i, name] of names.entries()) await tx.customer.create({ data: {
       id: `${prefix}-c${i + 1}`, name, email: `socio${i + 1}@example.invalid`, phone: "", notes: "DATO DE PRUEBA · socio ficticio",
       sourceSystem, sourceId: `c${i + 1}`, createdAt: new Date(`${ago(90)}T10:00:00Z`),
@@ -35,7 +40,7 @@ try {
     for (const [i, p] of products.entries()) await tx.product.create({ data: {
       id: `${prefix}-p${i + 1}`, name: p[0], strain: p[1], type: p[2], unit: "g", lot: `MUESTRA-26-${String(i + 1).padStart(3, "0")}`,
       stock: p[3] * 1000, minimum: p[4] * 1000, cost: p[5] * 1000, price: p[6] * 1000,
-      location: "Depósito · muestra", ownerId: "tiziano", sourceSystem, sourceId: `p${i + 1}`,
+      location: "Depósito · muestra", ownerId: "tiziano", sourceSystem, sourceId: `p${i + 1}`, categoryId: p[7] ? categoryIds.get(p[7]) : null,
       createdAt: new Date(`${ago(40)}T09:00:00Z`),
     } });
     const soldByProduct = Array(products.length).fill(0);

@@ -2,10 +2,10 @@ name: Build and test
 on: [push, pull_request]
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: raiz
           POSTGRES_HOST_AUTH_METHOD: trust
@@ -17,6 +17,10 @@ jobs:
     env:
       DATABASE_URL: postgresql://raiz@localhost:5432/raiz?schema=public
       TEST_DATABASE_URL: postgresql://raiz@localhost:5432/bombo_ui_ci?schema=public
+      RESTORE_TEST_DATABASE_URL: postgresql://raiz@localhost:5432/bombo_ui_restore_ci?schema=public
+      WRONG_TARGET_TEST_DATABASE_URL: postgresql://raiz@localhost:5432/bombo_ui_wrong_target_ci?schema=public
+      OPERATIONS_BACKUP_RESTORE_E2E: "true"
+      PG_BIN: /usr/lib/postgresql/18/bin
       NODE_ENV: test
     steps:
       - uses: actions/checkout@v4
@@ -27,5 +31,88 @@ jobs:
       - run: npm ci
       - run: npm run db:generate
       - run: npm run typecheck
-      - run: npm test
+      - name: Prepare isolated PostgreSQL 18 restore rehearsal
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          sudo tee /etc/apt/sources.list.d/bombo-pgdg.sources >/dev/null <<'PGDG'
+          Types: deb
+          URIs: https://apt.postgresql.org/pub/repos/apt
+          Suites: noble-pgdg
+          Components: main
+          Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          PGDG
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-18
+          /usr/lib/postgresql/18/bin/createdb --host localhost --username raiz bombo_ui_restore_ci
+          /usr/lib/postgresql/18/bin/createdb --host localhost --username raiz bombo_ui_wrong_target_ci
       - run: npm run build
+      - run: npm test
+      - name: Repeat backup and restore after the concurrent suite
+        run: |
+          npx tsx --test --test-reporter=tap tests/operations-backup.test.ts | tee backup-restore-rehearsal.tap
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFile} from 'node:fs/promises';
+          const output = await readFile('backup-restore-rehearsal.tap', 'utf8');
+          assert.match(output, /^# pass [1-9][0-9]*$/m, 'the isolated rehearsal must execute its tests');
+          assert.match(output, /^# fail 0$/m, 'the isolated rehearsal must pass');
+          assert.match(output, /^# skipped 0$/m, 'the isolated rehearsal must cover the schema-default fixture');
+          NODE
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - run: npx playwright test --config=playwright.offline.config.ts
+      - name: Build and exercise the persistent contingency image
+        run: |
+          docker build --tag bombo-contingency-ci .
+          /usr/lib/postgresql/18/bin/createdb --host localhost --username raiz bombo_ui_container_ci
+          DATABASE_URL=postgresql://raiz@localhost:5432/bombo_ui_container_ci npm run db:migrate
+          docker run --detach --name bombo-contingency-ci --network host \
+            --env DATABASE_URL=postgresql://raiz@localhost:5432/bombo_ui_container_ci \
+            --env JWT_SECRET=ci-only-ephemeral-signing-key-at-least-32-characters \
+            --env ALLOWED_ORIGIN=https://bombo.example.invalid \
+            --env COOKIE_SECURE=true \
+            --env PRIVATE_S3_BUCKET=bombo-ci-unused-private-storage \
+            --env CLUB_OPERATIONS_APPROVED=false \
+            --env PUBLIC_SITE_APPROVED=false \
+            --env OPERATION_OUTBOX_WORKER=false bombo-contingency-ci
+          trap 'docker rm --force bombo-contingency-ci >/dev/null 2>&1 || true' EXIT
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFile} from 'node:fs/promises';
+          const base = 'http://127.0.0.1:3001';
+          let ready = false;
+          for(let attempt = 0; attempt < 30; attempt++) {
+            try { ready = (await fetch(`${base}/api/health`, {signal: AbortSignal.timeout(1500)})).ok; } catch {}
+            if(ready) break;
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+          assert.ok(ready, 'container must start with the compiled, production-only dependencies');
+          const expected = JSON.parse(await readFile('dist/release.json', 'utf8'));
+          const actual = await (await fetch(`${base}/release.json`)).json();
+          assert.equal(actual.sourceHash, expected.sourceHash);
+          assert.equal(actual.buildNode, 'v24.14.1');
+          const privateResponse = await fetch(`${base}/api/operations/accounts`);
+          assert.equal(privateResponse.status, 401);
+          assert.match(privateResponse.headers.get('cache-control') ?? '', /no-store/);
+          NODE
+      - name: Build the independent backup image and verify its configuration gate
+        run: |
+          docker build --file infra/backups/Containerfile --tag bombo-backup-ci .
+          docker run --rm --network host --entrypoint node \
+            --env DATABASE_URL=postgresql://raiz@localhost:5432/bombo_ui_container_ci \
+            bombo-backup-ci --input-type=module -e \
+            'import {PrismaClient} from "@prisma/client"; const db = new PrismaClient(); try { await db.$connect(); await db.user.count(); } finally { await db.$disconnect(); }'
+          if docker run --rm bombo-backup-ci backup > backup-image-start.log 2>&1; then
+            echo 'Backup image unexpectedly accepted an unconfigured run.'
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFile} from 'node:fs/promises';
+          const output = await readFile('backup-image-start.log', 'utf8');
+          assert.ok(!output.includes('ERR_MODULE_NOT_FOUND') && !output.includes('Cannot find module'));
+          assert.match(output, /DATABASE_URL|BACKUP_ENCRYPTION_KEY|BACKUP_S3_BUCKET/);
+          NODE

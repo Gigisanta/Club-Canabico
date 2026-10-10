@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "rea
 import { Link, useLocation, useParams, useSearchParams } from "react-router-dom";
 import { ArrowRight, ArrowUpRight, InstagramLogo, List, X } from "@phosphor-icons/react";
 import { send, useResource } from "./lib";
+import "./public-site.css";
 
 type Channels = { whatsappAvailable: boolean; instagramUrl: string | null };
 type Item = { slug: string; title: string; category: string; description: string; imageUrl: string | null };

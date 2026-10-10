@@ -1,0 +1,212 @@
+import type { Page, Request, Response } from "@playwright/test";
+import { expect, test, getIsolatedE2EPassword } from "./isolated";
+
+const contextPath = "/api/operations/context";
+
+function isContextRequest(request: Request) {
+  return new URL(request.url()).pathname === contextPath && request.method() === "GET";
+}
+
+function isContextResponse(response: Response) {
+  return isContextRequest(response.request());
+}
+
+async function signInOwner(page: Page) {
+  await page.goto("/app/operations?section=orders");
+  await page.getByLabel("Nombre de usuario").fill("OWNER");
+  await page.getByLabel("Contraseña", { exact: true }).fill(getIsolatedE2EPassword());
+  const login = page.waitForResponse(response =>
+    response.url().endsWith("/api/auth/login") && response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "Iniciar sesión", exact: true }).click();
+  expect((await login).status()).toBe(200);
+}
+
+function trackContextRequests(page: Page) {
+  const requests: Request[] = [];
+  page.on("request", request => {
+    if (isContextRequest(request)) requests.push(request);
+  });
+  return requests;
+}
+
+test("owner loads one live context, refreshes it, and keeps the requested section", async ({ page }) => {
+  const requests = trackContextRequests(page);
+  const avatarAsset = page.waitForResponse(response => new URL(response.url()).pathname === "/brand/profile-portraits.webp");
+  const initialContext = page.waitForResponse(isContextResponse);
+  await signInOwner(page);
+  const first = await initialContext;
+  const avatar = await avatarAsset;
+  expect(first.status()).toBe(200);
+  expect(avatar.status()).toBe(200);
+  expect(await avatar.headerValue("content-type")).toContain("image/webp");
+  const context = await first.json();
+  expect(context.profile).toBe("owner");
+  expect(context.capabilities).toContain("orders.write");
+
+  await expect(page.locator(".ops-console")).toBeVisible();
+  await expect(page.locator(".ops-profile-copy strong")).toHaveText("Tiziano");
+  await expect(page.locator(".ops-avatar")).toHaveCSS("background-position", "100% 0%");
+  await expect(page.locator(".ops-avatar")).toHaveCSS("background-image", /profile-portraits\.webp/);
+  await expect(page).toHaveURL(/\/app\/operations\?section=orders$/);
+  await expect(page.getByRole("button", { name: "Pedidos", exact: true })).toHaveAttribute("aria-current", "page");
+  expect(requests).toHaveLength(1);
+
+  const refreshedContext = page.waitForResponse(isContextResponse);
+  await page.getByRole("button", { name: "Actualizar consola", exact: true }).click();
+  const refreshed = await refreshedContext;
+  expect(refreshed.status()).toBe(200);
+  const refreshedBody = await refreshed.json();
+  expect(refreshedBody.userId).toBe(context.userId);
+  expect(refreshedBody.capabilities).toContain("orders.write");
+  await expect(page.getByRole("button", { name: "Actualizar consola", exact: true })).toBeEnabled();
+  await expect(page).toHaveURL(/\/app\/operations\?section=orders$/);
+  await expect(page.getByRole("button", { name: "Pedidos", exact: true })).toHaveAttribute("aria-current", "page");
+  expect(requests).toHaveLength(2);
+
+  let failNextContext = true;
+  await page.route(`**${contextPath}`, async route => {
+    if (failNextContext) {
+      failNextContext = false;
+      await route.abort("failed");
+      return;
+    }
+    await route.continue();
+  });
+  const failedContext = page.waitForEvent("requestfailed", request => isContextRequest(request));
+  await page.getByRole("button", { name: "Actualizar consola", exact: true }).click();
+  await failedContext;
+  await expect(page.getByRole("alert")).toContainText("No pudimos actualizar el acceso");
+  await expect(page.getByRole("button", { name: "Reintentar", exact: true })).toBeVisible();
+  await expect(page.locator(".ops-console")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Pedidos", exact: true })).toHaveAttribute("aria-current", "page");
+
+  const retryContext = page.waitForResponse(isContextResponse);
+  await page.getByRole("button", { name: "Reintentar", exact: true }).click();
+  const recovered = await retryContext;
+  expect(recovered.status()).toBe(200);
+  expect((await recovered.json()).capabilities).toContain("orders.write");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page).toHaveURL(/\/app\/operations\?section=orders$/);
+  expect(requests).toHaveLength(4);
+});
+
+test("an unavailable initial context keeps the owner out until a real retry succeeds", async ({ page }) => {
+  const requests = trackContextRequests(page);
+  let attempts = 0;
+  await page.route(`**${contextPath}`, async route => {
+    attempts += 1;
+    if (attempts === 1) {
+      await route.abort("failed");
+      return;
+    }
+    await route.continue();
+  });
+
+  await signInOwner(page);
+  await expect(page.getByRole("alert")).toContainText("No pudimos validar el acceso operativo");
+  await expect(page.locator(".ops-console")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Pedidos", exact: true })).toHaveCount(0);
+  expect(requests).toHaveLength(1);
+
+  const recoveredContext = page.waitForResponse(isContextResponse);
+  await page.getByRole("button", { name: "Reintentar", exact: true }).click();
+  const recovered = await recoveredContext;
+  expect(recovered.status()).toBe(200);
+  expect((await recovered.json()).capabilities).toContain("orders.write");
+  await expect(page.locator(".ops-console")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Pedidos", exact: true })).toBeVisible();
+  expect(requests).toHaveLength(2);
+});
+
+test("a revoked session's real 401 removes operational context", async ({ page }) => {
+  const requests = trackContextRequests(page);
+  let commandRequests = 0;
+  page.on("request", request => {
+    if (new URL(request.url()).pathname === "/api/operations/commands" && request.method() === "POST") commandRequests += 1;
+  });
+  const initialContext = page.waitForResponse(isContextResponse);
+  await signInOwner(page);
+  expect((await initialContext).status()).toBe(200);
+  await expect(page.locator(".ops-console")).toBeVisible();
+
+  await page.getByTestId("appsheet-preorder-open").click();
+  const preorderDialog = page.getByTestId("appsheet-invoice-dialog");
+  await expect(preorderDialog).toBeVisible();
+  const dateField = preorderDialog.getByLabel("Fecha", { exact: true });
+  await expect(dateField).toBeDisabled();
+  const invoiceDate = await dateField.inputValue();
+  expect(invoiceDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  const member = preorderDialog.getByRole("combobox", { name: "Nombre del asociado", exact: true });
+  await expect(member).toHaveAttribute("required", "");
+  await preorderDialog.getByRole("searchbox", { name: "Buscar nombre del asociado por nombre", exact: true }).fill("Socio de ensayo");
+  await expect(member.locator('option[value="ops-member"]')).toHaveCount(1);
+  await member.selectOption("ops-member");
+
+  const preorderSaved = page.waitForResponse(response =>
+    response.url().endsWith("/api/operations/commands") &&
+    response.request().method() === "POST" &&
+    response.request().postDataJSON()?.command === "InvoiceSaved",
+  );
+  await preorderDialog.getByTestId("appsheet-save-invoice").click();
+  const saved = await preorderSaved;
+  const savedStatus = saved.status();
+  const savedText = savedStatus === 200 ? "" : await saved.text();
+  expect(savedStatus, savedText).toBe(200);
+  const savedBody = await saved.json();
+  expect(savedBody.targetId).toBeTruthy();
+  expect(saved.request().postDataJSON()).toMatchObject({
+    command: "InvoiceSaved",
+    expectedVersion: 0,
+    targetId: savedBody.targetId,
+    data: { memberId: "ops-member", invoiceDate, lines: [], preorder: true },
+  });
+  const persistedOrder = await page.request.get(`/api/operations/orders/${savedBody.targetId}`);
+  expect(persistedOrder.status()).toBe(200);
+  const persisted = await persistedOrder.json();
+  expect(persisted.order).toMatchObject({
+    id: savedBody.targetId,
+    memberId: "ops-member",
+    commercialState: "preorder",
+  });
+  expect(persisted.order.quote).toMatchObject({ source: "appsheet-invoice", invoiceDate, lines: [] });
+  expect(persisted.reservations).toHaveLength(0);
+  expect(persisted.deliveries).toHaveLength(0);
+  await expect(page.locator(".ops-toast")).toContainText("Preventa creada. Todavía no reserva stock ni programa un envío.");
+  expect(commandRequests).toBe(1);
+
+  const logout = await page.request.post("/api/auth/logout", {
+    headers: { Origin: new URL(page.url()).origin },
+  });
+  expect(logout.status()).toBe(200);
+  expect((await logout.json()).ok).toBe(true);
+
+  const rejectOperations = (route: import("@playwright/test").Route) => route.fulfill({
+    status: 403,
+    contentType: "application/json",
+    body: JSON.stringify({ error: "El alcance no permite consultar este recurso." }),
+  });
+  await page.route("**/api/operations/**", rejectOperations);
+  const scopedTasks = page.waitForResponse(response =>
+    new URL(response.url()).pathname === "/api/operations/tasks" && response.request().method() === "GET",
+  );
+  await page.getByRole("button", { name: "Tareas", exact: true }).click();
+  expect((await scopedTasks).status()).toBe(403);
+  await expect(page.locator(".ops-console")).toBeVisible();
+  await expect(page.locator(".ops-page-body").getByRole("alert")).toContainText("El alcance no permite consultar este recurso.");
+
+  await page.unroute("**/api/operations/**", rejectOperations);
+  const rejectedTasks = page.waitForResponse(response =>
+    new URL(response.url()).pathname === "/api/operations/tasks" && response.request().method() === "GET",
+  );
+  await page.locator(".ops-page-body").getByRole("button", { name: "Reintentar", exact: true }).click();
+  expect((await rejectedTasks).status()).toBe(401);
+  await expect(page.locator(".ops-console")).toHaveCount(0);
+  await expect(page.getByRole("alert")).toContainText("Iniciá sesión para continuar");
+  await expect(page.getByRole("button", { name: "Reintentar", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Volver al panel", exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.locator(".ops-toast")).toHaveCount(0);
+  expect(commandRequests).toBe(1);
+  expect(requests).toHaveLength(1);
+});

@@ -6,7 +6,8 @@ test("purchase history helps service without extra entry", async ({ page }) => {
   const profile = page.getByRole("dialog", { name: "Ficha del socio" });
   const profileInsight = profile.getByRole("region", { name: "Lectura automática del socio" });
   await expect(profileInsight).toContainText("Ticket promedio");
-  await expect(profileInsight).toContainText("Más elegido");
+  // The demo member buys categorized lots: the category leads, with its share and its favorite variety.
+  await expect(profileInsight).toContainText(/Categoría preferida.+\d+ de \d+ compras, sobre todo /);
   await expect(profileInsight).toContainText("Ritmo reciente");
   await profile.getByRole("button", { name: "Cerrar" }).click();
   await page.goto("/ventas");
@@ -152,7 +153,7 @@ test("owner saves a default supplier and selects it for a new lot", async ({ pag
   await page.goto("/inventario");
   await page.getByRole("button", { name: "Explorar club de demostración" }).click();
   await page.getByRole("heading", { name: "Inventario", exact: true }).waitFor();
-  await page.getByText("Movimientos, proveedores y ubicaciones").click();
+  await page.getByText("Movimientos, proveedores, ubicaciones y categorías").click();
   await page.getByRole("button", { name: "Proveedores" }).click();
   await page.getByRole("button", { name: "Nuevo proveedor" }).click();
   let dialog = page.getByRole("dialog");
@@ -347,6 +348,7 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
     ).toBeVisible();
     if (label === "Gastos") await expect(page.getByRole("heading", { name: "Registro de gastos" })).toBeVisible();
     if (label === "Finanzas") {
+      await page.getByRole("button", { name: "Resumen local", exact: true }).click();
       await expect(page.getByRole("heading", { name: "Resultado local" })).toBeVisible();
       await expect(page.getByRole("heading", { name: "Próximos pasos" })).toBeVisible();
       await expect(page.getByRole("heading", { name: "Capital en inventario" })).toBeHidden();
@@ -358,12 +360,13 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
     }
   }
   await page.goto("/app/finanzas");
+  await page.getByRole("button", { name: "Resumen local", exact: true }).click();
   await page.getByRole("button", { name: "Preparar saldos" }).click();
   await expect(page).toHaveURL(/\/app\/preparar\?view=cash/);
   await expect(page.getByRole("navigation", { name: "Áreas para preparar decisiones" }).getByRole("button", { name: "Caja" })).toHaveAttribute("aria-current", "page");
   await page.goto("/app/finanzas");
   await page.getByRole("button", { name: "Planificación", exact: true }).click();
-  await page.getByRole("button", { name: "Agregar proyección" }).click();
+  await page.getByRole("button", { name: "Agregar partida local", exact: true }).click();
   dialog = page.getByRole("dialog");
   await dialog.getByLabel("Fecha").fill("2027-01-10");
   await expect(dialog.getByLabel("Tipo de partida")).toHaveValue("outflow");
@@ -377,6 +380,107 @@ test("owner: create lot and customer, sell, verify persistence, and preview CSV"
   await expect(dialog).toBeHidden();
   await page.getByText("Partidas del escenario", { exact: true }).click();
   await expect(page.getByRole("row", { name: new RegExp(`Personal QA ${suffix}`) }).locator("td").last()).toContainText(/-\$\s*123,45/);
+  expect(errors).toEqual([]);
+});
+test("owner follows the variety alert, reads the break-even and finds each part of a mixed sale in its account", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Explorar club de demostración" }).click();
+  // The demo keeps Interior Premium+ one variety short of its minimum: Purple Punch and Gelato #41.
+  const tasks = page.getByRole("region", { name: "Qué atender primero" });
+  await expect(tasks.getByRole("listitem").first()).toContainText("Pocas variedades en Interior Premium+");
+  await expect(tasks).toContainText("Interior Premium+: 2 de 3");
+  await expect(page.getByRole("region", { name: /^Gastos fijos de / }).getByRole("progressbar")).toBeVisible();
+  await tasks.getByRole("link", { name: "Ver variedades" }).click();
+  await expect(page).toHaveURL(/\/app\/inventario\?category=/);
+  await expect(page.getByRole("button", { name: /Interior Premium\+/ })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("tab", { name: "Vista de tabla" }).click();
+  await expect(page.locator(".inventory-table tbody tr")).toHaveCount(2);
+  await page.goto("/app/finanzas");
+  await page.getByRole("button", { name: "Resumen local", exact: true }).click();
+  const breakEven = page.getByRole("region", { name: /^Gastos fijos de / });
+  // The bar's value is the share of the fixed costs on screen that the margin on screen covers.
+  const shown = (await breakEven.locator(".breakeven-headline span").textContent()) || "";
+  const [margin, fixed] = (shown.match(/\$\s?[\d.]+,\d{2}/g) || []).map((amount) => Number(amount.replace(/\D/g, "")));
+  expect(fixed).toBeGreaterThan(0);
+  const covered = shown.startsWith("Margen negativo") ? 0 : Math.min(100, Math.floor(margin * 100 / fixed));
+  await expect(breakEven.getByRole("progressbar")).toHaveAttribute("aria-valuenow", String(covered));
+  // Demo rent and staff are fixed costs dated on the 1st of the month.
+  await expect(breakEven.locator(".breakeven-milestones")).toContainText("Alquiler");
+  await expect(breakEven.locator(".breakeven-milestones")).toContainText("Personal");
+  await page.goto("/app/ventas");
+  await page.getByRole("button", { name: "Registrar venta" }).click();
+  const checkout = page.getByRole("dialog", { name: "Nueva venta" });
+  await checkout.getByRole("combobox", { name: "Buscar socio" }).focus();
+  await checkout.getByRole("listbox", { name: "Socios encontrados" }).getByRole("option").first().waitFor();
+  await checkout.getByRole("combobox", { name: "Buscar socio" }).press("ArrowDown");
+  await checkout.getByRole("combobox", { name: "Buscar socio" }).press("Enter");
+  const option = checkout.getByLabel("Producto / lote").locator("option").filter({ hasText: "Amnesia Haze" });
+  await checkout.getByLabel("Producto / lote").selectOption((await option.getAttribute("value")) || "");
+  await checkout.getByLabel("Cantidad línea 1").fill("2");
+  await checkout.getByLabel("Medio de pago").selectOption("mixed");
+  await checkout.getByLabel("Parte en efectivo (ARS)").fill("1000");
+  const rest = checkout.locator(".sale-split-part").last();
+  await expect(rest).toContainText("Por transferencia");
+  await expect(rest.locator("span").last()).toHaveText(/\d/);
+  const transfer = (await rest.locator("span").last().textContent()) || "";
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await checkout.getByRole("button", { name: "Confirmar venta" }).click();
+  await expect(page.getByRole("heading", { name: "Comprobante de venta" })).toBeVisible();
+  await expect(page.locator(".ticket-payment").first()).toContainText("Mixto");
+  const parts = page.locator(".ticket-payment-part");
+  await expect(parts.first()).toContainText("Efectivo");
+  await expect(parts.first()).toContainText("1.000,00");
+  await expect(parts.last()).toContainText("Transferencia");
+  await expect(parts.last()).toContainText(transfer);
+  await page.getByRole("button", { name: "Cerrar", exact: true }).click();
+  await page.goto("/app/finanzas");
+  await page.getByRole("button", { name: "Caja", exact: true }).click();
+  const accounts = page.getByRole("group", { name: "Cuenta" });
+  const accountCells = page.locator(".finance-section tbody td:nth-child(2)");
+  const cashAccount = accounts.getByRole("button", { name: /^Efectivo/ });
+  await cashAccount.click();
+  await expect(page).toHaveURL(/account=cash/);
+  await expect(cashAccount).toHaveAttribute("aria-pressed", "true");
+  const cashPart = page.getByRole("row", { name: /· Efectivo/ });
+  await expect(cashPart).toContainText("1.000,00");
+  // Tests run one at a time, so the mixed sale is the newest cash entry: its running balance is the account balance.
+  await expect(cashAccount.locator("strong")).toHaveText(/\d/);
+  await expect(cashPart.locator(".cash-balance-after")).toHaveText((await cashAccount.locator("strong").textContent()) || "");
+  await expect(accountCells.filter({ hasText: "Banco" })).toHaveCount(0);
+  await accounts.getByRole("button", { name: /^Banco/ }).click();
+  await expect(page.getByRole("row", { name: /· Transferencia/ })).toContainText(transfer);
+  await expect(accountCells.filter({ hasText: "Efectivo" })).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+test("owner goes from the week's payments on Inicio to Finanzas and schedules a supplier payment", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const suffix = Date.now().toString().slice(-7);
+  await page.goto("/app");
+  await page.getByRole("button", { name: "Explorar club de demostración" }).click();
+  await page.getByRole("region", { name: "Pagos de los próximos 7 días" }).getByRole("link", { name: "Ver próximos pagos" }).click();
+  await expect(page).toHaveURL(/\/app\/finanzas#proximos-pagos$/);
+  const upcoming = page.getByRole("region", { name: "Próximos pagos" });
+  // The link lands on the section, below the result and the break-even.
+  await expect(upcoming.getByRole("heading", { name: "Próximos pagos" })).toBeInViewport();
+  // The demo plans a stock purchase on credit twelve days ahead.
+  await expect(upcoming.getByRole("listitem").filter({ hasText: "Compra a plazo · lote Interior Premium" })).toContainText("Pago previsto");
+  await upcoming.getByRole("button", { name: "Agendar un pago" }).click();
+  const dialog = page.getByRole("dialog", { name: "Agendar un pago" });
+  await expect(dialog.getByLabel("Escenario")).toHaveValue("base");
+  await dialog.getByLabel("Categoría").selectOption("stock_purchase");
+  await dialog.getByLabel("Importe en ARS").fill("1234.56");
+  await dialog.getByLabel("Detalle / comprobante de referencia").fill(`Proveedor QA ${suffix}`);
+  await dialog.getByRole("button", { name: "Guardar", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  // Saved from Resumen, it stays there: the default date, a week ahead, is inside the 30 days.
+  const row = upcoming.getByRole("listitem").filter({ hasText: `Proveedor QA ${suffix}` });
+  await expect(row).toContainText("Pago previsto · Compra de stock");
+  await expect(row).toContainText(/\$\s*1\.234,56/);
   expect(errors).toEqual([]);
 });
 test("responsible: scope cannot be switched; foreign lots and settings actions absent", async ({
@@ -399,7 +503,7 @@ test("responsible: scope cannot be switched; foreign lots and settings actions a
   await page.getByRole("tab", { name: "Vista de tarjetas" }).click();
   await expect(page.locator(".stock-grid")).not.toContainText("Gorilla Glue");
   await expect(page.locator(".stock-grid")).toContainText("Amnesia Haze");
-  await page.getByText("Movimientos, proveedores y ubicaciones").click();
+  await page.getByText("Movimientos, proveedores, ubicaciones y categorías").click();
   await page.getByRole("button", { name: "Movimientos", exact: true }).click();
   await expect(page.getByText(/movimientos · Página 1/)).toBeVisible();
   await page.getByRole("button", { name: "Siguiente", exact: true }).click();

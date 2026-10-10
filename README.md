@@ -1,14 +1,18 @@
 # Bombo cannabis club
 
+La instalación vigente se describe en [la guía de instalación y sus controles](docs/instalacion-operativa.md). La aplicación privada usa `bombo.maat.work`; la landing estática separada usa `bomboclub.maat.work`. El circuito canónico está en `/app/operations` y el turno en `/app/delivery`. La apertura real exige los controles documentados; publicar código no retira AppSheet ni acredita los saldos del negocio.
+
+Las descripciones de pantallas anteriores que siguen abajo documentan compatibilidad y demo. En el club real, las escrituras de esos circuitos se retiran o pasan por comandos canónicos; sus saldos y reglas de fidelización no constituyen aperturas ni políticas comerciales aprobadas.
+
 ## Identidad y web pública en vista previa
 
 La marca oficial suministrada por el club se documenta en [docs/brand/guia-practica.md](docs/brand/guia-practica.md). [docs/brand/inventario.csv](docs/brand/inventario.csv) registra los 262 archivos originales con hashes y usos propuestos; [docs/brand/fuentes-contenido.md](docs/brand/fuentes-contenido.md) separa hechos y aprobaciones pendientes; [docs/brand/catalogo-historico.md](docs/brand/catalogo-historico.md) detalla nombres, descriptores y errores de piezas antiguas. Los originales siguen en `/Users/gigi/Downloads/BOMBO ID` y `public/brand` contiene únicamente exportaciones optimizadas para la vista previa.
 
 `/` presenta la landing, `/productos` muestra las fichas curadas, `/productos/:slug` ofrece detalle y consulta, y `/app/*` contiene el panel. Los enlaces anteriores del panel redirigen a `/app/*` conservando búsqueda y fragmento. Las fichas se administran en `/app/vidriera` y las consultas en `/app/consultas`, ambos solo para dueño y gerente; los canales oficiales se configuran en **Configuración → Canales públicos**. La vidriera no consulta ni expone precios, stock o reservas del inventario. Las imágenes subidas se convierten a WebP y se guardan en PostgreSQL.
 
-La web queda **sin despliegue público ni indexación** hasta la aprobación de Tiziano. La compilación de producción muestra una página de espera a menos que `VITE_PUBLIC_SITE_APPROVED=true`; la API pública requiere también `PUBLIC_SITE_APPROVED=true`. La lista editorial, derechos de fotografías, política de contacto, canales y cualquier texto sobre REPROCANN requieren la revisión descrita en [docs/brand/salida-vista-previa.md](docs/brand/salida-vista-previa.md). Los catálogos históricos no se importan a la operación.
+La landing estática se publica por separado. La vidriera dinámica del club requiere aprobación de Tiziano: la compilación muestra una página de espera a menos que `VITE_PUBLIC_SITE_APPROVED=true`; la API pública requiere también `PUBLIC_SITE_APPROVED=true`. La lista editorial, derechos de fotografías, política de contacto, canales y cualquier texto sobre REPROCANN requieren la revisión descrita en [docs/brand/salida-vista-previa.md](docs/brand/salida-vista-previa.md). Los catálogos históricos no se importan a la operación.
 
-**Apertura 2026:** el plan de diagnóstico, conciliación, base financiera y salida gradual está en [docs/implementacion-octubre-2026.md](docs/implementacion-octubre-2026.md). En bases reales las operaciones con cannabis están deshabilitadas por defecto; `CLUB_OPERATIONS_APPROVED=true` requiere validación documentada por el profesional del club. Los datos reales de AppSheet, Sheets y caja siguen pendientes de recibir y conciliar.
+**Apertura 2026:** los circuitos y controles de habilitación están en [la guía de instalación](docs/instalacion-operativa.md). En bases reales las operaciones con cannabis están deshabilitadas por defecto; `CLUB_OPERATIONS_APPROVED=true` requiere validación documentada por el profesional del club. La investigación de las fuentes y sus informes financieros se conserva en el entorno privado; los saldos reales, objetos abiertos y definiciones internas de AppSheet requieren su conciliación y verificación antes de la apertura.
 
 Aplicación full-stack de gestión de inventario, socios, fidelización, caja, gastos y responsables de stock. Interfaz en español, responsive, con persistencia real en PostgreSQL. No usa localStorage como base de datos ni respuestas simuladas de API.
 
@@ -18,9 +22,9 @@ La configuración inicial utiliza **pesos argentinos (ARS)**, formato `es-AR` y 
 
 ## Stack
 
-Se conservan las versiones solicitadas: React/React DOM **19.1.1**, TypeScript **5.9.2** estricto en frontend y backend, Vite **7.1.4**, plugin React **5.0.2**, React Router DOM **7.8.2**, Radix Dialog **1.1.15**, Phosphor **2.1.10**, Recharts **3.1.2**, Sonner **2.0.7**, Bricolage Grotesque suministrada por el club, CSS propio, Hooks/Context y `fetch` con `useResource`.
+Versiones fijadas: React/React DOM **19.1.1**, TypeScript **5.9.2** estricto en frontend y backend, Vite **7.3.6**, plugin React **5.0.2**, React Router DOM **7.18.4**, Radix Dialog **1.1.15**, Phosphor **2.1.10**, Recharts **3.1.2**, Sonner **2.0.7**, Bricolage Grotesque suministrada por el club, CSS propio, Hooks/Context y `fetch` con `useResource`.
 
-Backend: Node **22.12+** (validado con **24.14.1**), Express **5.1.0**, PostgreSQL **16**, Prisma/Client **6.19.0**, Zod **4.1.5**, JWT **9.0.2**, bcryptjs **3.0.2**, cookie-parser **1.4.7**, Helmet **8.1.0**, cors **2.8.5**, express-rate-limit **8.1.0**, dotenv **17.2.2**, PDFKit **0.17.2**, ExcelJS **4.4.0** y Sharp **0.34.x** para las imágenes de vidriera. Exportación CSV propia; importación con `csv-parse` **7.0.2**. Playwright y Node Test Runner para pruebas.
+Backend: Node **24.x** (desarrollo y CI: **24.14.1**), Express **5.1.0**, PostgreSQL **18** en producción, CI y el contenedor operativo, Prisma/Client **6.19.0**, Zod **4.1.5**, JWT **9.0.2**, bcryptjs **3.0.2**, cookie-parser **1.4.7**, Helmet **8.1.0**, cors **2.8.5**, express-rate-limit **8.7.0**, dotenv **17.2.2**, PDFKit **0.17.2**, ExcelJS **4.4.0** y Sharp **0.35.5** para las imágenes de vidriera. Exportación CSV propia; importación con `csv-parse` **7.0.2**. Playwright y Node Test Runner para pruebas.
 
 ## Inicio local
 
@@ -34,7 +38,7 @@ Copiar `.env.example` a `.env`. Configurar `DATABASE_URL`, un `JWT_SECRET` aleat
 node -e "console.log(require('node:crypto').randomBytes(48).toString('hex'))"
 ```
 
-Iniciar PostgreSQL 16 existente, o usar la base de Docker:
+El Compose histórico de desarrollo conserva PostgreSQL 16 y su volumen. Para nuevos ensayos y el circuito operativo, usar PostgreSQL 18 y `docker-compose.operations.yml` con un volumen separado. No cambiar el major sobre un volumen existente sin una migración comprobada. El inicio del entorno histórico de demo es:
 
 ```sh
 docker compose up -d db
@@ -44,7 +48,7 @@ npm run db:migrate
 
 Elegir uno de los dos modos antes de ejecutar el seed:
 
-- **Demo:** `DEMO_MODE=true` y `NODE_ENV=development`. El seed crea 8 usuarios (incluye Tiziano, Camila y Gio), 24 socios, 12 lotes, 90 días de ventas y movimientos de ejemplo. El login muestra «Explorar club de demostración» y permite probar los roles. Todo cambio se persiste en la base de demostración.
+- **Demo:** `DEMO_MODE=true`, `NODE_ENV=development` y `BOMBO_DEMO_PASSWORD` de al menos 8 caracteres en el entorno privado local (no versionarla). El seed crea 8 usuarios (incluye Tiziano, Camila y Gio), 24 socios, 12 lotes, 90 días de ventas y movimientos de ejemplo. El login muestra «Explorar club de demostración» y permite probar los roles. Todo cambio se persiste en la base de demostración.
 - **Club real:** `DEMO_MODE=false` con una base vacía distinta de la demo. El seed crea la configuración de Bombo y reserva los accesos de Tiziano (dueño), Camila y Gio (gerentes), sin crear contraseñas ni usuarios activos hasta su activación. `ADMIN_EMAIL`, `ADMIN_NAME` y `ADMIN_PASSWORD` son opcionales solo para un administrador inicial de recuperación. Cambiar el flag no elimina registros ni usuarios de ejemplo; el arranque rechaza la base demo.
 
 ```sh
@@ -60,16 +64,20 @@ El seed nunca borra datos. Los datos de ejemplo tienen fechas relativas al día 
 
 - **Navegación del panel:** `/app` abre Resumen de hoy. La barra agrupa los destinos permitidos por rol en Inicio, Ventas y caja, Stock, Socios, Web pública y Administración; cada grupo tiene una página principal y opciones internas. Panorama general está en `/app/panorama`.
 - **Centro de decisiones:** `/app/decisiones` abre tres prioridades con evidencia, fuente, fecha, responsable y límite del cálculo. La revisión mensual guarda real, plan, desvío, causa, decisión y seguimiento; el checklist semanal asigna conciliación, conteo, compras, promociones y socios.
-- **Análisis para decidir:** `/app/decisiones/stock`, `/comercial`, `/caja` y `/socios` muestran inventario por lote y ubicación, costo histórico y cotizaciones de reposición, demanda y faltantes, margen por producto/categoría/proveedor/canal, simulación de promociones, caja por escenarios y segmentación descriptiva. Las compras conjuntas quedan bloqueadas hasta confirmar el uso físico del stock. Las listas se revisan manualmente; no se envían mensajes.
+- **Análisis para decidir:** `/app/decisiones/stock`, `/comercial`, `/caja` y `/socios` muestran inventario por lote y ubicación, costo histórico y cotizaciones de reposición, demanda y faltantes, margen por producto, categoría comercial, tipo de producto, proveedor y canal (con el margen como porcentaje de los ingresos; la categoría comercial es la actual de cada lote), simulación de promociones, caja por escenarios y segmentación descriptiva. Las compras conjuntas quedan bloqueadas hasta confirmar el uso físico del stock. Las listas se revisan manualmente; no se envían mensajes.
 - **Pesos constantes:** la vista de caja compara dos importes con puntos de IPC suministrados desde una publicación de INDEC, período base y versión explícitos. El enlace se valida como dominio oficial, pero los valores requieren cotejo humano; el IPC no sustituye una cotización de reposición.
 - **Preparación de insumos:** `/app/preparar` registra el mapeo de ubicaciones, reglas de proveedor, cotizaciones, entregas pendientes, saldos por cuenta, partidas de caja y cobertura de fuentes. Sin saldo conciliado del día y cobertura futura completa, el pronóstico de caja no muestra saldo utilizable.
 - **Historial externo:** `/app/importar` acepta CSV/XLSX para ventas y líneas de delivery, compras y líneas (incluida fecha de pedido para medir plazos), stock/faltantes, gastos, caja/banco, socios y promociones. Muestra mapeo, vista previa, errores, conflictos e historial de lotes; confirmar es transaccional e idempotente. La conciliación exige revisor distinto, conteo y total de control externo cuando corresponde. Los IDs de socios se seudonimizan con una clave HMAC estable (`DATA_IMPORT_PII_SECRET` o `JWT_SECRET`). Los hechos del delivery quedan separados de caja y stock locales. Las anulaciones no se aplican automáticamente: un archivo con esos registros se rechaza para revisión hasta vincular la reversión.
 
+- **Resumen de hoy:** tareas priorizadas (variedades por categoría, stock bajo, permisos), ventas del día contra la meta diaria configurable y, para dueño y gerente, la barra de gastos fijos del mes y los pagos de los próximos 7 días.
+- **Reportes financieros:** Finanzas → Reportes reúne estado de resultados de gestión, flujo de efectivo y vencimientos de 13 semanas desde fuentes canónicas, por período y moneda (ARS/USD). Expone cobertura, método y subtotales observados; deja resultado y saldos pendientes cuando falta respaldo. El escenario editable de resultado usa supuestos explícitos y una base suficiente. No mezcla las cifras del resumen local con el libro canónico. La guía de la reunión está en `docs/finance-meeting-2026-10-09.md`.
+- **Barra de equilibrio:** Finanzas → Resumen local compara el margen del mes (ventas locales − costo vendido − gastos variables) con todos los gastos fijos del mes, incluidas las recurrencias pendientes. Muestra el porcentaje cubierto, cuánto falta vender en total y por día, el ritmo proyectado y cada gasto fijo como hito. Si todavía no hay ventas en el mes, estima con el margen de los últimos 30 días. No incluye delivery (AppSheet) y se rotula preliminar.
+- **Próximos pagos:** Finanzas → Resumen local lista lo que vence desde hoy y en los 29 días siguientes: las próximas fechas de los gastos mensuales y semanales, los gastos cargados con fecha futura, los pagos previstos del escenario Base (Planificación) y las obligaciones activas del escenario base (Preparar → Caja). Suma la semana y los 30 días, separa las fechas recurrentes ya vencidas sin procesar y muestra el saldo según registros de caja y banco, sin conciliar. «Agendar un pago» carga un pago previsto sin salir de Resumen, por ejemplo una compra a plazo. Un pago cargado en Planificación y en Preparar aparece dos veces, cada uno con su origen; delivery queda fuera.
 - **Dashboard:** períodos día, últimos 7 días y mes; comparación con período anterior equivalente; ventas, stock a costo, clientes activos, margen, ticket medio, recompra, top 10 por importe/frecuencia, inactivos 30/60/90 días, vencimientos, gastos/presupuesto y ranking de responsables.
-- **Inventario:** productos/lotes, cepa, tipo, gramos/unidades, precios, mínimos, ubicación, proveedor, responsable y vencimiento. El dueño guarda proveedores con contacto y notas, marca uno como predeterminado y puede archivarlos sin perder los lotes vinculados. Al crear un lote se elige un proveedor guardado; el inventario se puede filtrar por proveedor. Alta, edición de datos, entradas, salidas, ajustes por conteo y traspasos completos de lote. Historial completo paginado de 100 en 100.
-- **Socios:** altas/edición, notas internas, puntos, nivel por gasto acumulado, historial, frecuencia, segmentos top/inactivos/en riesgo.
-- **Ventas:** carrito con varios productos, socio, responsable derivado del lote, pago efectivo/tarjeta/transferencia, descuentos por nivel y puntos, comprobante imprimible. El servidor recalcula todos los importes.
-- **Caja:** libro de movimientos reales por efectivo/banco y categoría, con aportes, retiros, compras de stock e inversiones separados. Venta local crea un movimiento automáticamente. El cierre suma saldo anterior y movimientos de efectivo desde el cierre previo; registra esperado, contado y diferencia. El saldo inicial debe cargarse y conciliarse.
+- **Inventario:** productos/lotes, cepa, tipo, gramos/unidades, precios, mínimos, ubicación, proveedor, responsable y vencimiento. El dueño guarda proveedores con contacto y notas, marca uno como predeterminado y puede archivarlos sin perder los lotes vinculados. Al crear un lote se elige un proveedor guardado; el inventario se puede filtrar por proveedor. Dueño y gerente definen categorías comerciales (por ejemplo, Interior Premium) con un mínimo de variedades: una variedad es un nombre de producto distinto con stock y sin vencer. Inventario muestra la cobertura y el stock para vender de cada categoría (sumado por unidad, sin lotes vencidos) y filtra al tocarla; Inicio y las notificaciones avisan cuando una categoría activa queda por debajo del mínimo. Alta, edición de datos, entradas, salidas, ajustes por conteo y traspasos completos de lote. Historial completo paginado de 100 en 100.
+- **Socios:** altas/edición, notas internas, puntos, nivel por gasto acumulado, historial, frecuencia, segmentos top/inactivos/en riesgo. La lectura automática de la ficha y de la venta muestra la última compra, el ticket promedio, la categoría preferida (en cuántas de sus compras aparece y su variedad más elegida dentro de ella; sin lotes categorizados, la variedad más elegida) y el ritmo reciente.
+- **Ventas:** carrito con varios productos, socio, responsable derivado del lote, pago efectivo/tarjeta/transferencia o mixto (una parte en efectivo y el resto por transferencia o tarjeta, cada parte en su cuenta), descuentos por nivel y puntos, comprobante imprimible. El servidor recalcula todos los importes.
+- **Caja:** libro de movimientos reales por efectivo/banco y categoría, con aportes, retiros, compras de stock e inversiones separados. Venta local crea un movimiento automáticamente; un pago mixto crea uno por cuenta. La vista Caja separa Efectivo y Banco con su saldo según registros, filtra por tipo, categoría, fechas y detalle, y muestra el saldo de la cuenta después de cada movimiento (incluye el saldo inicial cargado; no reemplaza el arqueo ni la conciliación). El cierre suma saldo anterior y movimientos de efectivo desde el cierre previo; registra esperado, contado y diferencia. El saldo inicial debe cargarse y conciliarse.
 - **Planificación:** partidas manuales por escenario, proyección semanal de 13 semanas y resumen mensual 2027. Sin partidas cargadas no se infieren ingresos ni gastos futuros.
 - **Gastos:** fijos/variables, categorías, asignación opcional, recurrencia semanal/mensual, ingresos menos gastos y presupuesto. «Procesar recurrencias» materializa los vencimientos pendientes de forma idempotente; no se generan cargos bancarios ni se ejecutan pagos externos.
 - **Responsables:** vista consolidada y por responsable, costos/margen por producto, ventas históricas atribuidas al responsable original, ranking y rotación.
@@ -135,13 +143,16 @@ Todas las rutas de datos requieren JWT en cookie `HttpOnly`, `SameSite=Strict`; 
 | GET        | `/api/views/:view?owner=`                 | Datos acotados de inicio, inventario, socios, ventas, gastos, finanzas, responsables, reportes o configuración |
 | GET        | `/api/dashboard?range=&inactiveDays=&owner=` | Agregados del panel calculados en PostgreSQL |
 | GET        | `/api/list/customers`, `/api/list/products`, `/api/list/sales` | Listados de hasta 50 filas con `items`, `total`, `nextCursor` y `summary` |
-| GET        | `/api/list/expenses?month=`, `/api/list/cash-entries`, `/api/movements` | Historial paginado con cursor estable |
+| GET        | `/api/list/expenses?month=`, `/api/list/cash-entries`, `/api/movements` | Historial paginado con cursor estable; caja filtra por `account`, `category`, `direction`, `from`, `to` y `q` |
+| GET        | `/api/finance/break-even`                  | Barra de equilibrio del mes; dueño/gerente, auditada |
+| GET        | `/api/finance/upcoming-payments`           | Pagos de hoy a 29 días y vencidos sin procesar; dueño/gerente, auditada |
+| GET/POST/PATCH | `/api/categories`, `/api/categories/:id`, `/:id/status` | Categorías con mínimo de variedades; lectura para todos (el responsable sin cobertura), cambios de dueño/gerente |
 | GET        | `/api/customers/:id/history`, `/api/checkout/customers`, `/api/checkout/products` | Ficha del socio y selección acotada al registrar ventas |
 | GET        | `/api/search?q=`                          | Búsqueda global acotada por permisos       |
 | POST/PATCH | `/api/products`, `/api/products/:id`       | Alta/edición                               |
 | POST       | `/api/products/:id/movements`              | Entrada/salida/ajuste/traspaso             |
 | POST/PATCH | `/api/customers`, `/api/customers/:id`     | Socios                                     |
-| POST       | `/api/sales`                               | Venta transaccional e idempotente          |
+| POST       | `/api/sales`                               | Venta transaccional e idempotente; `payment: "mixed"` requiere `split: { cash, other }` |
 | POST       | `/api/closures`                            | Cierre diario                              |
 | POST       | `/api/cash-entries`, `/api/cash-plans`     | Movimientos reales y partidas proyectadas; dueño/gerente |
 | PATCH      | `/api/customers/:id/permit`               | Estado y vigencia del permiso; dueño/gerente |
@@ -174,6 +185,8 @@ Medición local del 23 de septiembre de 2026, PostgreSQL de prueba y respuestas 
 | Finanzas | 51,7 MB · 8,8 s | 169 KB · 34 ms |
 
 En el build de producción, la apertura de Inventario pasa de unos **287 KB a 126 KB de JavaScript comprimido** (56% menos): suma el script principal, sus preloads y el módulo de Inventario. Los gráficos ya no se precargan en esa ruta. Las fuentes y CSS no forman parte de esa cifra.
+
+Libro de caja con saldo por cuenta (medición del 30 de septiembre de 2026, consulta aislada, mediana de siete corridas): la primera página con 100.000 movimientos pasa de 198 a 32 ms en todas las cuentas y de 70 a 11 ms en efectivo; con 5.000, de 15 a 2,6 ms. El saldo de cada fila suma todo lo anterior a la fila más vieja de la página y recorre solo el tramo que ocupa la página, en lugar de calcular una ventana sobre el libro entero. La búsqueda por detalle sigue dependiendo del `ILIKE` (57 ms con 100.000).
 
 Son mediciones locales de una carga sintética; no representan tiempos de red ni datos reales del club. La paginación por cursor mantiene el orden de los registros al insertar otros nuevos. Los índices nuevos se aplican con `npm run db:migrate` antes de usar la versión actualizada.
 
@@ -209,12 +222,41 @@ npm start
 
 Express sirve el frontend compilado y la API desde el mismo origen. Configurar `NODE_ENV=production`, `DEMO_MODE=false`, `COOKIE_SECURE=true`, un secreto único y `ALLOWED_ORIGIN=https://tu-dominio`. Ejecutar detrás de HTTPS. En contenedores usar `HOST=0.0.0.0`; localmente se usa loopback. No establecer `trust proxy=true` indiscriminadamente. Configurar copias de seguridad de PostgreSQL fuera del proceso de la app.
 
-El backend es stateless salvo los limitadores de login y activación en memoria. JWT expira a las 8 horas; logout elimina la cookie del navegador, sin lista de revocación central. Para varias réplicas se necesita un store compartido del limitador y, si se requiere revocación inmediata, una tabla de sesiones o versión de token. No se incluyen envío automático de invitaciones, recuperación por email, MFA, multi-club/tenancy, facturación fiscal, sincronización continua con Sheets ni integraciones bancarias.
+La sesión online vence a las ocho horas y se verifica en PostgreSQL junto a la época de autorización del usuario. Logout revoca la sesión; revocar un acceso invalida sesiones, dispositivos y leases. El lease de reparto offline es independiente, de hasta doce horas. Las capturas sin autoridad actual se conservan en cuarentena. Los limitadores de autenticación de producción usan PostgreSQL para compartir contadores entre instancias y reinicios, con identificadores HMAC. No se incluyen envío automático de invitaciones, recuperación por email, MFA, multi-club/tenancy, facturación fiscal, sincronización continua con Sheets ni integraciones bancarias.
 
-El endpoint de estado devuelve el histórico del ámbito para calcular dashboard y fichas. Para grandes volúmenes, la siguiente evolución es agregar métricas en SQL y paginar ventas/socios del servidor; el ledger de movimientos ya está paginado. El sistema está modularizado para esa evolución, pero no se ha ensayado carga masiva ni alta disponibilidad.
+El endpoint de estado pertenece a las pantallas de compatibilidad. El circuito canónico usa consultas paginadas y métricas agregadas en servidor, con cobertura explícita. La entrega vigente incluye una medición local con diez sesiones y diez veces el volumen histórico. Ese ensayo no certifica alta disponibilidad, latencia desde Android ni capacidad máxima de producción.
 
 ### Versiones fijadas y seguridad
 
-La auditoría de dependencias detecta avisos en versiones obligatorias, especialmente React Router DOM 7.8.2 y express-rate-limit 8.1.0, además de dependencias transitivas de Prisma/ExcelJS y herramientas de desarrollo. Se conservaron las versiones requeridas; no se ejecutó `npm audit fix --force`. La app usa BrowserRouter sin SSR/RSC ni loaders remotos, navegación interna fija, validación de origen propia y escucha IPv4 por defecto, lo cual reduce algunas superficies, pero no equivale a corregir los paquetes. Antes de exposición pública, acordar una actualización del stack y repetir la auditoría y pruebas. El parser CSV adicional sí se actualizó a una versión corregida.
+La revisión del 01/10/2026 actualiza Router, Vite, rate-limit y dependencias transitivas manteniendo Prisma 6.19.0. `npm audit` informó cero vulnerabilidades en esa revisión; repetirlo antes de cada publicación. Los documentos, imágenes y lectores pesados se cargan sólo cuando se necesitan. La API privada verifica sesión, época de autorización, capacidades y alcance en servidor.
 
 No contiene secretos en archivos versionables: `.env`, `.local`, resultados de pruebas y bases locales están ignorados por Git.
+
+## Reemplazo de AppSheet y Power BI
+
+La [guía de instalación](docs/instalacion-operativa.md) describe los controles del reemplazo. `/app/operations` reúne pedidos, compras, lotes, stock, cuentas, cobros, rendiciones, documentos, reglas comerciales e importación; `/app/delivery` es la entrada independiente para el turno del repartidor. Los datos de ensayo son sintéticos y mantienen `authority.mode=shadow`. No aprobar aperturas ni gates reales a partir del seed de demostración.
+
+Los endpoints `/api/operations`, `/api/legacy-imports`, `/api/reports/operations` y `/api/delivery` utilizan capacidades y alcances por objeto. Un comando lleva UUID, versión esperada y cantidades/importes exactos como cadenas. Stock, deuda, recibo, auditoría y outbox se confirman en una misma transacción. La historia importada no modifica saldos disponibles; las aperturas requieren revisión independiente.
+
+Para ensayar en una base loopback dedicada y vacía, después de migrar y preparar la demo:
+
+```sh
+DEMO_MODE=true DATABASE_URL='postgresql://usuario@127.0.0.1:5432/bombo_ui_ensayo' npx tsx scripts/seed-operations-rehearsal.ts
+TEST_DATABASE_URL='postgresql://usuario@127.0.0.1:5432/bombo_ui_pruebas' npm run check
+TEST_DATABASE_URL='postgresql://usuario@127.0.0.1:5432/bombo_ui_pruebas' npm run test:e2e
+npx playwright test --config=playwright.offline.config.ts
+```
+
+La última prueba sirve el build y comprueba service worker, IndexedDB y criptografía en Chromium con un manifiesto simulado. No certifica Android ni un turno real. El build genera el inventario del shell; el service worker no guarda APIs ni archivos privados en su caché general.
+
+`docker-compose.operations.yml` y `.env.operations.example` describen el servicio persistente con Node 24.14.1, PostgreSQL 18 y objetos S3 privados con versiones. `npm run ops:backup`, `ops:verify-backup` y `ops:restore` usan un paquete cifrado con base, objetos y manifiesto; la clave se entrega fuera del paquete. Restaurar exige un destino separado y vacío. Consultá [la guía de instalación](docs/instalacion-operativa.md), [el respaldo independiente](docs/backups-and-recovery.md) y [la guía operativa por circuito](docs/operacion-canonica.md).
+
+### Vercel: aplicación y landing independientes
+
+`vercel.json` publica la aplicación React y `api/index.ts` en Node 24, región São Paulo (`gru1`), junto con PostgreSQL y objetos privados en esa región. La instalación incluye dependencias de build y genera Prisma para Linux. El pool de cada instancia tiene un máximo de cuatro conexiones; usar la URL con pooler del proveedor. El acceso real abre la consola canónica y no depende del circuito antiguo de demo.
+
+La landing de `bomboclub.maat.work` se construye con `node scripts/build-landing.mjs`. Publicar **sólo** `dist-landing` en un proyecto estático separado: no necesita función, base de datos, React ni sesión. La aplicación vive en `bombo.maat.work`. Los proyectos usan sus propias variables privadas; no subir `.local`, fuentes originales, respaldos ni archivos de entorno.
+
+En Vercel la outbox se procesa después de comandos confirmados y se revisa con un cron cada hora; `OPERATION_OUTBOX_WORKER=false` evita timers persistentes. `CRON_SECRET` protege ese cron. El mantenimiento no crea respaldos de base. El worker independiente de respaldo tiene su propia programación de diez minutos; su habilitación, retención, alertas y restauración en destino requieren verificación antes de abrir el negocio.
+
+La publicación no cambia la autoridad del circuito: conservar `CLUB_OPERATIONS_APPROVED=false` y las aperturas pendientes hasta aprobar saldos reales, inventario, permisos, documentación y corte. Los informes privados de auditoría no se incluyen en el repositorio público.

@@ -1,6 +1,8 @@
 import {
   useState,
   useId,
+  useEffect,
+  useRef,
   Children,
   isValidElement,
   cloneElement,
@@ -8,6 +10,7 @@ import {
   type ReactNode,
   type FormEvent,
 } from "react";
+import "./form-feedback.css";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   X,
@@ -245,54 +248,70 @@ export function Form({
   children,
   onSubmit,
   submit = "Guardar",
+  pendingLabel = "Guardando…",
   onCancel,
 }: {
   children: ReactNode;
   onSubmit: (form: FormData) => Promise<void>;
   submit?: string;
+  pendingLabel?: string;
   onCancel?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<{ message: string } | null>(null);
+  const submitLock = useRef(false);
+  const errorRef = useRef<HTMLParagraphElement>(null);
+
+  useEffect(() => {
+    if (error) errorRef.current?.focus();
+  }, [error]);
+
   async function run(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (busy) return;
-    const fd = new FormData(e.currentTarget);
-    setBusy(true);
-    setError("");
+    if (submitLock.current) return;
+    submitLock.current = true;
     try {
+      const fd = new FormData(e.currentTarget);
+      setBusy(true);
+      setError(null);
       await onSubmit(fd);
-    } catch (e) {
-      setError((e as Error).message);
+    } catch (reason) {
+      const message = reason instanceof Error && reason.message.trim()
+        ? reason.message
+        : "No pudimos completar la solicitud. Revisá los datos e intentá de nuevo.";
+      setError({ message });
     } finally {
+      submitLock.current = false;
       setBusy(false);
     }
   }
   return (
-    <form onSubmit={run}>
-      {children}
-      {error && (
-        <p className="form-error" role="alert">
-          {error}
-        </p>
-      )}
-      <div className="form-actions">
-        {onCancel && (
-          <button type="button" className="button" onClick={onCancel}>
-            Cancelar
-          </button>
+    <form onSubmit={run} aria-busy={busy}>
+      <fieldset className="form-fields" disabled={busy} aria-label="Datos del formulario">
+        {children}
+        {error && (
+          <p ref={errorRef} className="form-error" role="alert" tabIndex={-1}>
+            {error.message}
+          </p>
         )}
-        <button className="button primary" disabled={busy}>
-          {busy ? (
-            <>
-              <CircleNotch className="spin" />
-              Guardando…
-            </>
-          ) : (
-            submit
+        <div className="form-actions">
+          {onCancel && (
+            <button type="button" className="button" onClick={onCancel} disabled={busy}>
+              Cancelar
+            </button>
           )}
-        </button>
-      </div>
+          <button className="button primary" disabled={busy} aria-busy={busy}>
+            {busy ? (
+              <>
+                <CircleNotch className="spin" aria-hidden="true" />
+                {pendingLabel}
+              </>
+            ) : (
+              submit
+            )}
+          </button>
+        </div>
+      </fieldset>
     </form>
   );
 }

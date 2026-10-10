@@ -198,7 +198,8 @@ test("decision API: roles, bigint reviews, isolated imports and reconciliation",
       lot: "margin-lot", supplier: "Proveedor QA", unit: "g", location: "Local", stock: 1000,
       minimum: 0, cost: 7000, price: 15000, ownerId: "owner" } });
     const location = await db.location.create({ data: { name: "Local QA", key: "local-qa" } });
-    await db.product.update({ where: { id: "margin-lot" }, data: { locationId: location.id } });
+    const premium = await db.productCategory.create({ data: { name: "Interior Premium QA", key: "interior premium qa" } });
+    await db.product.update({ where: { id: "margin-lot" }, data: { locationId: location.id, categoryId: premium.id } });
     for (const id of ["fraction-lot-a", "fraction-lot-b"])
       await db.product.create({ data: { id, name: id, strain: "", type: "Flores", lot: id,
         supplier: "Proveedor QA", unit: "g", location: "Local QA", locationId: location.id, stock: 500,
@@ -252,6 +253,7 @@ test("decision API: roles, bigint reviews, isolated imports and reconciliation",
       importedHistory: { deliverySales: { count: number; grossRecordedCents: string } };
       profitability: { byProduct: Array<{ revenueCents: string; historicalCogsCents: string; grossMarginCents: string }>;
         byCategory: Array<{ name: string; grossMarginCents: string }>;
+        byCommercialCategory: Array<{ name: string; revenueCents: string; grossMarginCents: string }>;
         byChannel: Array<{ channel: string; grossMarginCents: string | null; saleCount: string }> };
       asOfDate: string;
       forecast: { deliverySevenDay: { forecast: { available: boolean; asOfDate: string; pointCents: string | null }; outOfSample: { forecastOrigins: number } };
@@ -272,6 +274,8 @@ test("decision API: roles, bigint reviews, isolated imports and reconciliation",
     assert.deepEqual(payload.profitability.byProduct.map((row) =>
       [row.revenueCents, row.historicalCogsCents, row.grossMarginCents]), [["12345", "7000", "5345"]]);
     assert.deepEqual(payload.profitability.byCategory.map((row) => [row.name, row.grossMarginCents]), [["Flores", "5345"]]);
+    assert.deepEqual(payload.profitability.byCommercialCategory.map((row) => [row.name, row.revenueCents, row.grossMarginCents]),
+      [["Interior Premium QA", "12345", "5345"]]);
     assert.equal(payload.profitability.byChannel.find((row) => row.channel === "local")?.saleCount, "1");
     assert.equal(payload.profitability.byChannel.find((row) => row.channel === "delivery_importado")?.grossMarginCents, null);
     assert.equal(payload.forecast.cash13Weeks.base.available, true, JSON.stringify({ asOf: payload.asOfDate,
@@ -317,7 +321,10 @@ test("decision API: roles, bigint reviews, isolated imports and reconciliation",
     assert.equal(contaminatedForecast.status, 200, await contaminatedForecast.clone().text());
     assert.equal((await contaminatedForecast.json() as { forecast: { deliverySevenDay: { forecast: { available: boolean } } } })
       .forecast.deliverySevenDay.forecast.available, false);
-    const inflationInput = { earlierMonth: calendarDay(-60).slice(0, 7), laterMonth: calendarDay(-30).slice(0, 7),
+    // Whole calendar months back from the 1st: 60 and 30 days back fall in the same month on the 30th or 31st.
+    const monthsBack = (count: number) => { const value = new Date(`${today.slice(0, 7)}-01T12:00:00.000Z`);
+      value.setUTCMonth(value.getUTCMonth() - count); return value.toISOString().slice(0, 7); };
+    const inflationInput = { earlierMonth: monthsBack(2), laterMonth: monthsBack(1),
       earlierNominalCents: "10000", laterNominalCents: "15000", earlierIndex: "100.0", laterIndex: "125.0",
       publishedAt: today, seriesVersion: "fixture QA", sourceUrl: "https://www.indec.gob.ar/ftp/cuadros/economia/fixture.pdf" };
     assert.equal((await call("/decision-simulations/inflation", "cashier", inflationInput)).status, 403);

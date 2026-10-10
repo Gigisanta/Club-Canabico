@@ -8,10 +8,11 @@ import helmet from "helmet";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import rateLimit from "express-rate-limit";
+import { AuthRateStore } from "./auth-rate-store.js";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { randomUUID } from "node:crypto";
-import { findValidSeat, prepareSeat, setupHash } from "./team-access.js";
+import { findValidSeat, prepareSeat, setupHash, usernameSchema } from "./team-access.js";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { Prisma, type User, type Role } from "@prisma/client";
@@ -26,6 +27,7 @@ import {
   productSchema,
   supplierSchema,
   locationSchema,
+  categorySchema,
   customerSchema,
   saleSchema,
   expenseSchema,
@@ -38,18 +40,33 @@ import {
 } from "./validation.js";
 import { resolveSupplier, supplierKey, supplierName } from "./suppliers.js";
 import { resolveLocation, locationKey, locationName } from "./locations.js";
-import { exportReport } from "./reports.js";
+import { resolveCategory, categoryKey, categoryName, categoryCoverage } from "./product-categories.js";
 import { productCatalog } from "./product-catalog.js";
 import { customerInsights } from "./customer-insights.js";
 import { publicSite, adminSite } from "./site.js";
 import { decisionCenter } from "./decision-center.js";
 import { decisionAnalysis } from "./decision-analysis.js";
 import { decisionInputs } from "./decision-inputs.js";
-import { dataImportRoutes } from "./data-import-routes.js";
+import { breakEven } from "./break-even.js";
+import { upcoming } from "./upcoming-payments.js";
+import { operationsRoutes } from "./operations/routes.js";
+import { appSheetMigrationRoutes } from "./operations/appsheet-migration-routes.js";
+import { legacyAccessGuard } from "./operations/access.js";
+import { OperationError } from "./operations/core.js";
+import { deliverySyncRoutes } from "./operations/delivery-sync.js";
+import { documentRoutes } from "./operations/documents.js";
+import { recoveryRoutes } from "./operations/recovery.js";
+import { legacyImportRoutes } from "./operations/legacy-import.js";
+import { configurationRoutes } from "./operations/configuration.js";
+import { operationsReports } from "./operations/report-definitions.js";
+import { operationsExports } from "./operations/report-exports.js";
 declare global {
   namespace Express {
     interface Request {
       user: User;
+      sessionId: string;
+      offlineArchiveOnly?: boolean;
+      rawBodyBytes?: number;
     }
   }
 }
@@ -66,6 +83,8 @@ const allowedOrigins = (
 ).split(",");
 export const app = express();
 app.disable("x-powered-by");
+// Vercel sanitizes the forwarded chain at its edge; local servers trust no proxy.
+if (process.env.VERCEL === "1") app.set("trust proxy", 1);
 app.use((_req, res, next) => {
   if (process.env.PUBLIC_SITE_APPROVED !== "true") res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
   next();
@@ -89,7 +108,8 @@ app.use(
     credentials: true,
   }),
 );
-app.use(express.json({ limit: "8mb" }));
+app.use("/api/legacy-imports/batches", express.json({ limit: "512kb", verify(req, _res, bytes) { (req as typeof req & { rawBodyBytes: number }).rawBodyBytes = bytes.length; } }));
+app.use(express.json({ limit: process.env.VERCEL === "1" ? "4mb" : "8mb" }));
 app.use(cookieParser());
 app.use("/api", (req, res, next) => {
   res.setHeader("Cache-Control", "no-store");
@@ -106,11 +126,30 @@ const auth: RequestHandler = async (req, res, next) => {
       algorithms: ["HS256"],
     });
     if (typeof payload === "string" || !payload.sub) throw new Error();
-    const user = await db.user.findUnique({ where: { id: payload.sub } });
-    if (!user) throw new Error();
+    const [user, record] = await Promise.all([
+      db.user.findUnique({ where: { id: payload.sub } }),
+      payload.sid ? db.operationSession.findUnique({where:{id:String(payload.sid)}}) : Promise.resolve(null),
+    ]);
+    if (!user?.active || !payload.sid || payload.epoch !== user.authorizationEpoch) throw new Error();
+    if(!record || record.userId!==user.id || record.revokedAt || record.expiresAt<=new Date() || record.authorizationEpoch!==user.authorizationEpoch) throw new Error();
     req.user = user;
+    req.sessionId = record.id;
     next();
   } catch {
+    // A verifiable historical session can archive its own offline evidence only.
+    // It never grants a read, financial command or replay after expiry/revocation.
+    if(req.method==="POST"&&["/delivery/sync","/delivery/backups"].includes(req.path)){
+      try{
+        const historical=jwt.verify(req.cookies.session||"",secret!,{algorithms:["HS256"],ignoreExpiration:true});
+        if(typeof historical==="string"||!historical.sub||!historical.sid)throw new Error();
+        const [record,user]=await Promise.all([
+          db.operationSession.findUnique({where:{id:String(historical.sid)}}),
+          db.user.findUnique({where:{id:historical.sub}}),
+        ]);
+        if(!record||!user||record.userId!==user.id||historical.epoch!==record.authorizationEpoch)throw new Error();
+        req.user=user;req.sessionId=record.id;req.offlineArchiveOnly=true;return next();
+      }catch{/* An unverifiable identity cannot archive evidence. */}
+    }
     res.status(401).json({ error: "Iniciá sesión para continuar" });
   }
 };
@@ -123,8 +162,10 @@ const roles =
         .json({ error: "No tenés permiso para esta operación" });
     next();
   };
-function session(res: Response, user: User) {
-  const token = jwt.sign({}, secret!, {
+async function session(res: Response, user: User) {
+  if(!user.active) throw new HttpError(403,"Acceso revocado");
+  const record=await db.operationSession.create({data:{userId:user.id,authorizationEpoch:user.authorizationEpoch,expiresAt:new Date(Date.now()+8*60*60*1000)}});
+  const token = jwt.sign({sid:record.id,epoch:user.authorizationEpoch}, secret!, {
     subject: user.id,
     algorithm: "HS256",
     expiresIn: "8h",
@@ -142,17 +183,26 @@ function session(res: Response, user: User) {
       name: user.name,
       role: user.role,
       email: user.email,
+      username: user.username,
       color: user.color,
     },
   });
 }
+app.get("/api/internal/maintenance", async (req, res) => {
+  if (!process.env.CRON_SECRET || req.get("Authorization") !== `Bearer ${process.env.CRON_SECRET}`)
+    return res.status(401).json({ error: "No autorizado" });
+  const { processOperationOutbox } = await import("./operations/outbox.js");
+  const processed = await processOperationOutbox(100);
+  const removed = await db.authRateBucket.deleteMany({ where: { expiresAt: { lt: new Date(Date.now() - 3600_000) } } });
+  res.json({ processed, expiredBucketsRemoved: removed.count });
+});
 app.get("/api/health", async (_req, res) => {
   await db.$queryRaw`SELECT 1`;
   res.json({ ok: true });
 });
 app.get("/api/config", (_req, res) => res.json({ demo }));
 app.use("/api/site", publicSite);
-const setupLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 12, standardHeaders: "draft-8", legacyHeaders: false, message: { error: "Demasiados intentos. Reintentá en 15 minutos." } });
+const setupLimit = rateLimit({ ...(process.env.NODE_ENV === "production" ? { store: new AuthRateStore("setup:") } : {}), windowMs: 15 * 60 * 1000, limit: 12, standardHeaders: "draft-8", legacyHeaders: false, message: { error: "Demasiados intentos. Reintentá en 15 minutos." } });
 app.post("/api/auth/invitation", setupLimit, async (req, res) => {
   realTeamOnly();
   const { token } = z.object({ token: z.string().max(200) }).parse(req.body);
@@ -162,7 +212,7 @@ app.post("/api/auth/invitation", setupLimit, async (req, res) => {
 });
 app.post("/api/auth/activate", setupLimit, async (req, res) => {
   realTeamOnly();
-  const { token, password } = z.object({ token: z.string().max(200), password: z.string().min(12).max(72) }).parse(req.body);
+  const { token, password, username } = z.object({ token: z.string().max(200), password: z.string().min(12).max(72), username: usernameSchema.optional() }).parse(req.body);
   const seat = await findValidSeat(token);
   if (!seat) throw new HttpError(404, "El enlace venció o ya se usó. Pedí uno nuevo.");
   const passwordHash = await bcrypt.hash(password, 12);
@@ -170,15 +220,16 @@ app.post("/api/auth/activate", setupLimit, async (req, res) => {
     const valid = await tx.teamSeat.findUnique({ where: { tokenHash: setupHash(token) } });
     if (!valid?.email || valid.activatedAt || !valid.expiresAt || valid.expiresAt <= new Date())
       throw new HttpError(404, "El enlace venció o ya se usó. Pedí uno nuevo.");
-    const created = await tx.user.create({ data: { id: valid.id, name: valid.name, email: valid.email, role: valid.role, password: passwordHash } });
+    const created = await tx.user.create({ data: { id: valid.id, name: valid.name, email: valid.email, username, role: valid.role, password: passwordHash } });
     await tx.teamSeat.update({ where: { id: valid.id }, data: { activatedAt: new Date(), tokenHash: null, expiresAt: null } });
     return created;
   });
-  session(res, user);
+  await session(res, user);
 });
 app.post(
   "/api/auth/login",
   rateLimit({
+    ...(process.env.NODE_ENV === "production" ? { store: new AuthRateStore("login:") } : {}),
     windowMs: 15 * 60 * 1000,
     limit: 15,
     standardHeaders: "draft-8",
@@ -186,15 +237,18 @@ app.post(
     message: { error: "Demasiados intentos. Reintentá en 15 minutos." },
   }),
   async (req, res) => {
-    const v = z
-      .object({ email: z.email(), password: z.string().max(200) })
-      .parse(req.body);
+    // Email remains an explicit compatibility field for existing API clients.
+    // A username never falls back to a name or email lookup.
+    const v = z.union([
+      z.strictObject({ username: usernameSchema, password: z.string().min(1).max(200) }),
+      z.strictObject({ email: z.email(), password: z.string().min(1).max(200) }),
+    ]).parse(req.body);
     const user = await db.user.findUnique({
-      where: { email: v.email.toLowerCase() },
+      where: "username" in v ? { username: v.username } : { email: v.email.toLowerCase() },
     });
-    if (!user || !(await bcrypt.compare(v.password, user.password)))
-      throw new HttpError(401, "Email o contraseña incorrectos");
-    session(res, user);
+    if (!user?.active || !(await bcrypt.compare(v.password, user.password)))
+      throw new HttpError(401, "Usuario o contraseña incorrectos");
+    await session(res, user);
   },
 );
 app.post("/api/auth/demo", async (req, res) => {
@@ -204,9 +258,10 @@ app.post("/api/auth/demo", async (req, res) => {
     .parse(req.body.id || "owner");
   const user = await db.user.findUnique({ where: { id } });
   if (!user) throw new HttpError(404, "Ejecutá el seed de demostración");
-  session(res, user);
+  await session(res, user);
 });
-app.post("/api/auth/logout", (_req, res) => {
+app.post("/api/auth/logout", auth, async (req, res) => {
+  await db.operationSession.update({where:{id:req.sessionId},data:{revokedAt:new Date()}});
   res.clearCookie("session", { path: "/" });
   res.json({ ok: true });
 });
@@ -217,15 +272,32 @@ app.get("/api/auth/me", auth, (req, res) =>
       name: req.user.name,
       role: req.user.role,
       email: req.user.email,
+      username: req.user.username,
       color: req.user.color,
     },
   }),
 );
 app.use("/api", auth);
+app.use("/api", legacyAccessGuard);
+app.use("/api/operations/documents", documentRoutes);
+app.use("/api/operations/configuration", configurationRoutes);
+app.use("/api/operations/appsheet-migration", appSheetMigrationRoutes);
+app.use("/api/operations", operationsRoutes);
+app.use("/api/delivery", deliverySyncRoutes);
+app.use("/api/delivery", recoveryRoutes);
+app.use("/api/legacy-imports", legacyImportRoutes);
+app.use("/api/reports/operations", operationsReports);
+app.use("/api/reports/operations/exports", operationsExports);
 app.use("/api", decisionCenter);
 app.use("/api", decisionAnalysis);
 app.use("/api", decisionInputs);
-app.use("/api", dataImportRoutes);
+app.use("/api", async (req, res, next) => {
+  if (!req.path.startsWith("/data-import/")) return next();
+  const { dataImportRoutes } = await import("./data-import-routes.js");
+  dataImportRoutes(req, res, next);
+});
+app.use("/api", breakEven);
+app.use("/api", upcoming);
 app.use("/api/site/admin", roles("owner", "admin"), adminSite);
 app.get("/api/views/:view", async (req, res) => {
   const view = z.enum(["dashboard", "inventory", "customers", "sales", "expenses", "finance", "responsibles", "reports", "settings"]).parse(req.params.view);
@@ -346,6 +418,40 @@ app.patch("/api/locations/:id/status", roles("owner"), async (req, res) => {
   });
   res.json(result);
 });
+// Commercial categories: every role can read the names; stock coverage stays out of a responsible's scope.
+app.get("/api/categories", async (req, res) => {
+  const coverage = await categoryCoverage(db, businessDate(await getSettings()));
+  res.json({
+    items: req.user.role === "responsible" ? coverage.map(({ id, name, active }) => ({ id, name, active })) : coverage,
+    total: coverage.length,
+  });
+});
+app.post("/api/categories", roles("owner", "admin"), async (req, res) => {
+  const v = categorySchema.parse(req.body);
+  const name = categoryName(v.name);
+  const result = await atomic(async (tx) => {
+    if (await tx.productCategory.findUnique({ where: { key: categoryKey(name) } }))
+      throw new HttpError(409, "Ya existe una categoría con ese nombre");
+    return tx.productCategory.create({ data: { name, key: categoryKey(name), minVarieties: v.minVarieties } });
+  });
+  res.status(201).json(result);
+});
+app.patch("/api/categories/:id", roles("owner", "admin"), async (req, res) => {
+  const v = categorySchema.parse(req.body);
+  const name = categoryName(v.name);
+  const result = await atomic(async (tx) => {
+    const current = await tx.productCategory.findUnique({ where: { id: String(req.params.id) } });
+    if (!current) throw new HttpError(404, "Categoría no encontrada");
+    const clash = await tx.productCategory.findUnique({ where: { key: categoryKey(name) } });
+    if (clash && clash.id !== current.id) throw new HttpError(409, "Ya existe una categoría con ese nombre");
+    return tx.productCategory.update({ where: { id: current.id }, data: { name, key: categoryKey(name), minVarieties: v.minVarieties } });
+  });
+  res.json(result);
+});
+app.patch("/api/categories/:id/status", roles("owner", "admin"), async (req, res) => {
+  const { active } = z.object({ active: z.boolean() }).parse(req.body);
+  res.json(await db.productCategory.update({ where: { id: String(req.params.id) }, data: { active } }));
+});
 function validateCashDirection(category: string, amount: number) {
   if (["opening_balance", "capital_contribution", "delivery_receipt", "other_income"].includes(category) && amount < 0)
     throw new HttpError(400, "Este tipo de ingreso requiere importe positivo");
@@ -366,7 +472,8 @@ app.post(
     const product = await atomic(async (tx) => {
       const selected = await resolveSupplier(tx, v.supplierId, v.supplier);
       const located = await resolveLocation(tx, v.locationId, v.location, null, req.user.role === "owner");
-      const p = await tx.product.create({ data: { ...v, ...selected, ...located, sourceSystem: v.sourceSystem || "local", sourceId: v.sourceId || randomUUID() } });
+      const categorized = await resolveCategory(tx, v.categoryId ?? null);
+      const p = await tx.product.create({ data: { ...v, ...selected, ...located, ...categorized, sourceSystem: v.sourceSystem || "local", sourceId: v.sourceId || randomUUID() } });
       await tx.movement.create({
         data: {
           productId: p.id,
@@ -408,12 +515,13 @@ app.patch(
     const result = await atomic(async (tx) => {
       const selected = await resolveSupplier(tx, v.supplierId, v.supplier, existing.supplierId);
       const located = await resolveLocation(tx, v.locationId, v.location, existing.locationId, req.user.role === "owner");
+      const categorized = v.categoryId === undefined ? {} : await resolveCategory(tx, v.categoryId, existing.categoryId);
       return tx.product.updateMany({
         where: {
           id: String(req.params.id),
           ...(req.user.role === "responsible" ? { ownerId: req.user.id } : {}),
         },
-        data: { ...v, ...selected, ...located },
+        data: { ...v, ...selected, ...located, ...categorized },
       });
     });
     if (!result.count) throw new HttpError(404, "Lote no encontrado");
@@ -587,6 +695,12 @@ app.post(
         throw new HttpError(400, (e as Error).message);
       }
       const allocations=allocateRevenue(lines.map(l=>l.amount),pricing.total);
+      // A mixed payment books each part in its own account, so the cash count only expects the cash part.
+      if (v.split && v.split.cash >= pricing.total)
+        throw new HttpError(400, `La parte en efectivo tiene que ser menor que el total (${(pricing.total / 100).toFixed(2)} ARS). Si paga todo en efectivo, elegí Efectivo.`);
+      const paymentSplit = v.split
+        ? [{ method: "cash", amount: v.split.cash }, { method: v.split.other, amount: pricing.total - v.split.cash }]
+        : null;
       const sale = await tx.sale.create({
         data: {
           customerId: customer.id,
@@ -595,6 +709,7 @@ app.post(
           subtotal,
           ...pricing,
           payment: v.payment,
+          ...(paymentSplit ? { paymentSplit } : {}),
           cost: lines.reduce((n, l) => n + l.cost, 0),
           requestId: v.requestId,
           channel: "local",
@@ -639,15 +754,17 @@ app.post(
         where: { id: customer.id },
         data: { points: { increment: pricing.pointsEarned - v.points } },
       });
-      await tx.cashEntry.create({ data: {
-        date: today,
-        account: v.payment === "cash" ? "cash" : "bank",
-        category: "sale",
-        amount: sale.total,
-        description: `Venta local ${sale.id}`,
-        saleId: sale.id,
-        userId: req.user.id,
-      } });
+      const methodNames: Record<string, string> = { cash: "Efectivo", transfer: "Transferencia", card: "Tarjeta" };
+      for (const part of paymentSplit || [{ method: v.payment, amount: sale.total }])
+        await tx.cashEntry.create({ data: {
+          date: today,
+          account: part.method === "cash" ? "cash" : "bank",
+          category: "sale",
+          amount: part.amount,
+          description: paymentSplit ? `Venta local ${sale.id} · ${methodNames[part.method]}` : `Venta local ${sale.id}`,
+          saleId: sale.id,
+          userId: req.user.id,
+        } });
       return sale;
     });
     res
@@ -800,8 +917,10 @@ app.post("/api/cash-plans", roles("owner", "admin"), async (req, res) => {
   res.status(201).json(plan);
 });
 app.put("/api/settings", roles("owner", "admin"), async (req, res) => {
-  const value = settingsSchema.parse(req.body);
+  const parsed = settingsSchema.parse(req.body);
   const current = await getSettings();
+  // sampleData is set only by the preview loader; the form cannot change it, and saving must not drop it.
+  const value = { ...parsed, ...(current.sampleData !== undefined ? { sampleData: current.sampleData } : {}) };
   if (value.currency !== current.currency && (await db.sale.count()))
     throw new HttpError(
       409,
@@ -896,6 +1015,8 @@ app.post("/api/import", roles("owner", "admin"), async (req, res) => {
           supplier: r.supplier || "",
           sourceSystem: r.sourceSystem || null,
           sourceId: r.sourceId || null,
+          // Categories are assigned in the app, where archived or unknown ones are rejected.
+          categoryId: undefined,
         });
         if (!p.sourceSystem || !p.sourceId) throw new Error("Cada lote importado requiere sourceSystem y sourceId");
         if (p.unit === "ud" && (p.stock % 1000 !== 0 || p.minimum % 1000 !== 0))
@@ -1034,6 +1155,9 @@ app.get(
     const from = req.query.from ? date.parse(req.query.from) : undefined;
     const to = req.query.to ? date.parse(req.query.to) : undefined;
     if (from && to && from > to) throw new HttpError(400, "Rango inválido");
+    const { exportReport } = await import("./reports.js");
+    res.setHeader("X-Bombo-Data-Source", "legacy-compatibility");
+    res.setHeader("X-Bombo-Coverage", "canonical-operations-excluded");
     await exportReport(res, req.user, owner, format, from, to);
   },
 );
@@ -1059,6 +1183,7 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
           .map((i) => `${i.path.join(".")}: ${i.message}`)
           .join("; "),
       });
+  if (error instanceof OperationError) return res.status(error.status).json({error:error.message,code:error.code,...(error.details?{details:error.details}:{})});
   if (error instanceof HttpError)
     return res.status(error.status).json({ error: error.message });
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
@@ -1069,7 +1194,10 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (error.code === "P2025")
       return res.status(404).json({ error: "Registro no encontrado" });
   }
-  console.error(error);
+  if (typeof error === "object" && error !== null && "type" in error && error.type === "entity.too.large")
+    return res.status(413).json({ error: "El archivo o la solicitud supera el límite permitido." });
+  // Prisma errors may embed query values. Logs retain diagnostic class/code only.
+  console.error("Bombo request failed", { kind: error instanceof Error ? error.name : "unknown", code: error instanceof Prisma.PrismaClientKnownRequestError ? error.code : undefined });
   res
     .status(500)
     .json({ error: "No se pudo completar la operación. Reintentá." });

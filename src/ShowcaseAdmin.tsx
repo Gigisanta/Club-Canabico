@@ -51,8 +51,8 @@ function errorMessage(error: unknown) {
 }
 
 async function validateImage(file: File) {
-  if (file.size > 6 * 1024 * 1024) {
-    throw new Error("La imagen debe pesar menos de 6 MB. No se guardó ningún cambio.");
+  if (file.size > 3_000_000) {
+    throw new Error("La imagen debe pesar como máximo 3 MB (3.000.000 bytes). No se guardó ningún cambio.");
   }
   if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
     throw new Error("Elegí una imagen JPEG, PNG o WebP. No se guardó ningún cambio.");
@@ -437,7 +437,7 @@ export default function ShowcaseAdmin() {
             </Field>
             <Field
               label={editing?.imageUrl ? "Reemplazar imagen" : "Imagen de la ficha"}
-              hint="JPEG, PNG o WebP; hasta 6 MB. La imagen se optimiza y se guarda en el club."
+              hint="JPEG, PNG o WebP; hasta 3 MB (3.000.000 bytes). La imagen se optimiza y se guarda en el club."
             >
               <input name="image" type="file" accept="image/jpeg,image/png,image/webp" />
             </Field>

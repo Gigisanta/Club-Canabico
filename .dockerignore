@@ -1,5 +1,7 @@
 node_modules
 .env
+.env.*
+!.env.operations.example
 .git
 .local
 dist
@@ -7,3 +9,14 @@ dist-server
 artifacts
 test-results
 playwright-report
+.vercel
+.agents
+docs
+skills-lock.json
+scripts/__pycache__
+shared/operations/legacy-coverage.json
+shared/operations/legacy-measures.json
+shared/operations/legacy-model-metadata.json
+scripts/audit-legacy-sources.py
+scripts/legacy-coverage.py
+scripts/legacy-reader-source-audit.ts

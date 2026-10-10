@@ -13,6 +13,8 @@ import {
   Star,
   MapPin,
   CaretDown,
+  Tag,
+  CheckCircle,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import {
@@ -26,7 +28,7 @@ import {
   type Supplier,
   type Location,
 } from "./lib";
-import type { Movement, Page } from "../shared/types";
+import type { Movement, Page, ProductCategory } from "../shared/types";
 import {
   PageHeader,
   Panel,
@@ -42,6 +44,9 @@ import { StockCard } from "./StockCard";
 import "./operation.css";
 
 type CatalogProduct = Pick<Product, "name" | "strain" | "type" | "unit">;
+/** Sellable stock of a category, such as "1.240 g" or "1.240 g + 12 ud". */
+const categoryStock = (category: ProductCategory) =>
+  category.stock?.length ? category.stock.map((part) => `${number(part.milliunits / 1000)} ${part.unit}`).join(" + ") : "sin stock";
 type ProductCatalog = { products: CatalogProduct[]; profiles: string[]; nextCursor: string | null; cursor: string | null };
 
 function ProductIdentityFields({ edit }: { edit: Product | null }) {
@@ -160,6 +165,7 @@ function ProductIdentityFields({ edit }: { edit: Product | null }) {
           {pickerBusy && <p role="status">Buscando productos…</p>}
           {!pickerBusy && !products.length && <p>{catalog.error || fullCatalog.error || (browseAll ? "Todavía no hay productos guardados." : name.trim() ? "Sin coincidencias. Podés guardar este nombre nuevo." : "Todavía no hay productos guardados.")}</p>}
           {browseAll && browseNext && <button type="button" className="product-picker-more" disabled={fullCatalog.loading}
+            onMouseDown={(event) => event.preventDefault()}
             onClick={() => { setBrowseCursor(browseNext); setActiveOption(-1); }}>
             {fullCatalog.loading ? "Cargando más…" : "Mostrar más productos"}
           </button>}
@@ -251,7 +257,12 @@ export default function Inventory() {
   const [view, setView] = useState<"cards" | "table">("table");
   const [type, setType] = useState(params.get("type") || "all");
   const [supplierFilter, setSupplierFilter] = useState(params.get("supplier") || "all");
+  const [categoryFilter, setCategoryFilter] = useState(params.get("category") || "all");
   const [showSuppliers, setShowSuppliers] = useState(false);
+  const [showCategories, setShowCategories] = useState(false);
+  const [categoryEditor, setCategoryEditor] = useState<ProductCategory | "new" | null>(null);
+  const [lotCategoryId, setLotCategoryId] = useState("");
+  const scrollToCategories = useRef(false);
   const [supplierEditor, setSupplierEditor] = useState<Supplier | "new" | null>(null);
   const [lotSupplierId, setLotSupplierId] = useState("");
   const [showLocations, setShowLocations] = useState(false);
@@ -276,25 +287,40 @@ export default function Inventory() {
     setFilter(params.get("filter") === "low" ? "low" : params.get("filter") === "expired" ? "expired" : "all");
     setType(params.get("type") || "all");
     setSupplierFilter(params.get("supplier") || "all");
+    setCategoryFilter(params.get("category") || "all");
   }, [params]);
   const updateParams = (key: string, value: string) => {
     const next = new URLSearchParams(params);
     if (value && value !== "all") next.set(key, value); else next.delete(key);
     setParams(next, { replace: true });
   };
-  useEffect(() => { setCursor(null); setPrevious([]); }, [debouncedQuery, filter, type, supplierFilter, owner]);
+  useEffect(() => { setCursor(null); setPrevious([]); }, [debouncedQuery, filter, type, supplierFilter, categoryFilter, owner]);
   useEffect(() => { setHistoryCursor(null); setHistoryPrevious([]); }, [owner, history]);
   const page = useResource<Page<Product, { total: number; low: number; value: number }>>(
-    `/list/products?q=${encodeURIComponent(debouncedQuery)}&filter=${filter}&type=${encodeURIComponent(type)}&supplier=${encodeURIComponent(supplierFilter)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`,
+    `/list/products?q=${encodeURIComponent(debouncedQuery)}&filter=${filter}&type=${encodeURIComponent(type)}&supplier=${encodeURIComponent(supplierFilter)}&category=${encodeURIComponent(categoryFilter)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`,
   );
   const suppliers = useResource<{ items: Supplier[]; total: number }>(canManage ? "/suppliers" : null);
   const locations = useResource<{ items: Location[]; total: number }>(canManage ? "/locations" : null);
+  // Every role can read category names; a responsible gets them without stock coverage.
+  const categories = useResource<{ items: ProductCategory[]; total: number }>("/categories");
+  const coverage = categories.data?.items.filter((c) => c.active && c.varieties !== undefined) || [];
   useEffect(() => {
     if (editor) setLotSupplierId(editor === "new"
       ? suppliers.data?.items.find((s) => s.active && s.isDefault)?.id || ""
       : editor.supplierId || "");
   }, [editor, suppliers.data]);
   useEffect(() => { setLocationTouched(false); setLotLocationId(""); setQuickLocation(false); setQuickLocationName(""); }, [editor]);
+  useEffect(() => {
+    // A new lot starts in the category being browsed, so filling a short category takes one step.
+    if (editor) setLotCategoryId(editor === "new"
+      ? categories.data?.items.find((c) => c.id === categoryFilter && c.active)?.id || ""
+      : editor.categoryId || "");
+  }, [editor]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!showCategories || !scrollToCategories.current) return;
+    scrollToCategories.current = false;
+    document.querySelector(".inventory-categories-panel")?.scrollIntoView({ block: "start" });
+  }, [showCategories]);
   useEffect(() => {
     if (!editor || locationTouched || !locations.data) return;
     setLotLocationId(editor === "new"
@@ -307,16 +333,19 @@ export default function Inventory() {
       : null,
   );
   const products = page.data?.items || [];
-  const hasFilters = !!query || filter !== "all" || type !== "all" || supplierFilter !== "all";
+  const hasFilters = !!query || filter !== "all" || type !== "all" || supplierFilter !== "all" || categoryFilter !== "all";
   const clearFilters = () => {
     setQuery("");
     setFilter("all");
     setType("all");
     setSupplierFilter("all");
+    setCategoryFilter("all");
     const next = new URLSearchParams(params);
-    ["q", "filter", "type", "supplier"].forEach((key) => next.delete(key));
+    ["q", "filter", "type", "supplier", "category"].forEach((key) => next.delete(key));
     setParams(next, { replace: true });
   };
+  const pickCategory = (value: string) => { setCategoryFilter(value); updateParams("category", value); };
+  const openCategories = () => { scrollToCategories.current = true; setShowCategories(true); };
   const handleViewTabsKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     const nextView = event.key === "Home"
       ? "cards"
@@ -340,6 +369,7 @@ export default function Inventory() {
       supplier: "",
       supplierId: lotSupplierId || null,
       locationId: lotLocationId || null,
+      categoryId: lotCategoryId || null,
       location: locations.data?.items.find((l) => l.id === lotLocationId)?.name || existing?.location || "",
       stock: Math.round(Number(fd.get("stock")) * 1000),
       minimum: Math.round(Number(fd.get("minimum")) * 1000),
@@ -354,7 +384,7 @@ export default function Inventory() {
     );
     toast.success(existing ? "Producto actualizado" : "Lote creado");
     setEditor(null);
-    await Promise.all([reload(), page.reload(), suppliers.reload(), locations.reload()]);
+    await Promise.all([reload(), page.reload(), suppliers.reload(), locations.reload(), categories.reload()]);
   }
   async function saveSupplier(fd: FormData) {
     const existing = supplierEditor !== "new" ? supplierEditor : null;
@@ -384,6 +414,19 @@ export default function Inventory() {
     await send(`/locations/${location.id}/status`, { active: !location.active }, "PATCH");
     toast.success(location.active ? "Ubicación archivada" : "Ubicación activada");
     await locations.reload();
+  }
+  async function saveCategory(fd: FormData) {
+    const existing = categoryEditor !== "new" ? categoryEditor : null;
+    await send(existing ? `/categories/${existing.id}` : "/categories",
+      { name: fd.get("name"), minVarieties: Number(fd.get("minVarieties") || 0) }, existing ? "PATCH" : "POST");
+    toast.success(existing ? "Categoría actualizada" : "Categoría guardada");
+    setCategoryEditor(null);
+    await Promise.all([categories.reload(), page.reload(), reload()]);
+  }
+  async function toggleCategory(category: ProductCategory) {
+    await send(`/categories/${category.id}/status`, { active: !category.active }, "PATCH");
+    toast.success(category.active ? "Categoría archivada" : "Categoría activada");
+    await Promise.all([categories.reload(), reload()]);
   }
   async function addQuickLocation() {
     if (!quickLocationName.trim() || savingQuickLocation) return;
@@ -422,6 +465,29 @@ export default function Inventory() {
         }
       />
       {state.lowStockCount > 0 && <button className="inventory-low-alert" onClick={() => { setFilter("low"); updateParams("filter", "low"); }}><WarningCircle size={18} />{state.lowStockCount} {state.lowStockCount === 1 ? "lote con stock bajo" : "lotes con stock bajo"} · Ver alertas</button>}
+      {coverage.length > 0 && <section className="category-coverage" aria-labelledby="category-coverage-title">
+        <div className="category-coverage-head">
+          <h2 id="category-coverage-title">Stock por categoría</h2>
+          {isManager && <button type="button" className="category-coverage-edit" onClick={openCategories}>Editar categorías</button>}
+        </div>
+        <div className="category-coverage-list">
+          {coverage.map((c) => {
+            const minimum = c.minVarieties || 0;
+            const varieties = c.varieties || 0;
+            const short = minimum > 0 && varieties < minimum;
+            return <button key={c.id} type="button" className={`category-chip${short ? " is-short" : minimum ? " is-met" : ""}`} aria-pressed={categoryFilter === c.id}
+              onClick={() => pickCategory(categoryFilter === c.id ? "all" : c.id)}>
+              {short ? <WarningCircle size={17} weight="fill" aria-hidden="true" /> : minimum ? <CheckCircle size={17} weight="fill" aria-hidden="true" /> : <Tag size={17} aria-hidden="true" />}
+              <strong>{c.name}</strong>
+              <span>{minimum ? `${varieties} de ${minimum}` : `${varieties} ${varieties === 1 ? "variedad" : "variedades"}`}{short ? ` · Faltan ${minimum - varieties}` : ""} · {categoryStock(c)}</span>
+            </button>;
+          })}
+        </div>
+      </section>}
+      {isManager && categories.data && !categories.data.items.some((c) => c.active) && <p className="category-coverage-invite">
+        <span>Agrupá los lotes por categoría, como Interior Premium, y fijá cuántas variedades querés tener con stock.</span>
+        <button type="button" className="category-coverage-edit" onClick={() => { openCategories(); setCategoryEditor("new"); }}>Crear categoría</button>
+      </p>}
       <Panel
         className="inventory-products-panel"
         title="Todos los productos"
@@ -483,7 +549,7 @@ export default function Inventory() {
             </select>
           </div>
           <details className="inventory-advanced">
-            <summary>Filtros avanzados{type !== "all" || supplierFilter !== "all" ? " · activos" : ""}</summary>
+            <summary>Filtros avanzados{type !== "all" || supplierFilter !== "all" || categoryFilter !== "all" ? " · activos" : ""}</summary>
             <div className="filter-group">
               <select aria-label="Tipo de producto" value={type} onChange={(e) => { setType(e.target.value); updateParams("type", e.target.value); }}>
                 <option value="all">Todos los tipos</option>
@@ -495,6 +561,12 @@ export default function Inventory() {
               {suppliers.data?.items.map((s) => <option key={s.id} value={s.id}>{s.name}{s.active ? "" : " (archivado)"}</option>)}
               <option value="unassigned">Sin proveedor</option>
             </select>}
+              <select aria-label="Filtrar por categoría" value={categoryFilter} onChange={(e) => pickCategory(e.target.value)}>
+                <option value="all">Todas las categorías</option>
+                {categories.data?.items.map((c) => <option key={c.id} value={c.id}>{c.name}{c.active ? "" : " (archivada)"}</option>)}
+                {categoryFilter !== "all" && categoryFilter !== "unassigned" && !categories.data?.items.some((c) => c.id === categoryFilter) && <option value={categoryFilter}>Categoría elegida</option>}
+                <option value="unassigned">Sin categoría</option>
+              </select>
             </div>
           </details>
         </div>
@@ -528,7 +600,7 @@ export default function Inventory() {
           {view === "table" && <>
             <div className="inventory-compact-list" aria-label="Lotes de inventario">
               {products.map((p) => <article key={p.id} className="inventory-compact-row">
-                <div><strong>{p.name}</strong><small>{p.lot} · {state.users.find((member) => member.id === p.ownerId)?.name || "Sin responsable"}</small></div>
+                <div><strong>{p.name}</strong><small>{[p.lot, p.category, state.users.find((member) => member.id === p.ownerId)?.name || "Sin responsable"].filter(Boolean).join(" · ")}</small></div>
                 <div className="inventory-compact-meta"><strong>{number(p.stock / 1000)} {p.unit}</strong><Badge tone={p.expires && p.expires <= state.today ? "red" : p.stock <= p.minimum ? "amber" : "green"}>{p.expires && p.expires <= state.today ? "Vencido" : p.stock <= p.minimum ? "Stock bajo" : "Disponible"}</Badge></div>
                 {canManage && <div className="inventory-compact-actions"><button className="button small-button" onClick={() => setEditor(p)}>Editar</button><button className="button small-button" onClick={() => { setMoveType("entry"); setMovement(p); }}>Movimiento</button></div>}
               </article>)}
@@ -561,7 +633,7 @@ export default function Inventory() {
                           <div>
                             <strong>{p.name}</strong>
                             <small>
-                              {[p.lot, p.strain, p.type].filter(Boolean).join(" · ")}
+                              {[p.lot, p.category, p.strain, p.type].filter(Boolean).join(" · ")}
                             </small>
                           </div>
                         </div>
@@ -674,17 +746,18 @@ export default function Inventory() {
           <span>
             Valor de inventario{" "}
             <strong>
-              {money(page.data?.summary.value || 0)}
+              {page.data ? money(page.data.summary.value || 0) : "…"}
             </strong>
           </span>
         )}
       </div>
       <details className="operation-secondary inventory-tools">
-        <summary>Movimientos, proveedores y ubicaciones</summary>
+        <summary>Movimientos, proveedores, ubicaciones y categorías</summary>
         <div className="inventory-tool-actions">
           <button className="button" onClick={() => setHistory(true)}><ClockCounterClockwise size={18} /> Movimientos</button>
           {user.role === "owner" && <button className="button" onClick={() => setShowSuppliers((value) => !value)} aria-expanded={showSuppliers}><Truck size={18} /> Proveedores</button>}
           {user.role === "owner" && <button className="button" onClick={() => setShowLocations((value) => !value)} aria-expanded={showLocations}><MapPin size={18} /> Ubicaciones</button>}
+          {isManager && <button className="button" onClick={() => setShowCategories((value) => !value)} aria-expanded={showCategories}><Tag size={18} /> Categorías</button>}
         </div>
       </details>
       {showSuppliers && user.role === "owner" && (
@@ -733,6 +806,36 @@ export default function Inventory() {
           </div>
         </Panel>
       )}
+      {showCategories && isManager && (
+        <Panel className="inventory-categories-panel" title="Categorías" sub="Agrupan los lotes para vender y reponer. Con un mínimo de variedades, Inicio avisa cuando faltan."
+          action={<button className="button primary" onClick={() => setCategoryEditor("new")}><Plus size={17} /> Nueva categoría</button>}>
+          {categories.loading && <p role="status" className="table-note">Cargando categorías…</p>}
+          {categories.error && <div className="operation-error" role="alert"><p>{categories.error}</p><button className="button small-button" onClick={() => void categories.reload()}>Reintentar</button></div>}
+          {!categories.loading && !categories.error && !categories.data?.items.length && <Empty title="Todavía no hay categorías" description="Creá la primera, por ejemplo Interior Premium, y asignala al cargar o editar un lote." />}
+          <div className="supplier-grid">
+            {categories.data?.items.map((category) => {
+              const minimum = category.minVarieties || 0;
+              const varieties = category.varieties || 0;
+              const short = category.active && minimum > 0 && varieties < minimum;
+              return <article className={`supplier-card${category.active ? "" : " is-archived"}`} key={category.id}>
+                <div className="supplier-card-top"><span className="supplier-icon"><Tag size={19} /></span>
+                  <div><strong>{category.name}</strong><small>{category.active ? `${category.lotCount} ${category.lotCount === 1 ? "lote vinculado" : "lotes vinculados"}` : "Archivada"}</small></div>
+                </div>
+                <p className={`category-card-coverage${short ? " is-short" : ""}`}>
+                  {short && <WarningCircle size={16} weight="fill" aria-hidden="true" />}
+                  {minimum ? `Mínimo ${minimum} ${minimum === 1 ? "variedad" : "variedades"} · hoy ${varieties} con stock${short ? ` · faltan ${minimum - varieties}` : ""}` : `Sin mínimo · hoy ${varieties} ${varieties === 1 ? "variedad" : "variedades"} con stock`}
+                </p>
+                <p className="category-card-stock">Stock para vender: <strong>{categoryStock(category)}</strong></p>
+                {!!category.varietyNames?.length && <p className="supplier-note">{category.varietyNames.join(", ")}{varieties > category.varietyNames.length ? "…" : ""}</p>}
+                <div className="supplier-actions">
+                  <button className="button" onClick={() => setCategoryEditor(category)}>Editar</button>
+                  <button className="button" onClick={() => void toggleCategory(category).catch((e) => toast.error(e.message))}>{category.active ? "Archivar" : "Activar"}</button>
+                </div>
+              </article>;
+            })}
+          </div>
+        </Panel>
+      )}
       <Modal
         title={edit ? "Editar producto" : "Nuevo stock"}
         description="Precios en pesos argentinos (ARS), por unidad o gramo."
@@ -756,6 +859,13 @@ export default function Inventory() {
               <select name="supplierId" value={lotSupplierId} onChange={(e) => setLotSupplierId(e.target.value)}>
                 <option value="">Sin proveedor</option>
                 {suppliers.data?.items.filter((s) => s.active || s.id === edit?.supplierId).map((s) => <option key={s.id} value={s.id}>{s.name}{s.active ? "" : " (archivado)"}</option>)}
+              </select>
+            </Field>
+            <Field label="Categoría (opcional)" hint={categories.error || (categories.data && !categories.data.items.length ? "Todavía no hay categorías: el dueño o el gerente las crean en Inventario." : "Cuenta para el mínimo de variedades de esa categoría.")}>
+              <select name="categoryId" value={lotCategoryId} onChange={(e) => setLotCategoryId(e.target.value)}>
+                <option value="">Sin categoría</option>
+                {categories.data?.items.filter((c) => c.active || c.id === edit?.categoryId).map((c) => <option key={c.id} value={c.id}>{c.name}{c.active ? "" : " (archivada)"}</option>)}
+                {!!lotCategoryId && !categories.data?.items.some((c) => c.id === lotCategoryId) && <option value={lotCategoryId}>{edit?.category || "Categoría actual"}</option>}
               </select>
             </Field>
             <Field label="Ubicación" hint={locations.error || (locations.loading ? "Cargando ubicaciones…" : !locations.data?.items.some((l) => l.active) ? "Guardá una ubicación para poder registrar el stock." : "Elegí dónde se guarda este stock.")}>
@@ -832,6 +942,18 @@ export default function Inventory() {
         </Form>
         </div>
       </Modal>
+      <Modal title={categoryEditor === "new" ? "Nueva categoría" : "Editar categoría"}
+        description="Una variedad es un producto distinto con stock y sin vencer dentro de la categoría."
+        open={!!categoryEditor} onClose={() => setCategoryEditor(null)}>
+        <div className="operation-dialog-content inventory-dialog-content">
+        <Form onSubmit={saveCategory} onCancel={() => setCategoryEditor(null)}>
+          <Field label="Nombre de la categoría"><input name="name" defaultValue={categoryEditor !== "new" ? categoryEditor?.name : ""} required maxLength={80} placeholder="Ej.: Interior Premium" /></Field>
+          <Field label="Mínimo de variedades" hint="Cuántas variedades distintas querés tener con stock. Con 0 no avisa.">
+            <input name="minVarieties" type="number" inputMode="numeric" min="0" max="500" step="1" defaultValue={categoryEditor !== "new" ? categoryEditor?.minVarieties ?? 0 : 0} required />
+          </Field>
+        </Form>
+        </div>
+      </Modal>
       <Modal
         title={`Movimiento · ${movement?.name || ""}`}
         description="Cada cambio queda registrado con su fecha y usuario."
@@ -850,7 +972,7 @@ export default function Inventory() {
             });
             toast.success("Movimiento registrado");
             setMovement(null);
-            await Promise.all([reload(), page.reload()]);
+            await Promise.all([reload(), page.reload(), categories.reload()]);
           }}
         >
           <Field label="Tipo de movimiento">

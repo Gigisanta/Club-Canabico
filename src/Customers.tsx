@@ -111,7 +111,7 @@ export default function Customers() {
           <Search
             value={query}
             onChange={(value) => { setQuery(value); updateParams("q", value); }}
-            placeholder="Buscar por nombre o email…"
+            placeholder={canEdit ? "Buscar por nombre o email…" : "Buscar por nombre…"}
           />
           <div className="filter-group">
             <select

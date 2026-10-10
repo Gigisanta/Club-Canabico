@@ -2,10 +2,12 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync } from "node:fs";
+import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { createServer, isIP } from "node:net";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import dotenv from "dotenv";
 import { PrismaClient } from "@prisma/client";
 
@@ -14,11 +16,15 @@ dotenv.config({ path: resolve(projectRoot, ".env") });
 
 const activeChildren = new Set();
 let requestedSignal;
+let ephemeralDemoPassword;
 
 function redact(value) {
-  return String(value)
+  const sanitized = String(value)
     .replace(/\bpostgres(?:ql)?:\/\/[^\s"'`]+/gi, "[PostgreSQL URL redacted]")
     .replace(/\b(password|passwd|pwd)(\s*[=:]\s*)[^\s,;]+/gi, "$1$2[redacted]");
+  return ephemeralDemoPassword
+    ? sanitized.split(ephemeralDemoPassword).join("[redacted]")
+    : sanitized;
 }
 
 function onSignal(signal) {
@@ -220,45 +226,120 @@ async function waitForHTTP(state, url, label) {
   throw new Error(`${label} no respondió en el tiempo esperado.\n${state.output}`);
 }
 
-async function main() {
-  let exitCode = 0;
+const isolatedMigrationReviewSpec = "tests/browser/appsheet-migration-review.spec.ts";
+// Mirrors Playwright 1.63's default **/*.@(spec|test).?(c|m)[jt]s?(x) matcher.
+const playwrightDefaultTestMatch = /\.(?:spec|test)\.(?:[cm])?[jt]s(?:x)?$/i;
+
+function discoverDefaultBrowserSpecs() {
+  const testRoot = resolve(projectRoot, "tests/browser");
+  const files = [];
+  const visit = directory => {
+    const entries = readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      if (entry.name === "node_modules") continue;
+      const entryPath = resolve(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(entryPath);
+      } else if (entry.isFile() && playwrightDefaultTestMatch.test(entry.name)) {
+        files.push(relative(projectRoot, entryPath).split(sep).join("/"));
+      }
+    }
+  };
+  if (existsSync(testRoot) && lstatSync(testRoot).isDirectory()) visit(testRoot);
+  // Playwright makes positional file filters case-insensitive on every platform.
+  const caseFoldedPaths = new Set();
+  for (const file of files) {
+    const folded = file.toLowerCase();
+    if (caseFoldedPaths.has(folded))
+      throw new Error("El inventario contiene rutas de tests que sólo difieren en mayúsculas; no se puede garantizar su aislamiento.");
+    caseFoldedPaths.add(folded);
+  }
+  return files;
+}
+
+function partitionBrowserSpecs(selectors) {
+  const ordinary = selectors.filter(file => file !== isolatedMigrationReviewSpec);
+  const migrationReview = selectors.filter(file => file === isolatedMigrationReviewSpec);
+  const groups = [];
+  if (ordinary.length) groups.push({ name: "ordinary", selectors: ordinary });
+  if (migrationReview.length) groups.push({ name: "appsheet-migration-review", selectors: migrationReview });
+  return groups;
+}
+
+function canonicalizeBrowserSpecSelectors(selectors, discoveredSpecs) {
+  return selectors.map(selector => {
+    const exactMatch = discoveredSpecs.find(file => file === selector);
+    if (exactMatch) return exactMatch;
+
+    const caseInsensitiveMatches = discoveredSpecs.filter(file => file.toLowerCase() === selector.toLowerCase());
+    if (caseInsensitiveMatches.length === 1) return caseInsensitiveMatches[0];
+    if (caseInsensitiveMatches.length > 1)
+      throw new Error(`El selector ${selector} coincide con varios archivos de navegador al ignorar mayúsculas; usá el nombre exacto.`);
+    throw new Error(`El archivo ${selector} existe, pero Playwright no lo descubre con el testMatch configurado.`);
+  });
+}
+
+function playwrightFileSelector(relativePath) {
+  const escapedPath = relativePath
+    .split("/")
+    .map(segment => segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("[/\\\\]");
+  return `(?:^|[/\\\\])${escapedPath}$`;
+}
+
+async function runIsolatedGroup(group, adminURL) {
   let adminClient;
   let schema;
   let schemaCreated = false;
+  let privateObjectRoot;
+  let groupError;
+  ephemeralDemoPassword = randomBytes(32).toString("base64url");
   try {
-    if (process.argv.length > 2)
-      throw new Error("El runner aislado no acepta overrides de Playwright; ejecutá `npm run test:e2e` sin argumentos.");
     throwIfInterrupted();
 
-    const adminURL = await validateTestDatabase();
     schema = `bombo_e2e_${Date.now().toString(36)}_${randomBytes(5).toString("hex")}`;
     adminClient = new PrismaClient({ datasources: { db: { url: adminURL.toString() } } });
     await adminClient.$connect();
     await adminClient.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
     schemaCreated = true;
-    console.log("[e2e] Conexión PostgreSQL de pruebas local validada; esquema desechable creado.");
+    console.log(`[e2e:${group.name}] Conexión PostgreSQL de pruebas local validada; esquema desechable creado.`);
 
     const databaseURL = withSchema(adminURL, schema);
     const childEnv = { ...process.env };
     delete childEnv.TEST_DATABASE_URL;
     delete childEnv.E2E_DATABASE_URL;
     delete childEnv.E2E_URL;
+    delete childEnv.BOMBO_E2E_ISOLATED;
+    delete childEnv.BOMBO_E2E_PASSWORD;
     childEnv.DATABASE_URL = databaseURL;
     childEnv.NODE_ENV = "development";
     childEnv.DEMO_MODE = "true";
     childEnv.HOST = "127.0.0.1";
     childEnv.PUBLIC_SITE_PREVIEW = "true";
+    childEnv.VITE_PUBLIC_SITE_PREVIEW = "true";
     childEnv.JWT_SECRET = randomBytes(48).toString("hex");
     childEnv.COOKIE_SECURE = "false";
     childEnv.PUBLIC_SITE_APPROVED = "false";
+    privateObjectRoot = await mkdtemp(resolve(tmpdir(), "bombo-e2e-private-"));
+    await chmod(privateObjectRoot, 0o700);
+    childEnv.PRIVATE_OBJECT_ROOT = privateObjectRoot;
+    childEnv.PRIVATE_OBJECT_PROVIDER = "local";
+    childEnv.PRIVATE_S3_BUCKET = "";
 
     const prismaCLI = resolve(projectRoot, "node_modules/prisma/build/index.js");
     if (!existsSync(prismaCLI)) throw new Error("No se encontró Prisma instalado en node_modules.");
-    console.log("[e2e] Aplicando migraciones al esquema desechable.");
-    await runCommand("migrate", process.execPath, [prismaCLI, "migrate", "deploy"], childEnv);
+    console.log(`[e2e:${group.name}] Aplicando migraciones al esquema desechable.`);
+    await runCommand(`migrate:${group.name}`, process.execPath, [prismaCLI, "migrate", "deploy"], childEnv);
 
-    console.log("[e2e] Sembrando datos demo en el esquema desechable.");
-    await runCommand("seed", process.execPath, ["--import", "tsx", "prisma/seed.ts"], childEnv);
+    console.log(`[e2e:${group.name}] Sembrando datos demo en el esquema desechable.`);
+    const seedEnv = {
+      ...childEnv,
+      BOMBO_E2E_ISOLATED: "1",
+      BOMBO_E2E_PASSWORD: ephemeralDemoPassword,
+    };
+    await runCommand(`seed:${group.name}`, process.execPath, ["--import", "tsx", "prisma/seed.ts"], seedEnv);
+    await runCommand(`operations-seed:${group.name}`, process.execPath, ["--import", "tsx", "scripts/seed-operations-rehearsal.ts"], childEnv);
 
     const [apiPort, vitePort] = await Promise.all([freeLoopbackPort(), freeLoopbackPort()]);
     if (apiPort === vitePort) throw new Error("No se pudieron asignar puertos locales distintos para API y Vite.");
@@ -268,45 +349,114 @@ async function main() {
     appEnv.VITE_PORT = String(vitePort);
     appEnv.ALLOWED_ORIGIN = baseURL;
     appEnv.BOMBO_E2E_ISOLATED = "1";
+    appEnv.BOMBO_E2E_PASSWORD = ephemeralDemoPassword;
     appEnv.E2E_BASE_URL = baseURL;
 
-    const api = startChild("api", process.execPath, ["--import", "tsx", "server/index.ts"], appEnv);
+    const api = startChild(`api:${group.name}`, process.execPath, ["--import", "tsx", "server/index.ts"], appEnv);
     const viteCLI = resolve(projectRoot, "node_modules/vite/bin/vite.js");
     if (!existsSync(viteCLI)) throw new Error("No se encontró Vite instalado en node_modules.");
-    const vite = startChild("vite", process.execPath, [viteCLI, "--host", "127.0.0.1", "--port", String(vitePort), "--strictPort"], appEnv);
-    console.log("[e2e] Esperando API y Vite en puertos loopback temporales.");
+    const viteEnv = { ...appEnv };
+    delete viteEnv.BOMBO_E2E_PASSWORD;
+    const vite = startChild(`vite:${group.name}`, process.execPath, [viteCLI, "--host", "127.0.0.1", "--port", String(vitePort), "--strictPort"], viteEnv);
+    console.log(`[e2e:${group.name}] Esperando API y Vite en puertos loopback temporales.`);
     await Promise.all([
-      waitForHTTP(api, `http://127.0.0.1:${apiPort}/api/health`, "API aislada"),
-      waitForHTTP(vite, `${baseURL}/`, "Vite aislado"),
+      waitForHTTP(api, `http://127.0.0.1:${apiPort}/api/health`, `API aislada (${group.name})`),
+      waitForHTTP(vite, `${baseURL}/`, `Vite aislado (${group.name})`),
     ]);
 
     const playwrightCLI = resolve(projectRoot, "node_modules/@playwright/test/cli.js");
     if (!existsSync(playwrightCLI)) throw new Error("No se encontró Playwright instalado en node_modules.");
-    console.log("[e2e] Ejecutando Playwright contra la instancia aislada.");
-    await runCommand("playwright", process.execPath, [playwrightCLI, "test", "--config=playwright.config.ts"], appEnv);
+    console.log(`[e2e:${group.name}] Ejecutando Playwright contra la instancia aislada.`);
+    const testFilters = group.selectors.map(playwrightFileSelector);
+    await runCommand(`playwright:${group.name}`, process.execPath, [playwrightCLI, "test", "--config=playwright.config.ts", ...testFilters], appEnv);
+  } catch (error) {
+    groupError = error;
+  } finally {
+    const cleanupErrors = [];
+    for (const state of [...activeChildren]) {
+      try {
+        await stopChild(state);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        cleanupErrors.push(`No se pudo detener ${state.label}: ${detail}`);
+      }
+    }
+    if (schemaCreated && adminClient && schema) {
+      try {
+        await adminClient.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+        console.log(`[e2e:${group.name}] Esquema temporal eliminado.`);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        cleanupErrors.push(`No se pudo eliminar el esquema temporal: ${detail}`);
+      }
+    }
+    if (adminClient) {
+      try {
+        await adminClient.$disconnect();
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        cleanupErrors.push(`No se pudo cerrar la conexión local de pruebas: ${detail}`);
+      }
+    }
+    if (privateObjectRoot) {
+      try {
+        await rm(privateObjectRoot, { recursive: true, force: true });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        cleanupErrors.push(`No se pudo eliminar la raíz privada temporal de objetos: ${detail}`);
+      }
+    }
+    if (cleanupErrors.length) {
+      const cleanupFailure = cleanupErrors.join("\n");
+      if (groupError) {
+        const runFailure = groupError instanceof Error ? groupError.message : String(groupError);
+        groupError = new Error(`${runFailure}\n${cleanupFailure}`);
+      } else {
+        groupError = new Error(cleanupFailure);
+      }
+    }
+  }
+  if (groupError) throw groupError;
+  console.log(`[e2e] Grupo ${group.name} completado.`);
+}
+
+async function main() {
+  let exitCode = 0;
+  try {
+    const requestedSelectors = process.argv.slice(2);
+    if (requestedSelectors.some(file => !/^tests\/browser\/[a-zA-Z0-9_-]+\.spec\.ts$/.test(file) || !existsSync(resolve(projectRoot, file))))
+      throw new Error("El runner aislado sólo acepta archivos tests/browser/*.spec.ts; no admite overrides de Playwright.");
+    const discoveredSpecs = discoverDefaultBrowserSpecs();
+    const selectors = requestedSelectors.length
+      ? canonicalizeBrowserSpecSelectors(requestedSelectors, discoveredSpecs)
+      : discoveredSpecs;
+    const groups = partitionBrowserSpecs(selectors);
+    if (!groups.length) throw new Error("Playwright no encontró archivos de navegador compatibles con la configuración actual.");
+
+    const adminURL = await validateTestDatabase();
+    for (let index = 0; index < groups.length; index += 1) {
+      try {
+        await runIsolatedGroup(groups[index], adminURL);
+      } catch (error) {
+        const remainingGroups = groups.slice(index + 1).map(group => group.name);
+        if (!requestedSignal && remainingGroups.length)
+          console.error(`[e2e] Grupos posteriores no ejecutados por el fallo de ${groups[index].name}: ${remainingGroups.join(", ")}.`);
+        throw error;
+      }
+    }
     console.log("[e2e] Suite de navegador completada.");
   } catch (error) {
     exitCode = 1;
     const detail = error instanceof Error ? error.stack || error.message : String(error);
     console.error(`[e2e] ${redact(detail)}`);
   } finally {
-    for (const state of [...activeChildren]) await stopChild(state);
-    if (schemaCreated && adminClient && schema) {
+    for (const state of [...activeChildren]) {
       try {
-        await adminClient.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-        console.log("[e2e] Esquema temporal eliminado.");
+        await stopChild(state);
       } catch (error) {
         exitCode = 1;
         const detail = error instanceof Error ? error.message : String(error);
-        console.error(`[e2e] No se pudo eliminar el esquema temporal: ${redact(detail)}`);
-      }
-    }
-    if (adminClient) {
-      try {
-        await adminClient.$disconnect();
-      } catch {
-        exitCode = 1;
-        console.error("[e2e] No se pudo cerrar la conexión local de pruebas.");
+        console.error(`[e2e] No se pudo detener un proceso hijo: ${redact(detail)}`);
       }
     }
   }

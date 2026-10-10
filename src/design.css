@@ -22,8 +22,7 @@ h1 { font: 400 clamp(33px, 3.15vw, 47px)/1.06 Georgia, "Times New Roman", serif;
 h2, h3 { color: var(--text); }
 p { font-size: 13px; line-height: 1.65; }
 small { font-size: 13px; }
-button, a { transition: background-color 170ms ease, color 170ms ease, border-color 170ms ease, box-shadow 170ms ease, transform 170ms ease; }
-button:not(:disabled):active { transform: translateY(1px); }
+button, a { transition: background-color 130ms ease, color 130ms ease, border-color 130ms ease; }
 button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid #c8a06a; outline-offset: 2px; }
 input, select, textarea { background: var(--surface); border-color: #d5ded2; border-radius: 8px; color: var(--text); min-height: 42px; font-size: 13px; }
 input::placeholder, textarea::placeholder { color: #89968b; }
@@ -79,7 +78,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); outline
 .sidebar-user .icon-button:hover { background: #ffffff1c; color: #fff; }
 .avatar { color: var(--accent); background: #e2ebd9; font-weight: 800; border: 1px solid #ffffff66; }
 .workspace { width: calc(100% - 244px); margin-left: 244px; }
-.topbar { position: sticky; top: 0; z-index: 20; height: 71px; padding: 0 40px; background: #f9faf5ee; backdrop-filter: blur(16px); border-bottom: 1px solid var(--border); }
+.topbar { position: sticky; top: 0; z-index: 20; height: 71px; padding: 0 40px; background: #f9faf5ee; border-bottom: 1px solid var(--border); }
 .breadcrumb { gap: 11px; font-size: 13px; color: var(--muted); }
 .breadcrumb strong { color: var(--text); font-weight: 800; }
 .breadcrumb-slash { color: #a9b9a9; }
@@ -201,7 +200,7 @@ tfoot th { border-top: 2px solid #c7d7c4; color: var(--text); font-size: 13px; }
 .inventory-summary > span > strong { color: var(--text); font-size: 24px; }
 .stock-grid { gap: 15px; padding: 0 20px 22px; }
 .minimal-card { padding: 6px; border: 1px solid #dce5d9; border-radius: 15px; background: var(--surface); box-shadow: 0 5px 15px #17392d0e; }
-.minimal-card:hover { background: var(--surface); border-color: #9cb99a; box-shadow: 0 10px 25px #17392d17; transform: translateY(-2px); }
+.minimal-card:hover { background: var(--surface); border-color: #9cb99a; }
 .stock-art { height: 120px; border-radius: 10px; padding: 15px; background: #dfe8d1; color: #3b6947; }
 .stock-art::before, .stock-art::after { display: none; }
 .stock-art-extracto { background: #e5e6ce; color: #737447; }
@@ -263,7 +262,7 @@ tfoot th { border-top: 2px solid #c7d7c4; color: var(--text); font-size: 13px; }
 .source-id { display: block; max-width: 190px; overflow-wrap: anywhere; white-space: normal; font-size: 13px; line-height: 1.4; }
 
 /* Forms and secondary workspaces share the same surface language. */
-.modal-overlay { background: #0c251ab0; backdrop-filter: blur(5px); }
+.modal-overlay { background: #0c251ab0; }
 .modal { background: #fffefa; border-color: #dce5d9; border-radius: 15px; box-shadow: 0 30px 80px #0b221a4d; }
 .modal-head h2 { font: 400 28px Georgia, "Times New Roman", serif; letter-spacing: -.025em; }
 .modal-head p, .field small { color: var(--muted); font-size: 13px; }
@@ -386,10 +385,5 @@ tfoot th { border-top: 2px solid #c7d7c4; color: var(--text); font-size: 13px; }
 @media print {
   body [role="dialog"], body [role="dialog"] * { color: #111 !important; background: #fff !important; }
 }
-@keyframes bombo-dialog-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-.modal-body { animation: bombo-dialog-enter 180ms ease-out both; }
-@media (prefers-reduced-motion: reduce) { .modal-body { animation: none; } }
-.stock-expand svg { transition: transform 180ms ease; }
-@keyframes bombo-expand-enter { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
-.expandable-body { animation: bombo-expand-enter 180ms ease-out both; }
-@media (prefers-reduced-motion: reduce) { .expandable-body, .stock-expand svg { animation: none; transition: none; } }
+.stock-expand svg { transition: transform 150ms ease; }
+@media (prefers-reduced-motion: reduce) { .stock-expand svg { transition: none; } }

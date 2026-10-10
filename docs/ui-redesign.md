@@ -35,6 +35,7 @@
 - "Resultado local" = ventas locales netas − costo vendido − gastos registrados. Costo vendido y gastos son componentes del resultado, no egresos de caja.
 - No hay porcentaje ni fracción de "cobertura": Bombo sabe si existen registros locales, no si están completos ni conciliados. Un mes con 0 ventas o 0 gastos puede ser legítimo y se muestra como "Sin registros".
 - Estados: Registrado (hay registros locales), Sin registros, A revisar (lotes actuales con stock y costo cero), Sin conciliar (caja, banco, costo vendido, inventario).
+- La barra de equilibrio sí muestra un porcentaje, pero de otra cosa: margen del mes contra los gastos fijos cargados. No afirma que los gastos cargados estén completos; sin gastos fijos muestra el vacío con enlace a Gastos, y va rotulada "Preliminar · sin conciliar". Es crema, no un segundo bloque oliva.
 
 ## Contraste y tipografía
 - Las tarjetas `.metric` conservan sus variantes temáticas (oliva, lima, lila). La capa global no fuerza fondo claro sobre superficies temáticas.

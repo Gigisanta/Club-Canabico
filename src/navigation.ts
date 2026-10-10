@@ -24,7 +24,7 @@ export const navigationHubs = [
   {
     id: "finanzas", label: "Finanzas", icon: ChartBar,
     items: [
-      { path: "/app/finanzas", label: "Finanzas", aliases: ["Caja y planificación"], roles: managers },
+      { path: "/app/finanzas", label: "Finanzas", aliases: ["Caja y planificación", "Estado de resultados", "Cash flow", "Proyecciones"], roles: managers },
       { path: "/app/decisiones/comercial", label: "Precios y promociones", aliases: ["Análisis comercial"], roles: managers },
       { path: "/app/decisiones/caja", label: "Análisis de caja", aliases: [], roles: managers },
     ],

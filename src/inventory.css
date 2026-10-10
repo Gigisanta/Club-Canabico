@@ -44,10 +44,10 @@
   border-radius: 17px;
   background: var(--surface);
   box-shadow: var(--shadow-card);
-  transition: box-shadow var(--motion-fast) ease, border-color var(--motion-fast) ease, transform var(--motion-fast) ease;
+  transition: border-color 130ms ease;
 }
 
-.inventory-page .stock-card:hover { border-color: var(--brand-olive-mid); box-shadow: var(--shadow-hover); transform: translateY(-2px); }
+.inventory-page .stock-card:hover { border-color: var(--brand-olive-mid); }
 .inventory-page .stock-art {
   position: relative;
   display: flex;
@@ -244,4 +244,32 @@
 @media print {
   .inventory-dialog-content,
   .inventory-history-content { color: var(--text); background: var(--surface); }
+}
+
+/* Variety coverage per category: one line of filter chips, state carried by icon and text. */
+.app-shell .inventory-page .category-coverage { margin: 0 0 18px; }
+.app-shell .inventory-page .category-coverage-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+.app-shell .inventory-page .category-coverage-head h2 { margin: 0; color: var(--bo-ink); font-size: 15px; font-weight: 750; letter-spacing: 0; }
+.app-shell .inventory-page .category-coverage-edit { min-height: 44px; padding: 0 2px; border: 0; background: transparent; color: var(--brand-olive-mid); font-size: 14px; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.app-shell .inventory-page .category-coverage-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.app-shell .inventory-page .category-chip { display: inline-flex; align-items: center; gap: 7px; min-height: 44px; max-width: 100%; padding: 8px 14px; border: 1px solid var(--bo-rule); border-radius: 999px; background: var(--bo-paper); color: var(--bo-ink); font-size: 14px; text-align: left; cursor: pointer; }
+.app-shell .inventory-page .category-chip:hover { border-color: var(--bo-rule-strong); }
+.app-shell .inventory-page .category-chip svg { flex: none; color: var(--bo-ink-soft); }
+.app-shell .inventory-page .category-chip strong { overflow-wrap: anywhere; }
+.app-shell .inventory-page .category-chip span { color: var(--bo-ink-soft); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.app-shell .inventory-page .category-chip.is-met svg { color: var(--bo-ok); }
+.app-shell .inventory-page .category-chip.is-short { border-color: #dfb980; background: var(--bo-warn-bg); }
+.app-shell .inventory-page .category-chip.is-short svg,
+.app-shell .inventory-page .category-chip.is-short span { color: var(--bo-warn); }
+.app-shell .inventory-page .category-chip.is-short span { font-weight: 700; }
+.app-shell .inventory-page .category-chip[aria-pressed="true"] { border-color: var(--bo-ink); box-shadow: inset 0 0 0 1px var(--bo-ink); }
+.app-shell .inventory-page .category-coverage-invite { display: flex; flex-wrap: wrap; align-items: center; gap: 0 12px; margin: 0 0 16px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.app-shell .inventory-page .category-card-coverage { display: flex; align-items: flex-start; gap: 6px; margin: 12px 0 0; color: var(--bo-ink); font-size: 13.5px; line-height: 1.45; }
+.app-shell .inventory-page .category-card-coverage.is-short { color: var(--bo-warn); font-weight: 650; }
+.app-shell .inventory-page .category-card-coverage svg { flex: none; margin-top: 1px; }
+.app-shell .inventory-page .category-card-stock { margin: 6px 0 0; color: var(--bo-ink-soft); font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.app-shell .inventory-page .category-card-stock strong { color: var(--bo-ink); }
+@media (max-width: 520px) {
+  .app-shell .inventory-page .category-chip { flex-wrap: wrap; row-gap: 0; }
+  .app-shell .inventory-page .category-chip span { white-space: normal; }
 }

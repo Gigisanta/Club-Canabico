@@ -10,6 +10,8 @@ export function CustomerInsightsPanel({ insights, today, money, compact = false 
   compact?: boolean;
 }) {
   const daysLate = insights.nextExpectedDate ? daysBetween(today, insights.nextExpectedDate) : null;
+  // Varieties rotate: the category leads, with its share of purchases and its favorite variety. Without categorized lots, the variety alone.
+  const category = insights.favoriteCategory;
   return <section className={`customer-insights ${compact ? "compact" : ""}`} aria-label="Lectura automática del socio">
     <div className="customer-insights-head">
       <span><Sparkle size={17} /> LECTURA AUTOMÁTICA</span>
@@ -19,7 +21,8 @@ export function CustomerInsightsPanel({ insights, today, money, compact = false 
       <div className="customer-insights-grid">
         <div><span>Última compra</span><strong>{insights.lastPurchase ? shortDate(insights.lastPurchase) : "—"}</strong></div>
         <div><span>Ticket promedio</span><strong>{money(insights.averageTicket)}</strong></div>
-        <div><span>Más elegido</span><strong>{insights.favoriteProduct?.name || "—"}</strong></div>
+        <div><span>{category ? "Categoría preferida" : "Más elegido"}</span><strong>{category?.name || insights.favoriteProduct?.name || "—"}</strong>
+          {category && <small>{category.purchases} de {insights.purchases} {insights.purchases === 1 ? "compra" : "compras"}, sobre todo {category.variety}</small>}</div>
         <div><span>Ritmo reciente</span><strong>{insights.typicalIntervalDays ? `Cada ${insights.typicalIntervalDays} ${insights.typicalIntervalDays === 1 ? "día" : "días"}` : "Aún sin patrón"}</strong></div>
       </div>
       {insights.nextExpectedDate && <div className="customer-insights-next">

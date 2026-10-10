@@ -57,15 +57,12 @@ button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
-button:not(:disabled):active {
-  transform: scale(0.98);
-}
 button,
 a {
   transition:
-    background 150ms,
-    color 150ms,
-    box-shadow 150ms;
+    background-color 130ms ease,
+    color 130ms ease,
+    border-color 130ms ease;
 }
 a {
   color: inherit;
@@ -250,6 +247,12 @@ fieldset {
 }
 .spin {
   animation: spin 1s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation-duration: 0.01ms;
+    animation-iteration-count: 1;
+  }
 }
 @keyframes spin {
   to {
@@ -1435,17 +1438,7 @@ tbody tr:hover {
   position: fixed;
   inset: 0;
   background: #00000070;
-  backdrop-filter: blur(3px);
   z-index: 80;
-  animation: overlay-in 150ms ease-out;
-}
-@keyframes overlay-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
 }
 .modal {
   position: fixed;
@@ -2140,16 +2133,6 @@ tbody tr:hover {
     display: none;
   }
 }
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-}
-
 .scope-banner {
   display: flex;
   align-items: center;
