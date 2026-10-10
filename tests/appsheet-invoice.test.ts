@@ -7,6 +7,7 @@ import { Prisma } from "@prisma/client";
 import { splitSqlStatements } from "./migration-sql.js";
 import { cutoverGateIds, type CommandEnvelope } from "../shared/operations/contracts.js";
 import { APPSHEET_CANONICAL_IMPORTER_VERSION, APPSHEET_CANONICAL_MAPPING_ID, APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../shared/operations/appsheet-canonical.js";
+import { appSheetDatabaseDestinationIdentity } from "../server/operations/appsheet-database-target.js";
 import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
 import { canonicalJson } from "../shared/operations/exact.js";
 import { formatAppSheetInvoiceNumberForYear } from "../shared/operations/appsheet-invoice-rules.js";
@@ -20,6 +21,7 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
   assert.match(databaseUrl.pathname, /^\/bombo_ui_[a-z0-9_-]+$/i, "usar una base sintética bombo_ui_ dedicada");
   const schema = `appsheet_invoice_${randomUUID().replaceAll("-", "")}`;
   databaseUrl.searchParams.set("schema", schema);
+  const destinationIdentity = appSheetDatabaseDestinationIdentity("isolated-test", databaseUrl);
   const envKeys = ["DATABASE_URL", "NODE_ENV", "DEMO_MODE", "JWT_SECRET", "ALLOWED_ORIGIN"] as const;
   const previousEnv = new Map(envKeys.map(key => [key, process.env[key]]));
   Object.assign(process.env, {
@@ -1512,6 +1514,7 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
         technicalReview: canonicalBaselineReview,
         commitSha: "1".repeat(40),
         target: "isolated-test",
+        destinationIdentity,
       }, db);
       assert.equal(canonicalBaselineStage.replay, false, "a new synthetic canonical projection stages while authority is in shadow mode");
 
@@ -1607,6 +1610,7 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
         technicalReview: canonicalBaselineReview,
         commitSha: "1".repeat(40),
         target: "isolated-test",
+        destinationIdentity,
       }, db);
       assert.equal(activeReplay.replay, true, "active authority permits only an exact, already-validated no-op replay");
       assert.deepEqual(await canonicalStageStateCounts(), activeReplayBefore, "the active replay changes no persisted state");
@@ -1640,6 +1644,7 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
             technicalReview: canonicalAfterActivationReview,
             commitSha: "1".repeat(40),
             target: "isolated-test",
+            destinationIdentity,
           }, db), (error: unknown) => error instanceof AppSheetCanonicalError &&
             error.code === "canonical_master_stage_requires_shadow_authority");
           assert.deepEqual(await canonicalStageStateCounts(), beforeBlockedStage,
@@ -1678,6 +1683,7 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
           technicalReview: canonicalBaselineReview,
           commitSha: "1".repeat(40),
           target: "isolated-test",
+          destinationIdentity,
         }, db);
         assert.equal(suspendedReplay.replay, true, "suspension still permits the exact validated no-op replay");
         assert.deepEqual(await canonicalStageStateCounts(), suspendedReplayBefore,
@@ -1689,6 +1695,7 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
           technicalReview: canonicalAfterActivationReview,
           commitSha: "1".repeat(40),
           target: "isolated-test",
+          destinationIdentity,
         }, db), (error: unknown) => error instanceof AppSheetCanonicalError &&
           error.code === "canonical_master_stage_requires_shadow_authority");
         assert.deepEqual(await canonicalStageStateCounts(), beforeSuspendedFreshStage,
