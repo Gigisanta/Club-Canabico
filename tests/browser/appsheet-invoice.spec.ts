@@ -1730,12 +1730,17 @@ test("an empty AppSheet preorder shell saves as pending, rejects failed writes, 
   expect(await financeSnapshot(page)).toEqual(financeBefore);
 });
 
-test.describe(() => {
-  test.afterEach(async ({ page }) => {
-    await page.unrouteAll({ behavior: "wait" });
-  });
-
-  test("an invoice line keeps its optional price-per-gram separate through draft editing and save", async ({ page }) => {
+test("an invoice line keeps its optional price-per-gram separate through draft editing and save", async ({ page }) => {
+  let fulfilledGeneralCatalogResponses = 0;
+  let saveClickStarted = false;
+  const postSaveGeneralCatalogRequests = new WeakSet<Request>();
+  const postSaveGeneralCatalogFulfillments = new WeakSet<Request>();
+  const isGeneralCatalogRequest = (request: Request) => {
+    const url = new URL(request.url());
+    return request.method() === "GET"
+      && url.pathname === "/api/operations/catalog"
+      && !url.searchParams.has("channel");
+  };
   await page.route("**/api/operations/context", async route => {
     const response = await route.fetch();
     if (response.status() !== 200) return route.fulfill({ response });
@@ -1746,8 +1751,17 @@ test.describe(() => {
     } });
   });
   await page.route("**/api/operations/catalog**", async route => {
+    const request = route.request();
+    const isGeneralCatalog = isGeneralCatalogRequest(request);
     const response = await route.fetch();
-    if (response.status() !== 200) return route.fulfill({ response });
+    if (response.status() !== 200) {
+      await route.fulfill({ response });
+      if (isGeneralCatalog) {
+        fulfilledGeneralCatalogResponses += 1;
+        if (postSaveGeneralCatalogRequests.has(request)) postSaveGeneralCatalogFulfillments.add(request);
+      }
+      return;
+    }
     const body = await response.json() as { items?: Array<Record<string, unknown>> };
     const items = (body.items ?? []).map(item => {
       if (item.id !== "ops-sku-a" && item.id !== "ops-sku-c" && item.id !== "ops-sku-b") return item;
@@ -1767,10 +1781,21 @@ test.describe(() => {
         },
       };
     });
-    return route.fulfill({ response, json: { ...body, items } });
+    await route.fulfill({ response, json: { ...body, items } });
+    if (isGeneralCatalog) {
+      fulfilledGeneralCatalogResponses += 1;
+      if (postSaveGeneralCatalogRequests.has(request)) postSaveGeneralCatalogFulfillments.add(request);
+    }
+  });
+  page.on("request", request => {
+    if (saveClickStarted && isGeneralCatalogRequest(request)) postSaveGeneralCatalogRequests.add(request);
   });
 
+  const initialGeneralCatalogPromise = page.waitForResponse(response => isGeneralCatalogRequest(response.request()));
   await enterOrders(page);
+  const initialGeneralCatalog = await initialGeneralCatalogPromise;
+  expect(initialGeneralCatalog.status()).toBe(200);
+  await expect.poll(() => fulfilledGeneralCatalogResponses).toBeGreaterThan(0);
   const invoice = await openInvoice(page);
   const invoiceDate = await field(invoice, "invoiceDate").inputValue();
   await selectMember(invoice, "ops-member", "Socio de ensayo");
@@ -1838,10 +1863,28 @@ test.describe(() => {
   await productWithoutSourceCurrency.getByRole("button", { name: "Añadir producto", exact: true }).click();
   await expect(productWithoutSourceCurrency).toHaveCount(0);
 
+  const refreshedOrdersPromise = page.waitForResponse(response =>
+    response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/orders",
+  );
+  const refreshedGeneralCatalogPromise = page.waitForResponse(response => {
+    return isGeneralCatalogRequest(response.request())
+      && postSaveGeneralCatalogRequests.has(response.request());
+  });
+  const generalCatalogFulfilledBeforeSave = fulfilledGeneralCatalogResponses;
   const savedPromise = saveResponse(page, "InvoiceSaved");
+  saveClickStarted = true;
   await invoice.getByTestId("appsheet-save-invoice").click();
   const saved = await savedPromise;
   expect(saved.status()).toBe(200);
+  await expect(invoice).toHaveCount(0);
+  const [ordersRefresh, generalCatalogRefresh] = await Promise.all([
+    refreshedOrdersPromise,
+    refreshedGeneralCatalogPromise,
+  ]);
+  expect(ordersRefresh.status()).toBe(200);
+  expect(generalCatalogRefresh.status()).toBe(200);
+  await expect.poll(() => fulfilledGeneralCatalogResponses).toBeGreaterThan(generalCatalogFulfilledBeforeSave);
+  await expect.poll(() => postSaveGeneralCatalogFulfillments.has(generalCatalogRefresh.request())).toBe(true);
   const savedBody = await saved.json();
   const savedEnvelope = saved.request().postDataJSON() as CommandEnvelope;
   expect(savedEnvelope.data).toMatchObject({
@@ -1863,5 +1906,9 @@ test.describe(() => {
     expect(Object.hasOwn(detail.order.quote.lines[index], "pricePerGramMinor")).toBe(false);
   }
   expect(detail.order.lines[0].revenueMinor).toBe("1201");
-  });
+  const displayedInvoice = typeof detail.order.quote.invoiceNumber === "string" && detail.order.quote.invoiceNumber
+    ? detail.order.quote.invoiceNumber
+    : `Factura #${orderId.slice(0, 8).toUpperCase()}`;
+  const refreshedInvoiceRow = page.locator("tbody tr").filter({ hasText: displayedInvoice });
+  await expect(refreshedInvoiceRow).toHaveCount(1);
 });
