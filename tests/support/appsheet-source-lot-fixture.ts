@@ -147,6 +147,7 @@ export function appSheetSourceLotCanonicalConsumerFixture(input: {
     definitionIdentityState: projection.definitionIdentityState,
     definitionInventory: projection.definitionInventory,
     projectionHash: projection.projectionHash,
+    technicalReview: review,
     stabilityMode: projection.capture.stabilityMode,
     cutoffAt: projection.capture.cutoffAt,
     timestampGaps: projection.capture.timestampGaps,
