@@ -264,7 +264,7 @@ export async function deriveAppSheetSourceStock(
   if (masterProjection.appliedDefinitionHash !== appliedDefinitionHash ||
       masterCoverage.appliedDefinitionHash !== appliedDefinitionHash ||
       historyProjection.definitionHash !== appliedDefinitionHash ||
-      historyProjection.appliedDefinitionHash !== appliedDefinitionHash || historyCoverage.appliedDefinitionHash !== appliedDefinitionHash ||
+      historyCoverage.appliedDefinitionHash !== appliedDefinitionHash ||
       historyProjection.definitionSourceSha256 !== masterInventory.data.source.sha256 ||
       historyProjection.definitionDescriptorSha256 !== masterInventory.data.descriptorSha256) return blocked("applied_definition_hash_mismatch");
 
