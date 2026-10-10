@@ -154,7 +154,8 @@ function requireDefinitionEvidence(snapshot:{id:string;sourceSystem:string;fileH
  if(!botInventory||botInventory.state!=="verified"||typeof botInventory.evidenceSha256!=="string"||!hashPattern.test(botInventory.evidenceSha256))
   throw appSheetReadinessError("appsheet_bot_inventory_unverified");
  const effects=asJsonObject(projection.effects),stageContext=asJsonObject(projection.stageContext),backup=stageContext&&asJsonObject(stageContext.backupEvidence);
- if(!effects||hashJson(effects)!==hashJson({stock:false,cash:false,orders:false,deliveries:false,messaging:false,priceApproval:false})||
+ const effectFlags=["stock","cash","orders","deliveries","messaging","priceApproval"] as const;
+ if(!effects||Object.keys(effects).length!==effectFlags.length||!effectFlags.every(flag=>effects[flag]===false)||
     !stageContext||stageContext.target!=="production"||!backup||typeof backup.manifestHash!=="string"||!hashPattern.test(backup.manifestHash)||
     typeof backup.snapshotAt!=="string"||!Number.isFinite(Date.parse(backup.snapshotAt))||
     typeof stageContext.destinationIdentity!=="string"||!/^appsheet-db-v1:[a-f0-9]{64}$/.test(stageContext.destinationIdentity))

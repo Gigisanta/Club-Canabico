@@ -11,7 +11,6 @@ import { appSheetDatabaseDestinationIdentity } from "../server/operations/appshe
 import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
 import { canonicalJson } from "../shared/operations/exact.js";
 import { formatAppSheetInvoiceNumberForYear } from "../shared/operations/appsheet-invoice-rules.js";
-import { appSheetSourceLotCanonicalConsumerFixture, appSheetSourceLotCaptureFixture } from "./support/appsheet-source-lot-fixture.js";
 
 function databaseTargetIdentity(url: URL) {
   const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
@@ -52,6 +51,7 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
     ALLOWED_ORIGIN: "http://appsheet-invoice.test",
   });
 
+  const { appSheetSourceLotCanonicalConsumerFixture, appSheetSourceLotCaptureFixture } = await import("./support/appsheet-source-lot-fixture.js");
   const { db } = await import("../server/db.js");
   let schemaCreated = false;
   let server: import("node:http").Server | undefined;
@@ -196,19 +196,22 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
     const productionDestinationIdentity = appSheetDatabaseDestinationIdentity("production", databaseUrl);
     const digestValue = (value: unknown) => digest(canonicalJson(value));
     const captureDate = (value: string) => new Date(value);
-    await db.appSheetCaptureManifest.create({ data: {
-      captureId: capture.captureId, sourceSystem: capture.sourceSystem, sourceId: capture.sourceId, spreadsheetId: capture.spreadsheetId,
-      metadataHash: capture.metadataHash, headersHash: capture.headersHash, manifestHash: capture.manifestHash, dataHash: capture.dataHash,
-      definitionHash: null, stability: capture.stability, firstReadAt: captureDate(capture.firstReadAt),
-      verificationStartedAt: captureDate(capture.verificationStartedAt), verificationCompletedAt: captureDate(capture.verificationCompletedAt),
-      cutoffAt: captureDate(capture.cutoffAt), dataCoverage: capture.coverage, pageManifest: capture.pages, definitionCoverage: Prisma.DbNull,
-      dataSheetCount: capture.dataSheetCount, dataPageCount: capture.dataPageCount, dataRecordCount: capture.dataRecordCount,
-      dataFormulaCount: capture.dataFormulaCount, dataUnresolvedFormulaCount: capture.dataUnresolvedFormulaCount,
-      definitionTableCount: capture.definitionTableCount, definitionColumnCount: capture.definitionColumnCount,
-      definitionSliceCount: capture.definitionSliceCount, definitionViewCount: capture.definitionViewCount,
-      definitionActionCount: capture.definitionActionCount, definitionBotCount: capture.definitionBotCount,
-      definitionWorkflowRuleCount: capture.definitionWorkflowRuleCount, definitionFormatRuleCount: capture.definitionFormatRuleCount,
-    } });
+    async function persistCapture(capture: typeof sourceFixture.sourceLotCapture.manifest) {
+      await db.appSheetCaptureManifest.create({ data: {
+        captureId: capture.captureId, sourceSystem: capture.sourceSystem, sourceId: capture.sourceId, spreadsheetId: capture.spreadsheetId,
+        metadataHash: capture.metadataHash, headersHash: capture.headersHash, manifestHash: capture.manifestHash, dataHash: capture.dataHash,
+        definitionHash: null, stability: capture.stability, firstReadAt: captureDate(capture.firstReadAt),
+        verificationStartedAt: captureDate(capture.verificationStartedAt), verificationCompletedAt: captureDate(capture.verificationCompletedAt),
+        cutoffAt: captureDate(capture.cutoffAt), dataCoverage: capture.coverage, pageManifest: capture.pages, definitionCoverage: Prisma.DbNull,
+        dataSheetCount: capture.dataSheetCount, dataPageCount: capture.dataPageCount, dataRecordCount: capture.dataRecordCount,
+        dataFormulaCount: capture.dataFormulaCount, dataUnresolvedFormulaCount: capture.dataUnresolvedFormulaCount,
+        definitionTableCount: capture.definitionTableCount, definitionColumnCount: capture.definitionColumnCount,
+        definitionSliceCount: capture.definitionSliceCount, definitionViewCount: capture.definitionViewCount,
+        definitionActionCount: capture.definitionActionCount, definitionBotCount: capture.definitionBotCount,
+        definitionWorkflowRuleCount: capture.definitionWorkflowRuleCount, definitionFormatRuleCount: capture.definitionFormatRuleCount,
+      } });
+    }
+    await persistCapture(capture);
 
     // Start from the same pristine shadow state required by canonical staging.
     // The fixture never resets epoch or firstRealWriteAt after active operations.
@@ -304,6 +307,43 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
       details: canonicalConsumerFixture.stageAuditDetails as Prisma.InputJsonValue,
     } });
     const masterSnapshot = await db.legacyImportSnapshot.findUniqueOrThrow({ where: { id: masterSnapshotId } });
+    const safeEffects = canonicalConsumerFixture.controls.appSheetCanonical.effects;
+    const { cash: _cashFlag, ...missingCashEffect } = safeEffects;
+    for (const [caseName, effects] of [
+      ["enabled-cash", { ...safeEffects, cash: true }],
+      ["missing-cash", missingCashEffect],
+      ["extra-effect", { ...safeEffects, unrelatedEffect: false }],
+      ["non-boolean-cash", { ...safeEffects, cash: "false" }],
+    ] as const) {
+      const unsafeFixture = appSheetSourceLotCaptureFixture(`unsafe-effects-${caseName}-${randomUUID()}`);
+      const unsafeCapture = unsafeFixture.sourceLotCapture.manifest;
+      await persistCapture(unsafeCapture);
+      const unsafeConsumer = appSheetSourceLotCanonicalConsumerFixture({
+        projection: unsafeFixture.projection, botInventory: unsafeFixture.botInventory,
+        destinationIdentity: productionDestinationIdentity, backupEvidence,
+        technicalReview: { ...technicalReview, captureId: unsafeCapture.captureId, manifestHash: unsafeCapture.manifestHash,
+          projectionHash: unsafeFixture.projection.projectionHash, definitionHash: unsafeFixture.projection.appliedDefinitionHash },
+        destinationFingerprints: [],
+      });
+      const unsafeSnapshotId = `unsafe-master-effects-${caseName}-${randomUUID()}`;
+      await db.legacyImportSnapshot.create({ data: {
+        id: unsafeSnapshotId, sourceSystem: masterSnapshot.sourceSystem, filename: "synthetic-invalid-effects",
+        fileHash: unsafeCapture.manifestHash, importerVersion: masterSnapshot.importerVersion, status: "staged",
+        createdBy: stagerId, captureManifestId: unsafeCapture.captureId,
+        controls: { appSheetCanonical: { ...unsafeConsumer.controls.appSheetCanonical, effects } } as Prisma.InputJsonValue,
+        coverage: unsafeConsumer.coverage as Prisma.InputJsonValue,
+      } });
+      await db.operationObject.create({ data: { id: unsafeSnapshotId, kind: "legacyImport", version: 0, createdBy: stagerId } });
+      const denied = await send(envelope(unsafeSnapshotId, "AppSheetCanonicalIdentitiesReviewed", {
+        captureId: unsafeCapture.captureId, manifestHash: unsafeCapture.manifestHash, projectionHash: unsafeFixture.projection.projectionHash,
+        destinationCount: unsafeFixture.projection.destinations.length, evidenceReference: "synthetic unsafe-effects review",
+      }));
+      assert.equal(denied.response.status, 423, caseName);
+      assert.deepEqual(denied.body.details.blockers, ["canonical_master_effects_or_production_backup_unverified"], caseName);
+      assert.equal((await db.legacyImportSnapshot.findUniqueOrThrow({ where: { id: unsafeSnapshotId } })).status, "staged");
+      assert.equal(await db.commandReceipt.count({ where: { requestId: denied.request.requestId } }), 0);
+      assert.equal(await db.operationAudit.count({ where: { requestId: denied.request.requestId } }), 0);
+    }
     const canonicalReview = await command(envelope(masterSnapshot.id, "AppSheetCanonicalIdentitiesReviewed", {
       captureId: capture.captureId, manifestHash: capture.manifestHash, projectionHash: sourceFixture.projection.projectionHash,
       destinationCount: sourceFixture.projection.destinations.length, evidenceReference: "synthetic source-lot canonical identity review",

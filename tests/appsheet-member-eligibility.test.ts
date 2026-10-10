@@ -14,12 +14,6 @@ import {
   APPSHEET_CANONICAL_SOURCE_SYSTEM,
   prepareAppSheetCaptureManifest,
 } from "../shared/operations/appsheet-canonical.js";
-import {
-  APPSHEET_EXPECTED_LIVE_APP_ID,
-  appSheetAppliedDefinitionHash,
-  appSheetCanonicalCurrentDestinationHash,
-  appSheetDefinitionProductionReadiness,
-} from "../server/operations/appsheet-canonical.js";
 import { appSheetDatabaseDestinationIdentity } from "../server/operations/appsheet-database-target.js";
 import { legacyPayloadHash } from "../server/operations/legacy-upload-contract.js";
 import {
@@ -28,7 +22,6 @@ import {
   APPSHEET_HISTORY_STAGE_SCHEMA_VERSION_V2,
   APPSHEET_HISTORY_SOURCE_SYSTEM,
 } from "../shared/operations/appsheet-history.js";
-import { definitionInventory, project } from "./support/appsheet-canonical-fixture.js";
 import { splitSqlStatements } from "./migration-sql.js";
 
 test("active AppSheet replacement exposes native members and rejects unreviewed imports before reads or writes", {
@@ -50,6 +43,9 @@ test("active AppSheet replacement exposes native members and rejects unreviewed 
     ALLOWED_ORIGIN: "http://appsheet-member.test",
   });
 
+  const { APPSHEET_EXPECTED_LIVE_APP_ID, appSheetAppliedDefinitionHash, appSheetCanonicalCurrentDestinationHash,
+    appSheetDefinitionProductionReadiness } = await import("../server/operations/appsheet-canonical.js");
+  const { definitionInventory, project } = await import("./support/appsheet-canonical-fixture.js");
   const { db } = await import("../server/db.js");
   let schemaCreated = false;
   let server: import("node:http").Server | undefined;
