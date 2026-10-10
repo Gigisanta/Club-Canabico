@@ -1498,7 +1498,6 @@ export function OperationalWorkspace(props: Props) {
     const quote = recordValue(row, "quote");
     const isAppSheetInvoice = recordValue(quote, "source") === "appsheet-invoice";
     const isConfirmedAppSheetInvoice = isAppSheetInvoice && row.commercialState === "confirmed";
-    if (pageId === "orders" && row.commercialState === "confirmed" && hasCommand(context, "CollectionReported")) buttons.push({ label: "＋ Reportar cobro", onClick: () => reportCollection(row) });
     if (pageId === "catalog" && hasCapability(context, "stock.read")) buttons.push({ label: "Historia del producto", onClick: () => setSelectedProductId(id) });
     if (pageId === "purchases" && row.status === "draft" && hasCommand(context, "PurchaseOrderApproved")) buttons.push({ label: "Aprobar compra", onClick: () => runAction("PurchaseOrderApproved", "Revisar y aprobar la compra", fields(evidenceField("Motivo de aprobación")), v => ({ evidence: note(v) }), row, "La persona que aprobó debe ser distinta de quien creó el acuerdo.") });
     if (pageId === "purchases" && ["approved", "partially_received"].includes(String(row.status)) && hasCommand(context, "GoodsReceived") && locationReferencesReady && purchaseReceiptLinesAreValid(row)) {
@@ -1840,6 +1839,7 @@ export function OperationalWorkspace(props: Props) {
         buttons.splice(primaryIndex, 0, confirmation);
       }
     }
+    if (pageId === "orders" && row.commercialState === "confirmed" && hasCommand(context, "CollectionReported")) buttons.push({ label: "＋ Reportar cobro", onClick: () => reportCollection(row) });
     return buttons;
   };
 

@@ -178,7 +178,14 @@ test("order-row collection reporting stays linked to its order, requires receive
   await page.getByRole("button", { name: "Pedidos", exact: true }).click();
   const row = page.locator("tbody tr").filter({ hasText: "ops-delivery-order" });
   await expect(row).toBeVisible();
-  await row.getByRole("button", { name: "＋ Reportar cobro", exact: true }).click();
+  const reportAction = row.getByRole("button", { name: "＋ Reportar cobro", exact: true });
+  if (!(await reportAction.isVisible())) {
+    const moreActions = row.locator("details.ops-row-actions-disclosure summary");
+    await expect(moreActions).toContainText("Más acciones");
+    await moreActions.click();
+  }
+  await expect(reportAction).toBeVisible();
+  await reportAction.click();
 
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("heading", { name: "Reportar un cobro", exact: true })).toBeVisible();
