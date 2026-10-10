@@ -1599,7 +1599,7 @@ test("one AppSheet Article selector combines historical and Bombo lots and trans
   await expect(selectedOption).toHaveCount(1);
   await expect(selectedOption).toHaveText("Variedad fuente |Descripción capturada - COMPRA-2026-77 (18 gr)");
   await expect(selectedNativeOption).toHaveCount(1);
-  await expect(selectedNativeOption).toHaveText("ops-sku-c · Lote recibido · 12 g disponibles");
+  await expect(selectedNativeOption).toHaveText("Variedad C · Lote recibido · 12 g disponibles");
   await expect(combinedChoice.locator('option[data-source-lot-id="source-lot-unavailable"]')).toHaveCount(0);
   await expect(combinedChoice.locator('option[data-stock-lot-id="native-lot-unavailable"]')).toHaveCount(0);
   const selectedOptionValue = await selectedOption.getAttribute("value");
