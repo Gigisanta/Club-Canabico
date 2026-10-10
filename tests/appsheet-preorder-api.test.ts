@@ -105,7 +105,7 @@ test("AppSheet preorder draft API preserves raw source fields, enforces scope an
     const passwords: Record<string, string> = {};
     for (const key of Object.keys(actorSpecs) as Array<keyof typeof actorSpecs>) {
       const id = actorIds[key];
-      const email = key + "-" + randomUUID() + "@synthetic-preorder.test";
+      const email = (key + "-" + randomUUID() + "@synthetic-preorder.test").toLowerCase();
       const password = randomBytes(24).toString("base64url");
       emails[id] = email;
       passwords[id] = password;
@@ -143,7 +143,7 @@ test("AppSheet preorder draft API preserves raw source fields, enforces scope an
       const response = await fetch(apiBase + "/auth/login", {
         method: "POST",
         headers: { Origin: origin, "Content-Type": "application/json" },
-        body: JSON.stringify({ email: emails[id], password: passwords[id] }),
+        body: JSON.stringify({ email: emails[id].toLowerCase(), password: passwords[id] }),
       });
       assert.equal(response.status, 200, "login HTTP de actor sintético");
       const cookie = response.headers.get("set-cookie");
