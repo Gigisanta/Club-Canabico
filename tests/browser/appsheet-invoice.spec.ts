@@ -929,8 +929,9 @@ test("a catalog SKU that disappears after selection stays in the invoice draft a
   });
   expect(catalogReads).toBeGreaterThan(0);
   skuCAvailability = "NO";
-  const refreshedCatalog = page.waitForResponse(response => response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/catalog" && catalogReads > 1);
-  await page.locator('.ops-header-actions button[title="Actualizar"]').evaluate(element => {
+  const catalogReadsBeforeRefresh = catalogReads;
+  const refreshedCatalog = page.waitForResponse(response => response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/catalog" && catalogReads > catalogReadsBeforeRefresh);
+  await page.getByRole("button", { name: "↻ Actualizar", exact: true }).evaluate(element => {
     element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
   });
   await refreshedCatalog;
@@ -1067,7 +1068,7 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
   const historicalSnapshotRefresh = page.waitForResponse(response =>
     response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/orders",
   );
-  await page.locator('.ops-header-actions button[title="Actualizar"]').evaluate(element => {
+  await page.getByRole("button", { name: "↻ Actualizar", exact: true }).evaluate(element => {
     element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
   });
   await historicalSnapshotRefresh;
@@ -1096,7 +1097,7 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
     const refreshed = page.waitForResponse(response =>
       response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/catalog" && catalogReads > priorReads,
     );
-    await page.locator('.ops-header-actions button[title="Actualizar"]').evaluate(element => {
+    await page.getByRole("button", { name: "↻ Actualizar", exact: true }).evaluate(element => {
       element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
     });
     await refreshed;
@@ -1633,7 +1634,7 @@ test("an empty AppSheet preorder shell saves as pending, rejects failed writes, 
   const invalidSnapshotRefresh = page.waitForResponse(response =>
     response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/orders",
   );
-  await page.locator('.ops-header-actions button[title="Actualizar"]').evaluate(element => {
+  await page.getByRole("button", { name: "↻ Actualizar", exact: true }).evaluate(element => {
     element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
   });
   await invalidSnapshotRefresh;
@@ -1659,7 +1660,7 @@ test("an empty AppSheet preorder shell saves as pending, rejects failed writes, 
   const currencySnapshotRefresh = page.waitForResponse(response =>
     response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/orders",
   );
-  await page.locator('.ops-header-actions button[title="Actualizar"]').evaluate(element => {
+  await page.getByRole("button", { name: "↻ Actualizar", exact: true }).evaluate(element => {
     element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
   });
   await currencySnapshotRefresh;
