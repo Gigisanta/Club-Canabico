@@ -161,7 +161,7 @@ export function appSheetDefinitionParserSupportsProduction(parserVersion: string
   return major > 1 || (major === 1 && minor >= 2);
 }
 
-export function appSheetDefinitionProductionReadiness(inventory: AppSheetDefinitionInventory, expectedAppId = APPSHEET_EXPECTED_LIVE_APP_ID) {
+export function appSheetDefinitionProductionReadiness(inventory: AppSheetDefinitionInventory, expectedAppId: string = APPSHEET_EXPECTED_LIVE_APP_ID) {
   const parserSupported = appSheetDefinitionParserSupportsProduction(inventory.parserVersion);
   const appMetadataComplete = inventory.app.id === expectedAppId &&
     typeof inventory.app.name === "string" && inventory.app.name.trim().length > 0 &&

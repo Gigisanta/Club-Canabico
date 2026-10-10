@@ -628,12 +628,12 @@ async function requireVerifiedAppSheetReplacement(ctx:CommandContext,captureId:s
   throw appSheetReadinessError("canonical_master_unexpected_source_table");
  const recordsByTable=new Map<string,typeof masterRecords>();
  for(const record of masterRecords){const rows=recordsByTable.get(record.sourceTable)??[];rows.push(record);recordsByTable.set(record.sourceTable,rows);}
- const identities=[] as Array<{sourceTable:string;sourceKey:string;destinationType:string;destinationId:string;approvedBy:string|null}>;
+ const identities=[] as Array<{id:string;sourceTable:string;sourceKey:string;destinationType:string;destinationId:string;approvedBy:string|null}>;
  for(const [sourceTable,rows] of recordsByTable){
   const sourceKeys=[...new Set(rows.map(record=>record.sourceKey))];
   for(let start=0;start<sourceKeys.length;start+=500){
    identities.push(...await ctx.tx.legacyIdentity.findMany({where:{sourceSystem:APPSHEET_CANONICAL_SOURCE_SYSTEM,sourceTable,sourceKey:{in:sourceKeys.slice(start,start+500)}},
-    select:{sourceTable:true,sourceKey:true,destinationType:true,destinationId:true,approvedBy:true}}));
+    select:{id:true,sourceTable:true,sourceKey:true,destinationType:true,destinationId:true,approvedBy:true}}));
   }
  }
  const identityByKey=new Map(identities.map(identity=>[canonicalJson([identity.sourceTable,identity.sourceKey,identity.destinationType]),identity]));
@@ -1127,6 +1127,9 @@ export async function requireAppSheetOpeningSourceRecord(ctx:CommandContext,sour
   ctx.tx.legacyHistoricalFact.findFirst({where:{snapshotId:source.snapshotId,sourceRecordId:source.id,mappingId:APPSHEET_HISTORY_MAPPING_ID,correctionOf:null},select:{sourceHash:true,kind:true,amountMinor:true,amountState:true,currency:true,currencyState:true,quantity:true,quantityState:true,unit:true,unitState:true,attributes:true}}),
   ctx.tx.legacyException.count({where:{snapshotId:source.snapshotId,sourceRecordId:source.id,status:"open"}}),
  ]);
+ const countLinkedOpeningEffects=()=>expected.kind==="cash"
+  ?ctx.tx.ledgerEvent.count({where:{kind:"opening",sourceRecordId:source.id}})
+  :ctx.tx.stockFact.count({where:{kind:"opening",sourceRecordId:source.id}});
  if(!publication||publication.snapshotId!==source.snapshotId||publication.fileHash!==capture.manifestHash||publication.mappingId!==APPSHEET_HISTORY_MAPPING_ID||fact?.sourceHash!==source.contentHash||openExceptions!==0)
   throw appSheetReadinessError("opening_source_history_publication_or_hash_missing");
  if(expected.kind==="cash"){
@@ -1141,9 +1144,7 @@ export async function requireAppSheetOpeningSourceRecord(ctx:CommandContext,sour
   if(!expected.skuSourceId||!skuRelationship)throw appSheetReadinessError("stock_opening_source_sku_relationship_unverified");
  }
  if(!expected.allowAlreadyLinked){
-  const linked=expected.kind==="cash"
-   ?await ctx.tx.ledgerEvent.count({where:{kind:"opening",sourceRecordId:source.id}})
-   :await ctx.tx.stockFact.count({where:{kind:"opening",sourceRecordId:source.id}});
+  const linked=await countLinkedOpeningEffects();
   if(linked)throw appSheetReadinessError("opening_source_record_already_consumed");
  }
  return {captureId,sourceRecordId:source.id,sourceTable:source.sourceTable,sourceKey:source.sourceKey,contentHash:source.contentHash,sourceHash:fact.sourceHash};
