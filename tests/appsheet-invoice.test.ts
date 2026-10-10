@@ -1966,11 +1966,26 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
           definitionWorkflowRuleCount: capture.definitionWorkflowRuleCount, definitionFormatRuleCount: capture.definitionFormatRuleCount,
         } });
 
-        await db.operationAuthority.upsert({
+        const authorityBeforeSourceLotFixture = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+        assert.equal(authorityBeforeSourceLotFixture.mode, "active");
+        assert.equal(authorityBeforeSourceLotFixture.cutoverProfile, "legacy");
+        assert.equal(authorityBeforeSourceLotFixture.captureManifestId, null);
+        const authorityObject = await db.operationObject.findUnique({ where: { id: "operations" }, select: { version: true } });
+        const suspendedLegacyAuthority = await send(envelope("operations", "AuthoritySuspended", {
+          reason: "Synthetic source-lot fixture transition to shadow mode",
+        }, authorityObject?.version ?? 0));
+        assert.equal(suspendedLegacyAuthority.response.status, 200, JSON.stringify(suspendedLegacyAuthority.body));
+        const authorityAfterSuspension = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
+        assert.equal(authorityAfterSuspension.mode, "shadow");
+        assert.equal(authorityAfterSuspension.cutoverProfile, "legacy", "the owner command preserves the existing profile");
+        assert.equal(authorityAfterSuspension.captureManifestId, null, "the owner command preserves the existing capture");
+        assert.equal(authorityAfterSuspension.epoch, authorityBeforeSourceLotFixture.epoch + 1);
+
+        // The fixture changes replacement capture only while shadow. The database
+        // trigger intentionally forbids changing it during active authority.
+        await db.operationAuthority.update({
           where: { id: "operations" },
-          create: { id: "operations", mode: "shadow", cutoverProfile: "appsheet-replacement", captureManifestId: capture.captureId, epoch: 1 },
-          update: { mode: "shadow", cutoverProfile: "appsheet-replacement", captureManifestId: capture.captureId,
-            epoch: 1, approvedBy: null, firstRealWriteAt: null },
+          data: { cutoverProfile: "appsheet-replacement", captureManifestId: capture.captureId },
         });
 
         const stagerId = `appsheet-source-lot-stager-${randomUUID()}`;

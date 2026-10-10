@@ -221,8 +221,10 @@ async function run(args: string[], workingDirectory = process.cwd()): Promise<{ 
       try { previewDestinationIdentity = appSheetDatabaseDestinationIdentity(options.target, previewDatabaseUrl); }
       catch { throw new AppSheetCanonicalError("database_target_identity_invalid"); }
     }
+    const projectionReport = appSheetCanonicalProjectionReport(projection);
+    const definitionReadinessState = projectionReport.definitionReadinessState;
     const report = {
-      ...appSheetCanonicalProjectionReport(projection),
+      ...projectionReport,
       commitSha: initialGitState.commitSha,
       target: options.target,
       destinationIdentity: previewDestinationIdentity,
@@ -238,7 +240,7 @@ async function run(args: string[], workingDirectory = process.cwd()): Promise<{ 
         observedCounts: definitionInventory.observedCounts,
       },
       cutoverEligible: projection.capture.stabilityMode === "stable" && projection.definitionIdentityState === "verified" &&
-        report.definitionReadinessState === "production-compatible" && projection.summary.globalDeltaBlockingCount === 0,
+        definitionReadinessState === "production-compatible" && projection.summary.globalDeltaBlockingCount === 0,
     };
     if (!options.apply) return { code: 0, output: JSON.stringify(report) };
 

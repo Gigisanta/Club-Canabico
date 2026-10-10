@@ -56,8 +56,8 @@ const commandKinds: Record<ReviewCommand, string> = {
   AppSheetHistorySourceReviewed: "Revisión de una captura de origen",
   AppSheetPendingOrderIdentityReviewed: "Revisión del vínculo entre factura y pedido",
   AppSheetPendingDeliveryResolved: "Revisión del vínculo de una entrega",
-  AppSheetPendingImportPlanReviewed: "Revisión del plan por alguien distinto del importador y los mapeadores",
-  AppSheetPendingImportDestinationReviewed: "Revisión del destino por alguien distinto del importador y los mapeadores",
+  AppSheetPendingImportPlanReviewed: "La misma persona puede revisar el plan y el destino; debe ser distinta de quienes prepararon la carga o revisaron el origen y sus vínculos.",
+  AppSheetPendingImportDestinationReviewed: "La misma persona puede revisar el plan y el destino; debe ser distinta de quienes prepararon la carga o revisaron el origen y sus vínculos.",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {

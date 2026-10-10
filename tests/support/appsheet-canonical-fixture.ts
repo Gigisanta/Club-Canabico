@@ -236,6 +236,10 @@ function fixture(options: {
   };
 }
 
+// Expose the existing producer so CLI tests can exercise the same capture shape
+// without duplicating its page and row hash construction.
+export const canonicalCaptureFixture = fixture;
+
 export function project(options: Parameters<typeof fixture>[0] = {}, allowStagedDelta = false) {
   const capture = fixture(options);
   const mode = options.stagedDelta ? "preliminary-delta" : "stable";
