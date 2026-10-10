@@ -1248,6 +1248,7 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       const cashContentHash = digest("synthetic-cash-content");
       const stockContentHash = digest("synthetic-stock-content");
       const stockMovementContentHash = digest("synthetic-stock-movement-content");
+      const stockSourceFactId = `synthetic-stock-fact-${randomUUID()}`;
       const publicationFingerprint = digest("synthetic-history-publication");
       const appliedDefinitionHash = digest("synthetic-history-applied-definition");
       const snapshotCoverage = {
@@ -1305,7 +1306,7 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       // Synthetic D_Stock is only a gate fixture; no live history rule or physical-count evidence is implied.
       await createSourceRecord(stockSourceRecordId, "D_Stock", stockSourceKey, 4, stockContentHash,
         { columns: [{ header: "Cantidad", value: "5", exactDecimal: "5" }, { header: "Unidad", value: "g" }, { header: "Codigo_Detalle", value: "invoice-source-sku" }] });
-      await createFact({ id: `synthetic-stock-fact-${randomUUID()}`, sourceRecordId: stockSourceRecordId, sourceTable: "D_Stock", sourceKey: stockSourceKey,
+      await createFact({ id: stockSourceFactId, sourceRecordId: stockSourceRecordId, sourceTable: "D_Stock", sourceKey: stockSourceKey,
         sourceRow: 4, sourceHash: stockContentHash, kind: "stock", dateState: "not-applicable", amountState: "not-applicable", currencyState: "not-applicable",
         quantity: "5", quantityState: "known", unit: "g", unitState: "known",
         attributes: { relationships: [{ targetTable: "D_Catalogo_Mercaderia", status: "unique", targetSourceKey: "invoice-source-sku" }] } });
@@ -1318,6 +1319,39 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
         kind: "stock", occurredOn: historyDate, dateState: "known", amountState: "not-applicable", currencyState: "not-applicable",
         quantity: "5", quantityState: "known", unit: "g", unitState: "known",
         attributes: { relationships: [{ targetTable: "D_Catalogo_Mercaderia", status: "unique", targetSourceKey: "invoice-source-sku" }] } });
+      let nextSyntheticOpeningSourceRow = 10;
+      const makeStockOpeningSourceFixture = async (options: {
+        label: string;
+        sourceTable: "D_Stock" | "C_Mercaderia";
+        factTable?: "D_Stock" | "C_Mercaderia" | "Mov_Stock1";
+        kind: "stock" | "purchase";
+      }) => {
+        const sourceRecordId = `synthetic-opening-source-${randomUUID()}`;
+        const sourceKey = `synthetic-opening-key-${randomUUID()}`;
+        const sourceRowNumber = nextSyntheticOpeningSourceRow++;
+        const normalized = options.sourceTable === "D_Stock"
+          ? { columns: [{ header: "Cantidad", value: "5", exactDecimal: "5" }, { header: "Unidad", value: "g" },
+            { header: "Codigo_Detalle", value: "invoice-source-sku" }] }
+          : { columns: [{ header: "ID_Mercaderia", value: sourceKey }, { header: "Codigo_Detalle", value: "invoice-source-sku" },
+            { header: "Cantidad_Cann_Ingresado", value: "5", exactDecimal: "5" }, { header: "Variedad_Cann", value: "invoice-source-sku" },
+            { header: "Fecha_Compra", value: today }] };
+        const contentHash = digest(canonicalJson({ label: options.label, sourceTable: options.sourceTable, sourceKey, normalized }));
+        await createSourceRecord(sourceRecordId, options.sourceTable, sourceKey, sourceRowNumber, contentHash, normalized);
+        const factId = `synthetic-opening-fact-${randomUUID()}`;
+        await createFact({
+          id: factId, sourceRecordId, sourceTable: options.factTable ?? options.sourceTable, sourceKey, sourceRow: sourceRowNumber,
+          sourceHash: contentHash, kind: options.kind, dateState: "not-applicable", amountState: "not-applicable",
+          currencyState: "not-applicable", quantity: "5", quantityState: "known", unit: "g", unitState: "known",
+          attributes: { relationships: [{ targetTable: "D_Catalogo_Mercaderia", status: "unique", targetSourceKey: "invoice-source-sku" }] },
+        });
+        return { sourceRecordId, factId };
+      };
+      // These immutable synthetic rows exercise classification guards only; they do not claim a physical-count rule for D_Stock.
+      const purchaseClassifiedStock = await makeStockOpeningSourceFixture({ label: "d-stock-purchase-kind", sourceTable: "D_Stock", kind: "purchase" });
+      const stockClassifiedPurchase = await makeStockOpeningSourceFixture({ label: "purchase-table-stock-kind", sourceTable: "C_Mercaderia", kind: "stock" });
+      const discordantSourceAndFact = await makeStockOpeningSourceFixture({
+        label: "source-fact-table-mismatch", sourceTable: "C_Mercaderia", factTable: "Mov_Stock1", kind: "stock",
+      });
       await db.legacyHistoryPublication.create({ data: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, snapshotId, fileHash: manifestHash,
         mappingId: APPSHEET_HISTORY_MAPPING_ID, fingerprint: publicationFingerprint, publishedBy: ownerId, evidence: { reference: "synthetic fixture" } } });
 
@@ -1447,6 +1481,55 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       assert.equal(await db.stockFact.count({ where: { requestId: movementRequest.requestId } }), 0);
       assert.equal(await db.operationObject.findUnique({ where: { id: movementLotId } }), null);
 
+      const readStockOpeningEffects = async () => ({
+        lots: await db.inventoryLot.findMany({ orderBy: { id: "asc" } }),
+        balances: await db.stockBalance.findMany({ orderBy: { id: "asc" } }),
+        facts: await db.stockFact.findMany({ orderBy: { id: "asc" } }),
+        objectVersions: await db.operationObject.findMany({ select: { id: true, version: true }, orderBy: { id: "asc" } }),
+      });
+      const requireRejectedStockOpeningSource = async (options: {
+        label: string;
+        sourceRecordId: string;
+        factId: string;
+        blocker: string;
+      }) => {
+        const lotId = `appsheet-final-delta-${options.label}-${randomUUID()}`;
+        const request = envelope(lotId, "StockOpeningRecorded", {
+          skuId, label: `Synthetic ${options.label} source opening`, quantity: "5", unitCost: "10",
+          costCurrency: "ARS", receivedDate: today, locationId, preparedBy: deniedId,
+          evidence: { note: `Synthetic ${options.label} classification must remain blocked` }, sourceRecordId: options.sourceRecordId,
+        });
+        const sourceBefore = await db.legacySourceRecord.findUniqueOrThrow({ where: { id: options.sourceRecordId } });
+        const factBefore = await db.legacyHistoricalFact.findUniqueOrThrow({ where: { id: options.factId } });
+        const effectsBefore = await readStockOpeningEffects();
+        const rejected = await send(request);
+        assert.equal(rejected.response.status, 423, JSON.stringify(rejected.body));
+        assert.equal(rejected.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
+        assert.deepEqual(rejected.body.details?.blockers, [options.blocker]);
+        await assertNoCommandEffects(request);
+        assert.deepEqual(await readStockOpeningEffects(), effectsBefore,
+          "a rejected source classification cannot create or alter lots, balances, facts, or aggregate versions");
+        assert.equal(await db.inventoryLot.findUnique({ where: { id: lotId } }), null);
+        assert.equal(await db.operationObject.findUnique({ where: { id: lotId } }), null);
+        assert.deepEqual(await db.legacySourceRecord.findUniqueOrThrow({ where: { id: options.sourceRecordId } }), sourceBefore);
+        assert.deepEqual(await db.legacyHistoricalFact.findUniqueOrThrow({ where: { id: options.factId } }), factBefore,
+          "the rejection leaves append-only source classification untouched");
+      };
+
+      await replacementTest.test("D_Stock sin regla no puede abrir saldo", () => requireRejectedStockOpeningSource({
+        label: "unmapped-d-stock", sourceRecordId: stockSourceRecordId, factId: stockSourceFactId,
+        blocker: "stock_opening_balance_checkpoint_unavailable",
+      }));
+      await replacementTest.test("D_Stock clasificado como compra no puede abrir saldo", () => requireRejectedStockOpeningSource({
+        label: "d-stock-purchase-kind", ...purchaseClassifiedStock, blocker: "stock_opening_source_fact_kind_mismatch",
+      }));
+      await replacementTest.test("C_Mercaderia clasificada como stock contradice su regla de compra", () => requireRejectedStockOpeningSource({
+        label: "purchase-table-stock-kind", ...stockClassifiedPurchase, blocker: "stock_opening_source_mapping_mismatch",
+      }));
+      await replacementTest.test("la tabla del hecho debe coincidir con la fuente", () => requireRejectedStockOpeningSource({
+        label: "source-fact-table-mismatch", ...discordantSourceAndFact, blocker: "stock_opening_source_table_mismatch",
+      }));
+
       const canonicalOpeningSkuId = `appsheet-unreviewed-opening-sku-${randomUUID()}`;
       const unreviewedActiveSkus = [
         { id: canonicalOpeningSkuId, label: "active canonical SKU before authority review", sourceSystem: APPSHEET_CANONICAL_SOURCE_SYSTEM },
@@ -1456,6 +1539,7 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       const stockStateBeforeUnreviewedActive = {
         lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count(),
       };
+      // The D_Stock source is inadmissible before SKU checks; these cases assert that source guard precedence and no-write behavior.
       for (const [index, fixture] of unreviewedActiveSkus.entries()) {
         const activeSkuId = fixture.id;
         const activeLotId = `appsheet-unreviewed-active-opening-lot-${index}-${randomUUID()}`;
@@ -1469,7 +1553,8 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
         });
         const activeSkuRejected = await send(activeSkuRequest);
         assert.equal(activeSkuRejected.response.status, 423, JSON.stringify(activeSkuRejected.body));
-        assert.equal(activeSkuRejected.body.code, "APPSHEET_SKU_NOT_ELIGIBLE");
+        assert.equal(activeSkuRejected.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
+        assert.deepEqual(activeSkuRejected.body.details?.blockers, ["stock_opening_balance_checkpoint_unavailable"]);
         await assertNoCommandEffects(activeSkuRequest);
         assert.equal(await db.inventoryLot.findUnique({ where: { id: activeLotId } }), null);
         assert.equal(await db.stockFact.count({ where: { requestId: activeSkuRequest.requestId } }), 0);
@@ -1495,7 +1580,7 @@ test("AppSheet invoices preserve exact line values and independent moto metadata
       const inactiveCanonicalRejected = await send(inactiveCanonicalRequest);
       assert.equal(inactiveCanonicalRejected.response.status, 423, JSON.stringify(inactiveCanonicalRejected.body));
       assert.equal(inactiveCanonicalRejected.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
-      assert.deepEqual(inactiveCanonicalRejected.body.details?.blockers, ["canonical_master_snapshot_missing_or_ambiguous"]);
+      assert.deepEqual(inactiveCanonicalRejected.body.details?.blockers, ["stock_opening_balance_checkpoint_unavailable"]);
       await assertNoCommandEffects(inactiveCanonicalRequest);
       assert.deepEqual({
         lots: await db.inventoryLot.count(), balances: await db.stockBalance.count(), facts: await db.stockFact.count(),

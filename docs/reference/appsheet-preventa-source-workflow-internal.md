@@ -63,3 +63,9 @@ Exercise the actual command/form entry paths, not only formula helpers:
 - Keep a regression case for the formula/copy scale mismatch and verify its documented safe equivalent in Bombo while retaining the original expression and historical values. Do not assert the unresolved `Más`/`más` runtime behavior without read-only AppSheet evidence. Leave the source unchanged.
 
 The confirmation and runtime cases above remain a test plan. Report executed native-draft, archived-reader and browser evidence separately, with the tested commit; passing preservation tests does not certify confirmation or production.
+
+## Physical opening balance boundary
+
+Historical stock movements do not establish a physical opening balance. The only current history rule classified as `stock` is `Mov_Stock1`, and the opening validator rejects it as a ledger movement. `D_Stock` has no history rule; a synthetic fact labelled `stock` cannot make that table an admissible source. The opening boundary must also check that the fact's source table and kind agree with the source record and its history rule, before quantity, unit and SKU relationships can be used as evidence.
+
+No current source is admissible for an AppSheet stock opening. This also prevents reviewing a source lot whose opening relies on those unsupported rows. Native `GoodsReceived` remains a separate, real receipt flow; its tests do not certify a migrated balance. Introducing any new stock rule requires independent evidence that it represents a physical balance at the same cutoff, with temporal reconciliation and a separate review of opening eligibility. A `stock` classification alone is insufficient to establish that future checkpoint.

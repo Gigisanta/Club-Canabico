@@ -24,7 +24,7 @@ function databaseTargetIdentity(url: URL) {
   return JSON.stringify([normalizedHost, url.port || "5432", decodeURIComponent(url.pathname.slice(1))]);
 }
 
-test("reviewed AppSheet and native GoodsReceived lots flow through the HTTP selector and confirmed invoice reservation", {
+test("unmapped AppSheet stock openings stay blocked while native GoodsReceived lots can be invoiced", {
   skip: !process.env.TEST_DATABASE_URL,
   timeout: 60_000,
 }, async () => {
@@ -193,8 +193,8 @@ test("reviewed AppSheet and native GoodsReceived lots flow through the HTTP sele
       preorder: options.preorder ?? false,
     });
     const digest = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
-    // This is a synthetic consumer precondition. The only source-lot proof
-    // below is produced by the real AppSheetSourceLotReviewed command.
+    // Synthetic AppSheet capture/history input only. Its D_Stock rows do not
+    // establish a verified physical opening or a selectable migrated lot.
     const sourceFixture = appSheetSourceLotCaptureFixture(`invoice-source-lots-${randomUUID()}`);
     const capture = sourceFixture.sourceLotCapture.manifest;
     const productionDestinationIdentity = appSheetDatabaseDestinationIdentity("production", databaseUrl);
@@ -467,69 +467,76 @@ test("reviewed AppSheet and native GoodsReceived lots flow through the HTTP sele
     } });
 
     const openingRecords = new Map(sourceRecords.filter(record => record.sourceTable === "D_Stock").map(record => [record.sourceKey, record]));
-    const internalLots = new Map<string, { id: string; balanceId: string; sourceRecordId: string }>();
-    for (const sourceLot of historyRows.sourceLots) {
-      const openingRecord = openingRecords.get(`opening-${sourceLot.sourceLotId}`);
-      assert.ok(openingRecord, `synthetic D_Stock source exists for ${sourceLot.sourceLotId}`);
-      const lotId = `appsheet-source-lot-internal-${randomUUID()}`;
-      const opening = await command(envelope(lotId, "StockOpeningRecorded", {
-        skuId: sourceSku.id, label: `Synthetic opening for ${sourceLot.sourceLotId}`, quantity: sourceLot.sourceStockActual,
-        unitCost: "10", costCurrency: "ARS", receivedDate: sourceLot.sourceDeliveryDate, locationId, custodianId: ownerId,
-        preparedBy: deniedId, evidence: { note: "Synthetic D_Stock source lot opening" }, sourceRecordId: openingRecord.id,
-      }));
-      assert.ok(new Prisma.Decimal(opening.body.result.opening.quantity).equals(sourceLot.sourceStockActual),
-        "the opening preserves the exact source quantity independently of decimal display scale");
-      assert.ok(new Prisma.Decimal(opening.body.result.balance.quantity).equals(sourceLot.sourceStockActual),
-        "the persisted balance equals the exact source quantity");
-      const balance = await db.stockBalance.findFirstOrThrow({ where: { lotId } });
-      internalLots.set(sourceLot.sourceLotId, { id: lotId, balanceId: balance.id, sourceRecordId: sourceLot.sourceRecord.id });
-    }
-
-    const sourceLotCommandRequests = new Map<string, CommandEnvelope>();
-    const sourceReviewEffects = async () => ({
-      identities: await db.legacyIdentity.findMany({ where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, sourceTable: "C_Mercaderia" }, orderBy: { sourceKey: "asc" } }),
-      lots: await db.inventoryLot.findMany({ where: { id: { in: [...internalLots.values()].map(item => item.id) } }, orderBy: { id: "asc" } }),
-      objects: await db.operationObject.findMany({ where: { id: { in: [...internalLots.values()].map(item => item.id) } }, orderBy: { id: "asc" } }),
-      reviews: await db.operationAudit.findMany({ where: { action: "appsheet.source_lot_reviewed", objectId: { in: [...internalLots.values()].map(item => item.id) } }, orderBy: { id: "asc" } }),
-      receipts: await db.commandReceipt.count(), audits: await db.operationAudit.count(), outbox: await db.operationOutbox.count(),
+    const readOpeningEffects = async () => ({
+      lots: await db.inventoryLot.findMany({ orderBy: { id: "asc" } }),
+      balances: await db.stockBalance.findMany({ orderBy: { id: "asc" } }),
+      facts: await db.stockFact.findMany({ orderBy: { id: "asc" } }),
+      objects: await db.operationObject.findMany({ orderBy: { id: "asc" } }),
+      receipts: await db.commandReceipt.findMany({ orderBy: { requestId: "asc" } }),
+      audits: await db.operationAudit.findMany({ orderBy: { id: "asc" } }),
+      outbox: await db.operationOutbox.findMany({ orderBy: { id: "asc" } }),
     });
     for (const sourceLot of historyRows.sourceLots) {
-      const target = internalLots.get(sourceLot.sourceLotId)!;
-      const reviewRequest = envelope(target.id, "AppSheetSourceLotReviewed", {
-        sourceRecordId: sourceLot.sourceRecord.id, sourceKey: sourceLot.sourceLotId, contentHash: sourceLot.sourceRecord.contentHash,
-        preparedBy: deniedId, evidence: { note: "Synthetic independent review of source-derived AppSheet stock" },
-      }, 1);
-      sourceLotCommandRequests.set(sourceLot.sourceLotId, reviewRequest);
-      const reviewed = await command(reviewRequest);
-      const proof = reviewed.body.result.proof;
-      assert.equal(reviewed.body.result.sourceLot.inventoryLotId, target.id);
-      assert.equal(proof.sourceRecordId, sourceLot.sourceRecord.id);
-      assert.ok(new Prisma.Decimal(proof.sourceStockActual).equals(sourceLot.sourceStockActual));
-      assert.equal(proof.sourceDeliveryDate, sourceLot.sourceDeliveryDate);
-      for (const field of ["sourceDataHash", "sourceRowHash", "sourceDerivationHash", "sourceStockDefinitionHash", "sourceMovementRowsetHash", "sourceSelectionHash"])
-        assert.match(proof[field], /^[a-f0-9]{64}$/, `${field} is generated by the review command`);
+      const openingRecord = openingRecords.get(`opening-${sourceLot.sourceLotId}`);
+      assert.ok(openingRecord, `synthetic D_Stock source exists for the negative case ${sourceLot.sourceLotId}`);
+      const lotId = `appsheet-unmapped-opening-${randomUUID()}`;
+      const request = envelope(lotId, "StockOpeningRecorded", {
+        skuId: sourceSku.id, label: `Unmapped source opening ${sourceLot.sourceLotId}`, quantity: sourceLot.sourceStockActual,
+        unitCost: "10", costCurrency: "ARS", receivedDate: sourceLot.sourceDeliveryDate, locationId, custodianId: ownerId,
+        preparedBy: deniedId, evidence: { note: "D_Stock is not a verified physical opening checkpoint" }, sourceRecordId: openingRecord.id,
+      });
+      const before = await readOpeningEffects();
+      const rejectedOpening = await send(request);
+      assert.equal(rejectedOpening.response.status, 423, JSON.stringify(rejectedOpening.body));
+      assert.equal(rejectedOpening.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
+      assert.deepEqual(rejectedOpening.body.details?.blockers, ["stock_opening_balance_checkpoint_unavailable"]);
+      assert.deepEqual(await readOpeningEffects(), before, "an unmapped D_Stock opening cannot create a lot, balance, stock fact, receipt, audit, or outbox effect");
+      assert.equal(await db.inventoryLot.findUnique({ where: { id: lotId } }), null);
+      assert.equal(await db.operationObject.findUnique({ where: { id: lotId } }), null);
     }
-    const reviewedSourceState = await sourceReviewEffects();
-    const firstReviewRequest = sourceLotCommandRequests.get(historyRows.sourceLots[0]!.sourceLotId)!;
-    const replayedSourceReview = await command(firstReviewRequest);
-    assert.equal(replayedSourceReview.body.replay, true);
-    assert.deepEqual(await sourceReviewEffects(), reviewedSourceState, "the exact HTTP command replay adds no effects");
 
-    const duplicateReview = envelope(firstReviewRequest.targetId, "AppSheetSourceLotReviewed", firstReviewRequest.data, 2);
-    const duplicateResult = await send(duplicateReview);
-    assert.equal(duplicateResult.response.status, 409, JSON.stringify(duplicateResult.body));
-    assert.equal(duplicateResult.body.code, "APPSHEET_SOURCE_LOT_RECAPTURE_REQUIRED");
-    assert.deepEqual(await sourceReviewEffects(), reviewedSourceState, "a second review request for the same capture is rejected without writes");
-
-    await db.operationAccess.update({ where: { userId: scopedId }, data: {
-      profile: "stock", enabled: true, capabilities: ["openings.approve"],
-      scope: { locationIds: ["outside-source-lot-location"], custodianIds: [ownerId] },
+    const rejectedSourceLot = historyRows.sourceLots[0]!;
+    const rejectedSourceOpening = openingRecords.get(`opening-${rejectedSourceLot.sourceLotId}`)!;
+    const rejectedSourceLotId = `appsheet-unverified-source-lot-${randomUUID()}`;
+    // Deliberately seed an inconsistent row only to exercise fail-closed review:
+    // this direct lot/balance/fact is not a migration opening or physical proof.
+    await db.inventoryLot.create({ data: {
+      id: rejectedSourceLotId, skuId: sourceSku.id, label: "Unverified source-lot rejection fixture", unit: "g",
+      unitCost: "10", costCurrency: "ARS", receivedAt: new Date(`${rejectedSourceLot.sourceDeliveryDate}T12:00:00-03:00`),
     } });
-    const scopedReviewRequest = envelope(firstReviewRequest.targetId, "AppSheetSourceLotReviewed", firstReviewRequest.data, 2);
-    const scopedReview = await send(scopedReviewRequest, scopedId);
-    assert.equal(scopedReview.response.status, 403, JSON.stringify(scopedReview.body));
-    assert.equal(scopedReview.body.code, "LOCATION_SCOPE");
-    assert.deepEqual(await sourceReviewEffects(), reviewedSourceState, "scope rejection leaves all source-lot evidence unchanged");
+    await db.stockBalance.create({ data: {
+      id: `appsheet-unverified-source-balance-${randomUUID()}`, lotId: rejectedSourceLotId, locationId,
+      custodianId: ownerId, unit: "g", quantity: rejectedSourceLot.sourceStockActual, reserved: "0",
+    } });
+    await db.stockFact.create({ data: {
+      requestId: randomUUID(), lotId: rejectedSourceLotId, kind: "opening", quantity: rejectedSourceLot.sourceStockActual, unit: "g",
+      toLocationId: locationId, toCustodianId: ownerId, reason: "unverified_test_corruption_fixture", actorId: ownerId,
+      occurredAt: new Date(), sourceRecordId: rejectedSourceOpening.id,
+    } });
+    await db.operationObject.create({ data: { id: rejectedSourceLotId, kind: "lot", version: 0, createdBy: ownerId } });
+    const sourceReviewRequest = envelope(rejectedSourceLotId, "AppSheetSourceLotReviewed", {
+      sourceRecordId: rejectedSourceLot.sourceRecord.id, sourceKey: rejectedSourceLot.sourceLotId,
+      contentHash: rejectedSourceLot.sourceRecord.contentHash, preparedBy: deniedId,
+      evidence: { note: "Reject source-lot review while D_Stock has no approved opening checkpoint" },
+    });
+    const beforeSourceReview = await readOpeningEffects();
+    const rejectedSourceReview = await send(sourceReviewRequest);
+    assert.equal(rejectedSourceReview.response.status, 423, JSON.stringify(rejectedSourceReview.body));
+    assert.equal(rejectedSourceReview.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
+    assert.deepEqual(rejectedSourceReview.body.details?.blockers, ["stock_opening_balance_checkpoint_unavailable"]);
+    assert.deepEqual(await readOpeningEffects(), beforeSourceReview, "source-lot review cannot promote the deliberately unverified direct fixture");
+    assert.equal((await db.inventoryLot.findUniqueOrThrow({ where: { id: rejectedSourceLotId } })).sourceSystem, null);
+    assert.equal((await db.inventoryLot.findUniqueOrThrow({ where: { id: rejectedSourceLotId } })).sourceId, null);
+    assert.equal(await db.legacyIdentity.count({ where: {
+      sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, sourceTable: "C_Mercaderia", sourceKey: rejectedSourceLot.sourceLotId,
+      destinationType: "inventoryLot",
+    } }), 0);
+
+    // This unreviewed source binding is another negative fixture, not proof:
+    // the invoice selector must hide it and reject its missing identity/review chain.
+    await db.inventoryLot.update({ where: { id: rejectedSourceLotId }, data: {
+      sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, sourceId: rejectedSourceLot.sourceLotId,
+    } });
 
     // Consumer precondition only: mimic the already-reviewed activation receipt
     // chain so the active catalogue reader can validate the SKU. Do not invoke
@@ -655,15 +662,7 @@ test("reviewed AppSheet and native GoodsReceived lots flow through the HTTP sele
     const catalogSku = catalog.items.find(item => item.id === sourceSku.id);
     assert.ok(catalogSku);
     const sourceLotOptions = catalogSku.appSheetSourceLots ?? [];
-    assert.equal(sourceLotOptions.length, 2, "both reviewed source lots with positive stock are selectable");
-    assert.equal(sourceLotOptions[0]!.sourceLotId, historyRows.sourceLots[0]!.sourceLotId, "catalogue retains the older FIFO lot first");
-    const selectedSourceLot = historyRows.sourceLots[1]!;
-    const selectedOption = sourceLotOptions.find(item => item.sourceLotId === selectedSourceLot.sourceLotId);
-    assert.ok(selectedOption);
-    assert.equal(selectedOption.inventoryLotId, internalLots.get(selectedSourceLot.sourceLotId)!.id);
-    assert.deepEqual(selectedOption.sourceLabelIdentity, {
-      variety: "Fixture", description: "Synthetic catalog product", purchaseLotId: "purchase-source-lot-explicit-selection",
-    }, "catalogue returns the exact captured label components, including the dereferenced variety");
+    assert.deepEqual(sourceLotOptions, [], "the deliberately unreviewed D_Stock fixture is not a selectable AppSheet lot");
     const nativeLotOptions = catalogSku.appSheetNativeLots ?? [];
     assert.equal(nativeLotOptions.length, 1, "only the lot with a complete Bombo GoodsReceived chain is selectable");
     const selectedNativeLot = nativeLotOptions[0]!;
@@ -680,49 +679,6 @@ test("reviewed AppSheet and native GoodsReceived lots flow through the HTTP sele
     const scopedCatalogSku = scopedCatalog.items.find(item => item.id === sourceSku.id);
     assert.ok(scopedCatalogSku);
     assert.deepEqual(scopedCatalogSku.appSheetNativeLots, [], "the selectable native lot is filtered by the caller's location scope");
-
-    const invoiceTargetId = `appsheet-source-lot-invoice-${randomUUID()}`;
-    const invoice = invoiceData({ preorder: false, quantity: "3", lineId: `source-lot-invoice-line-${randomUUID()}` });
-    const invoiceInput: Record<string, any> = {
-      ...invoice, memberId: sourceMember.id,
-      lines: invoice.lines.map(line => ({ ...line, skuId: sourceSku.id, sourceLotId: selectedSourceLot.sourceLotId })),
-    };
-    delete invoiceInput.invoiceNumber;
-    const invoiceRequest = envelope(invoiceTargetId, "InvoiceSaved", invoiceInput);
-    const confirmedInvoice = await send(invoiceRequest);
-    assert.equal(confirmedInvoice.response.status, 200, JSON.stringify(confirmedInvoice.body));
-    assert.equal(confirmedInvoice.body.result.commercialState, "confirmed");
-    const savedOrder = await db.operationOrder.findUniqueOrThrow({ where: { id: invoiceTargetId } });
-    assert.equal((savedOrder.quote as any).input.lines[0].sourceLotId, selectedSourceLot.sourceLotId);
-    const reservations = await db.stockReservation.findMany({ where: { orderId: invoiceTargetId } });
-    assert.equal(reservations.length, 1);
-    const reservedBalance = await db.stockBalance.findUniqueOrThrow({ where: { id: reservations[0]!.balanceId } });
-    assert.equal(reservedBalance.lotId, internalLots.get(selectedSourceLot.sourceLotId)!.id,
-      "explicit selection reserves the second source lot instead of native FIFO's first lot");
-    assert.equal(reservations[0]!.quantity.toString(), "3");
-    assert.equal((await db.stockBalance.findUniqueOrThrow({ where: { id: internalLots.get(historyRows.sourceLots[0]!.sourceLotId)!.balanceId } })).reserved.toString(), "0");
-    assert.equal((await db.stockBalance.findUniqueOrThrow({ where: { id: internalLots.get(selectedSourceLot.sourceLotId)!.balanceId } })).reserved.toString(), "3");
-    const sequenceAfterInvoice = await db.appSheetInvoiceSequence.findUniqueOrThrow({ where: { namespace: capture.captureId } });
-    assert.equal(sequenceAfterInvoice.lastValue, seededValue + 1n);
-
-    const confirmedInvoiceEffects = async () => ({
-      order: await db.operationOrder.findUniqueOrThrow({ where: { id: invoiceTargetId } }),
-      object: await db.operationObject.findUniqueOrThrow({ where: { id: invoiceTargetId } }),
-      lines: await db.operationOrderLine.findMany({ where: { orderId: invoiceTargetId }, orderBy: { id: "asc" } }),
-      reservations: await db.stockReservation.findMany({ where: { orderId: invoiceTargetId }, orderBy: { id: "asc" } }),
-      assignments: await db.deliveryAssignment.count({ where: { orderId: invoiceTargetId } }),
-      firstBalance: await db.stockBalance.findUniqueOrThrow({ where: { id: internalLots.get(historyRows.sourceLots[0]!.sourceLotId)!.balanceId } }),
-      selectedBalance: await db.stockBalance.findUniqueOrThrow({ where: { id: internalLots.get(selectedSourceLot.sourceLotId)!.balanceId } }),
-      sequence: await db.appSheetInvoiceSequence.findUniqueOrThrow({ where: { namespace: capture.captureId } }),
-      numberReservations: await db.appSheetInvoiceNumberReservation.findMany({ where: { namespace: capture.captureId }, orderBy: { id: "asc" } }),
-      receipt: await db.commandReceipt.findUniqueOrThrow({ where: { requestId: invoiceRequest.requestId } }),
-      audits: await db.operationAudit.findMany({ where: { requestId: invoiceRequest.requestId }, orderBy: { id: "asc" } }),
-      outbox: await db.operationOutbox.findMany({ where: { requestId: invoiceRequest.requestId }, orderBy: { id: "asc" } }),
-    });
-    const effectsAfterInvoice = await confirmedInvoiceEffects();
-    const replayedInvoice = await command(invoiceRequest);
-    assert.equal(replayedInvoice.body.replay, true);
-    assert.deepEqual(await confirmedInvoiceEffects(), effectsAfterInvoice, "invoice replay does not double-reserve stock or advance numbering");
 
     const nativeInvoiceTargetId = `appsheet-native-lot-invoice-${randomUUID()}`;
     const nativeInvoice = invoiceData({ preorder: false, quantity: "3", lineId: `native-lot-invoice-line-${randomUUID()}` });
@@ -794,7 +750,7 @@ test("reviewed AppSheet and native GoodsReceived lots flow through the HTTP sele
     await assertRejectedNativeInvoice(`appsheet-native-wrong-sku-${randomUUID()}`, { stockLotId: lotId }, 423,
       "APPSHEET_NATIVE_STOCK_LOT_NOT_ELIGIBLE", "native_lot_binding_missing_or_sku_mismatch");
     await assertRejectedNativeInvoice(`appsheet-native-dual-source-${randomUUID()}`, {
-      stockLotId: receivedLot.lotId, sourceLotId: selectedSourceLot.sourceLotId,
+      stockLotId: receivedLot.lotId, sourceLotId: rejectedSourceLot.sourceLotId,
     }, 400);
 
     const goodsReceivedCommandReceipt = await db.commandReceipt.findUniqueOrThrow({ where: { requestId: goodsReceivedRequest.requestId } });
@@ -822,25 +778,16 @@ test("reviewed AppSheet and native GoodsReceived lots flow through the HTTP sele
     const invalidInvoice = invoiceData({ preorder: false, quantity: "3", lineId: `invalid-source-lot-line-${randomUUID()}` });
     const invalidInvoiceInput: Record<string, any> = {
       ...invalidInvoice, memberId: sourceMember.id,
-      lines: invalidInvoice.lines.map(line => ({ ...line, skuId: sourceSku.id, sourceLotId: `missing-source-lot-${randomUUID()}` })),
+      lines: invalidInvoice.lines.map(line => ({ ...line, skuId: sourceSku.id, sourceLotId: rejectedSourceLot.sourceLotId })),
     };
     delete invalidInvoiceInput.invoiceNumber;
     const invalidInvoiceRequest = envelope(rejectedTargetId, "InvoiceSaved", invalidInvoiceInput);
-    const rollbackBefore = {
-      sequence: await db.appSheetInvoiceSequence.findUniqueOrThrow({ where: { namespace: capture.captureId } }),
-      numberReservations: await db.appSheetInvoiceNumberReservation.count(), stockReservations: await db.stockReservation.count(),
-      orders: await db.operationOrder.count(), orderLines: await db.operationOrderLine.count(), assignments: await db.deliveryAssignment.count(),
-      balances: await db.stockBalance.findMany({ where: { lotId: { in: [...internalLots.values()].map(item => item.id) } }, orderBy: { id: "asc" } }),
-    };
+    const rollbackBefore = await nativeFailureEffects();
     const invalidInvoiceResult = await send(invalidInvoiceRequest);
     assert.equal(invalidInvoiceResult.response.status, 423, JSON.stringify(invalidInvoiceResult.body));
     assert.equal(invalidInvoiceResult.body.code, "APPSHEET_SOURCE_LOT_NOT_ELIGIBLE");
-    assert.deepEqual({
-      sequence: await db.appSheetInvoiceSequence.findUniqueOrThrow({ where: { namespace: capture.captureId } }),
-      numberReservations: await db.appSheetInvoiceNumberReservation.count(), stockReservations: await db.stockReservation.count(),
-      orders: await db.operationOrder.count(), orderLines: await db.operationOrderLine.count(), assignments: await db.deliveryAssignment.count(),
-      balances: await db.stockBalance.findMany({ where: { lotId: { in: [...internalLots.values()].map(item => item.id) } }, orderBy: { id: "asc" } }),
-    }, rollbackBefore, "failed lot resolution rolls back the provisional order, number allocation, and stock effects");
+    assert.deepEqual(await nativeFailureEffects(), rollbackBefore,
+      "an unreviewed AppSheet source lot cannot allocate an invoice number, order, reservation, or command effect");
     assert.equal(await db.operationOrder.findUnique({ where: { id: rejectedTargetId } }), null);
     assert.equal(await db.operationOrderLine.count({ where: { orderId: rejectedTargetId } }), 0);
     assert.equal(await db.operationObject.findUnique({ where: { id: rejectedTargetId } }), null);

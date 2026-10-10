@@ -550,7 +550,7 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
     const openingLotId = `appsheet-member-eligibility-opening-lot-${randomUUID()}`;
     const openingRequest = envelope(openingLotId, "StockOpeningRecorded", {
       skuId: canonicalSku.id,
-      label: "Synthetic reviewed AppSheet stock opening",
+      label: "Synthetic unmapped AppSheet stock source",
       quantity: "5",
       unitCost: "10",
       costCurrency: "ARS",
@@ -558,132 +558,45 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
       locationId,
       custodianId: ownerId,
       preparedBy: stagerId,
-      evidence: { note: "Synthetic same-capture D_Stock opening" },
+      evidence: { note: "D_Stock does not establish a physical opening checkpoint" },
       sourceRecordId: historySourceRecordId,
     });
     const openingAuthorityBefore = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
-    const openingAuthorityObjectBefore = await db.operationObject.findUnique({ where: { id: "operations" } });
     const inactiveSkuBeforeOpening = await db.catalogSku.findUniqueOrThrow({ where: { id: canonicalSku.id } });
-    const inactiveSkuObjectBeforeOpening = await db.operationObject.findUniqueOrThrow({ where: { id: canonicalSku.id } });
-    assert.equal(openingAuthorityBefore.mode, "shadow", "la apertura se prepara antes de la primera activación");
-    assert.equal(inactiveSkuBeforeOpening.active, false, "la apertura precede la activación del SKU canónico");
-    const openingAuthorityForOpening = await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } });
-    const openedStock = await call("/operations/commands", openingRequest);
-    assert.equal(openedStock.response.status, 200, JSON.stringify(openedStock.body));
-    assert.equal(openedStock.body.result.lot.id, openingLotId);
-    assert.equal(openedStock.body.result.lot.skuId, canonicalSku.id);
-    assert.equal(openedStock.body.result.lot.unit, "g");
-    assert.equal(openedStock.body.result.balance.lotId, openingLotId);
-    assert.equal(openedStock.body.result.balance.quantity, "5");
-    assert.ok(new Prisma.Decimal(openedStock.body.result.opening.quantity).eq("5"), "la apertura debe conservar exactamente 5 g");
-    assert.equal(openedStock.body.result.opening.preparedBy, stagerId);
-    assert.equal(openedStock.body.result.opening.approvedBy, ownerId);
-    const openingReceipt = await db.commandReceipt.findUniqueOrThrow({ where: { requestId: openingRequest.requestId } });
-    assert.equal(openingReceipt.actorId, ownerId);
-    assert.equal(openingReceipt.targetId, openingLotId);
-    assert.equal(openingReceipt.command, "StockOpeningRecorded");
-    assert.equal(openingReceipt.bodyHash, canonicalCommandBodyHash(openingRequest));
-    assert.equal(openingReceipt.resultingVersion, 1);
-    const openingFacts = await db.stockFact.findMany({ where: { requestId: openingRequest.requestId } });
-    assert.equal(openingFacts.length, 1);
-    assert.equal(openingFacts[0]!.kind, "opening");
-    assert.equal(openingFacts[0]!.lotId, openingLotId);
-    assert.equal(openingFacts[0]!.sourceRecordId, historySourceRecordId);
-    assert.equal(openingFacts[0]!.quantity.toString(), "5");
-    assert.equal(openingFacts[0]!.unit, "g");
-    assert.equal(openingFacts[0]!.toLocationId, locationId);
-    assert.equal(openingFacts[0]!.toCustodianId, ownerId);
-    assert.equal(openingFacts[0]!.reason, "independently_reconciled_stock_opening");
-    assert.equal(await db.legacySourceRecord.count({ where: { id: historySourceRecordId, sourceTable: "D_Stock" } }), 1);
-    assert.equal(await db.stockFact.count({ where: { sourceRecordId: historySourceRecordId, kind: "opening" } }), 1);
-    const reviewedOpeningSource = await db.legacySourceRecord.findUniqueOrThrow({ where: { id: historySourceRecordId }, include: { snapshot: true } });
-    assert.equal(reviewedOpeningSource.snapshot.captureManifestId, canonicalCapture.captureId);
-    assert.equal(reviewedOpeningSource.snapshot.status, "reviewed");
-    assert.equal(reviewedOpeningSource.snapshot.reviewedBy, ownerId);
-    assert.equal(await db.operationObject.findUniqueOrThrow({ where: { id: openingLotId } }).then(row => row.version), 1);
-    assert.equal(await db.operationAudit.count({ where: { requestId: openingRequest.requestId } }), 2,
-      "la apertura conserva auditoría del efecto y del comando");
-    assert.equal(await db.operationOutbox.count({ where: { requestId: openingRequest.requestId } }), 1);
-    assert.deepEqual(await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } }), openingAuthorityForOpening,
-      "la apertura no activa ni modifica la autoridad");
-    assert.deepEqual(await db.operationObject.findUnique({ where: { id: "operations" } }), openingAuthorityObjectBefore);
-    assert.deepEqual(await db.catalogSku.findUniqueOrThrow({ where: { id: canonicalSku.id } }), inactiveSkuBeforeOpening);
-    assert.deepEqual(await db.operationObject.findUniqueOrThrow({ where: { id: canonicalSku.id } }), inactiveSkuObjectBeforeOpening);
-
-    const openingEffectsAfterFirst = async () => ({
+    assert.equal(openingAuthorityBefore.mode, "shadow", "la autoridad todavía no está activada");
+    assert.equal(inactiveSkuBeforeOpening.active, false, "el SKU canónico todavía no está activado");
+    const openingEffects = async () => ({
       authority: await db.operationAuthority.findUniqueOrThrow({ where: { id: "operations" } }),
-      authorityObject: await db.operationObject.findUnique({ where: { id: "operations" } }),
       sku: await db.catalogSku.findUniqueOrThrow({ where: { id: canonicalSku.id } }),
-      skuObject: await db.operationObject.findUniqueOrThrow({ where: { id: canonicalSku.id } }),
-      lot: await db.inventoryLot.findUniqueOrThrow({ where: { id: openingLotId } }),
-      lotObject: await db.operationObject.findUniqueOrThrow({ where: { id: openingLotId } }),
+      objects: await db.operationObject.findMany({ where: { id: { in: ["operations", canonicalSku.id, openingLotId] } }, orderBy: { id: "asc" } }),
+      lot: await db.inventoryLot.findUnique({ where: { id: openingLotId } }),
       balances: await db.stockBalance.findMany({ where: { lotId: openingLotId }, orderBy: { id: "asc" } }),
-      facts: await db.stockFact.findMany({ where: { sourceRecordId: historySourceRecordId }, orderBy: { id: "asc" } }),
-      receipt: await db.commandReceipt.findUniqueOrThrow({ where: { requestId: openingRequest.requestId } }),
+      facts: await db.stockFact.findMany({ where: { OR: [{ requestId: openingRequest.requestId }, { sourceRecordId: historySourceRecordId }] }, orderBy: { id: "asc" } }),
+      receipt: await db.commandReceipt.findUnique({ where: { requestId: openingRequest.requestId } }),
       audits: await db.operationAudit.findMany({ where: { requestId: openingRequest.requestId }, orderBy: [{ action: "asc" }, { id: "asc" }] }),
       outbox: await db.operationOutbox.findMany({ where: { requestId: openingRequest.requestId }, orderBy: { id: "asc" } }),
-      activationReceipts: await db.commandReceipt.count({ where: { targetId: "operations", command: "AuthorityActivated" } }),
-      skuActivationAudits: await db.operationAudit.count({ where: { objectId: canonicalSku.id, action: "appsheet.canonical_sku_activated" } }),
     });
-    const openingStateBeforeReplay = await openingEffectsAfterFirst();
-    assert.equal(openingStateBeforeReplay.sku.active, false);
-    assert.equal(openingStateBeforeReplay.skuObject.version, 0);
-    assert.equal(openingStateBeforeReplay.authority.mode, "shadow");
-    assert.equal(openingStateBeforeReplay.authority.epoch, openingAuthorityForOpening.epoch);
-    assert.equal(openingStateBeforeReplay.activationReceipts, 0);
-    assert.equal(openingStateBeforeReplay.skuActivationAudits, 0);
-    const exactOpeningReplay = await call("/operations/commands", openingRequest);
-    assert.equal(exactOpeningReplay.response.status, 200, JSON.stringify(exactOpeningReplay.body));
-    assert.equal(exactOpeningReplay.body.replay, true, "el reintento exacto recupera el recibo existente");
-    assert.deepEqual(exactOpeningReplay.body.result, openedStock.body.result);
-    assert.deepEqual(await openingEffectsAfterFirst(), openingStateBeforeReplay, "el replay no duplica lote, saldo, hecho, recibo, auditoría ni outbox");
+    const openingEffectsBefore = await openingEffects();
+    assert.equal(openingEffectsBefore.lot, null);
+    assert.deepEqual(openingEffectsBefore.balances, []);
+    assert.deepEqual(openingEffectsBefore.facts, []);
+    assert.equal(openingEffectsBefore.objects.some(object => object.id === openingLotId), false);
+    assert.equal(openingEffectsBefore.receipt, null);
+    assert.deepEqual(openingEffectsBefore.audits, []);
+    assert.deepEqual(openingEffectsBefore.outbox, []);
+    const rejectedOpening = await call("/operations/commands", openingRequest);
+    assert.equal(rejectedOpening.response.status, 423, JSON.stringify(rejectedOpening.body));
+    assert.equal(rejectedOpening.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
+    assert.deepEqual(rejectedOpening.body.details?.blockers, ["stock_opening_balance_checkpoint_unavailable"]);
+    assert.deepEqual(await openingEffects(), openingEffectsBefore,
+      "D_Stock sin regla de saldo físico no crea lote, balance, hecho, objeto, recibo, auditoría ni outbox");
 
-    const changedOpeningRequest = structuredClone(openingRequest);
-    changedOpeningRequest.data.evidence = { note: "Changed evidence under the same request ID" };
-    assert.notEqual(canonicalCommandBodyHash(changedOpeningRequest), canonicalCommandBodyHash(openingRequest));
-    const changedOpeningReplay = await call("/operations/commands", changedOpeningRequest);
-    assert.equal(changedOpeningReplay.response.status, 409, JSON.stringify(changedOpeningReplay.body));
-    assert.equal(changedOpeningReplay.body.code, "IDEMPOTENCY_KEY_REUSED");
-    assert.equal(changedOpeningReplay.body.result, undefined, "el body distinto no revela el recibo previo");
-    assert.deepEqual(await openingEffectsAfterFirst(), openingStateBeforeReplay, "el UUID reutilizado con otro body no escribe");
-
-    const reviewedFinalDeltaGate = await db.cutoverGate.findUniqueOrThrow({ where: { id: "final-delta-reconciled" } });
-    const publicationBeforeReplayGateChange = await db.legacyHistoryPublication.findUniqueOrThrow({
-      where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM },
-    });
-    await db.cutoverGate.update({ where: { id: "final-delta-reconciled" }, data: { status: "pending" } });
-    try {
-      const replayAfterGateRevocation = await call("/operations/commands", openingRequest);
-      assert.equal(replayAfterGateRevocation.response.status, 200, JSON.stringify(replayAfterGateRevocation.body));
-      assert.equal(replayAfterGateRevocation.body.replay, true,
-        "un recibo propio exacto sigue recuperable aunque cambie la evidencia viva del gate");
-      assert.deepEqual(replayAfterGateRevocation.body.result, openedStock.body.result);
-      assert.deepEqual(await openingEffectsAfterFirst(), openingStateBeforeReplay,
-        "recuperar el recibo con el gate pendiente no duplica ni modifica efectos");
-
-      const newOpeningWithSameData = structuredClone(openingRequest);
-      newOpeningWithSameData.requestId = randomUUID();
-      newOpeningWithSameData.targetId = `${openingLotId}-new-request`;
-      assert.deepEqual(newOpeningWithSameData.data, openingRequest.data);
-      const deniedByPendingGate = await call("/operations/commands", newOpeningWithSameData);
-      assert.equal(deniedByPendingGate.response.status, 423, JSON.stringify(deniedByPendingGate.body));
-      assert.equal(deniedByPendingGate.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
-      assert.deepEqual(deniedByPendingGate.body.details?.blockers, ["final_delta_gate_missing_or_invalid"]);
-      assert.equal(await db.operationObject.findUnique({ where: { id: newOpeningWithSameData.targetId } }), null);
-      assert.equal(await db.commandReceipt.count({ where: { requestId: newOpeningWithSameData.requestId } }), 0);
-      assert.equal(await db.operationAudit.count({ where: { requestId: newOpeningWithSameData.requestId } }), 0);
-      assert.equal(await db.operationOutbox.count({ where: { requestId: newOpeningWithSameData.requestId } }), 0);
-      assert.deepEqual(await openingEffectsAfterFirst(), openingStateBeforeReplay,
-        "un requestId nuevo sigue fail-closed y no vuelve a consumir ni alterar la apertura");
-      assert.deepEqual(await db.legacyHistoryPublication.findUniqueOrThrow({
-        where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM },
-      }), publicationBeforeReplayGateChange, "la prueba del replay no muta la publicación histórica");
-    } finally {
-      await db.cutoverGate.update({
-        where: { id: "final-delta-reconciled" },
-        data: { status: reviewedFinalDeltaGate.status },
-      });
-    }
+    const rejectedOpeningRetry = await call("/operations/commands", openingRequest);
+    assert.equal(rejectedOpeningRetry.response.status, 423, JSON.stringify(rejectedOpeningRetry.body));
+    assert.equal(rejectedOpeningRetry.body.code, "APPSHEET_REPLACEMENT_NOT_READY");
+    assert.deepEqual(rejectedOpeningRetry.body.details?.blockers, ["stock_opening_balance_checkpoint_unavailable"]);
+    assert.deepEqual(await openingEffects(), openingEffectsBefore,
+      "el reintento de la apertura rechazada tampoco deja efectos ni recibo idempotente");
     // This isolated database transition enables post-activation consumer checks;
     // it is not a replay or proof of the AuthorityActivated command and its gates.
     await db.operationAuthority.update({ where: { id: "operations" }, data: { mode: "active", epoch: 3 } });

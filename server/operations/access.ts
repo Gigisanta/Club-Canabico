@@ -6,7 +6,7 @@ import { profileCapabilities, cutoverGateIds, cutoverProfiles, type Capability, 
 import { canonicalJson } from "../../shared/operations/exact.js";
 import { APPSHEET_CANONICAL_SOURCE_SYSTEM, APPSHEET_CANONICAL_MAPPING_ID, APPSHEET_CANONICAL_IMPORTER_VERSION, APPSHEET_CANONICAL_SCHEMA_VERSION, prepareAppSheetCaptureManifest } from "../../shared/operations/appsheet-canonical.js";
 import { APPSHEET_HISTORY_MAPPING_ID, APPSHEET_HISTORY_SOURCE_SYSTEM, APPSHEET_HISTORY_IMPORTER_VERSION,
- appSheetHistoryStageHasBoundTechnicalReview } from "../../shared/operations/appsheet-history.js";
+ appSheetHistoryRule, appSheetHistoryStageHasBoundTechnicalReview } from "../../shared/operations/appsheet-history.js";
 import { appSheetDefinitionInventorySchema } from "../../shared/operations/appsheet-definition.js";
 import { APPSHEET_EXPECTED_LIVE_APP_ID, appSheetAppliedDefinitionHash, appSheetCanonicalCurrentDestinationHash } from "./appsheet-canonical.js";
 import { appSheetDatabaseDestinationIdentity } from "./appsheet-database-target.js";
@@ -1152,7 +1152,7 @@ export async function requireAppSheetOpeningSourceRecord(ctx:CommandContext,sour
  if(!reviewer?.active)throw appSheetReadinessError("opening_source_reviewer_inactive");
  const [publication,fact,openExceptions]=await Promise.all([
   ctx.tx.legacyHistoryPublication.findUnique({where:{sourceSystem:APPSHEET_HISTORY_SOURCE_SYSTEM}}),
-  ctx.tx.legacyHistoricalFact.findFirst({where:{snapshotId:source.snapshotId,sourceRecordId:source.id,mappingId:APPSHEET_HISTORY_MAPPING_ID,correctionOf:null},select:{sourceHash:true,kind:true,amountMinor:true,amountState:true,currency:true,currencyState:true,quantity:true,quantityState:true,unit:true,unitState:true,attributes:true}}),
+  ctx.tx.legacyHistoricalFact.findFirst({where:{snapshotId:source.snapshotId,sourceRecordId:source.id,mappingId:APPSHEET_HISTORY_MAPPING_ID,correctionOf:null},select:{sourceHash:true,sourceTable:true,kind:true,amountMinor:true,amountState:true,currency:true,currencyState:true,quantity:true,quantityState:true,unit:true,unitState:true,attributes:true}}),
   ctx.tx.legacyException.count({where:{snapshotId:source.snapshotId,sourceRecordId:source.id,status:"open"}}),
  ]);
  const countLinkedOpeningEffects=()=>expected.kind==="cash"
@@ -1165,6 +1165,12 @@ export async function requireAppSheetOpeningSourceRecord(ctx:CommandContext,sour
   throw appSheetReadinessError("cash_opening_balance_checkpoint_unavailable");
  }else{
   if(source.sourceTable==="Mov_Stock1")throw appSheetReadinessError("stock_opening_source_is_ledger_movement");
+  if(fact.sourceTable!==source.sourceTable)throw appSheetReadinessError("stock_opening_source_table_mismatch");
+  if(fact.kind!=="stock")throw appSheetReadinessError("stock_opening_source_fact_kind_mismatch");
+  // Unknown mappings and generic stock facts do not prove a physical opening checkpoint.
+  const sourceRule=appSheetHistoryRule(source.sourceTable);
+  if(!sourceRule)throw appSheetReadinessError("stock_opening_balance_checkpoint_unavailable");
+  if(sourceRule.kind!=="stock"||sourceRule.kind!==fact.kind)throw appSheetReadinessError("stock_opening_source_mapping_mismatch");
   if(fact.quantityState!=="known"||fact.unitState!=="known"||!fact.quantity?.equals(expected.quantity??"")||fact.unit!==expected.unit)
    throw appSheetReadinessError("stock_opening_source_quantity_or_unit_mismatch");
   const attributes=asJsonObject(fact.attributes),relationships=attributes&&Array.isArray(attributes.relationships)?attributes.relationships.map(asJsonObject):[];
