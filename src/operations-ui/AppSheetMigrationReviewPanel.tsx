@@ -43,6 +43,13 @@ type DestinationPreviewState =
   | { status: "idle" | "loading" }
   | { status: "error"; message: string }
   | { status: "ready"; preview: DestinationPreview };
+type UncertainDestinationSubmission = Readonly<{
+  command: "AppSheetPendingImportDestinationReviewed";
+  targetId: string;
+  expectedVersion: number;
+  data: JsonRecord;
+  pendingDeliveryCount: number | null;
+}>;
 
 const commandLabels: Record<ReviewCommand, string> = {
   AppSheetHistorySourceReviewed: "Registrar revisión de origen AppSheet",
@@ -62,6 +69,28 @@ const commandKinds: Record<ReviewCommand, string> = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function freezeJson(value: unknown): void {
+  if (Array.isArray(value)) {
+    value.forEach(freezeJson);
+    Object.freeze(value);
+  } else if (isRecord(value)) {
+    Object.values(value).forEach(freezeJson);
+    Object.freeze(value);
+  }
+}
+
+function snapshotDestinationSubmission(
+  command: UncertainDestinationSubmission["command"],
+  targetId: string,
+  expectedVersion: number,
+  data: JsonRecord,
+  pendingDeliveryCount: number | null,
+): UncertainDestinationSubmission {
+  const snapshotData = JSON.parse(JSON.stringify(data)) as JsonRecord;
+  freezeJson(snapshotData);
+  return Object.freeze({ command, targetId, expectedVersion, data: snapshotData, pendingDeliveryCount });
 }
 
 function containsForbiddenEnvelopeFields(value: unknown): boolean {
@@ -262,8 +291,22 @@ export function AppSheetMigrationReviewPanel({ context, runCommand, onRefresh, o
   const [error, setError] = useState("");
   const [destinationPreview, setDestinationPreview] = useState<DestinationPreviewState>({ status: "idle" });
   const [previewReloadToken, setPreviewReloadToken] = useState(0);
+  const [uncertainSubmission, setUncertainSubmission] = useState<UncertainDestinationSubmission | null>(null);
+  const uncertainSubmissionRef = useRef<UncertainDestinationSubmission | null>(null);
+  const commandInFlightRef = useRef(false);
   const previewGeneration = useRef(0);
   const canReview = hasCapability(context, "imports.review");
+
+  function preserveUncertainSubmission(submission: UncertainDestinationSubmission) {
+    if (uncertainSubmissionRef.current) return;
+    uncertainSubmissionRef.current = submission;
+    setUncertainSubmission(submission);
+  }
+
+  function clearUncertainSubmission() {
+    uncertainSubmissionRef.current = null;
+    setUncertainSubmission(null);
+  }
 
   useEffect(() => {
     if (!canReview || draft?.command !== "AppSheetPendingImportDestinationReviewed") {
@@ -316,7 +359,13 @@ export function AppSheetMigrationReviewPanel({ context, runCommand, onRefresh, o
     destinationPreview.preview.dispositionHash === previewReview.dispositionHash &&
     destinationPreview.preview.destinationHash === previewReview.destinationHash
   );
-  const destinationReviewReady = draft?.command !== "AppSheetPendingImportDestinationReviewed" || previewMatchesDraft;
+  const uncertainDestinationReplay = uncertainSubmission && draft?.command === uncertainSubmission.command &&
+    draft.targetId === uncertainSubmission.targetId && draft.expectedVersion === uncertainSubmission.expectedVersion
+    ? uncertainSubmission
+    : null;
+  const destinationReviewReady = uncertainSubmission
+    ? Boolean(uncertainDestinationReplay)
+    : draft?.command !== "AppSheetPendingImportDestinationReviewed" || previewMatchesDraft;
 
   async function loadReviewPlan(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] ?? null;
@@ -337,6 +386,10 @@ export function AppSheetMigrationReviewPanel({ context, runCommand, onRefresh, o
       if (containsForbiddenEnvelopeFields(parsed.data)) throw new Error("review_plan_private_fields_invalid");
       if (parsed.command === "AppSheetHistorySourceReviewed" && parsed.data.evidenceReference !== undefined &&
           typeof parsed.data.evidenceReference !== "string") throw new Error("review_plan_json_invalid");
+      if (commandInFlightRef.current || uncertainSubmissionRef.current) {
+        setError("El resultado del comando anterior sigue pendiente. Recuperá su comprobante antes de cargar otro plan.");
+        return;
+      }
       setDestinationPreview(parsed.command === "AppSheetPendingImportDestinationReviewed" ? { status: "loading" } : { status: "idle" });
       setDraft(parsed);
       setFilename(file.name);
@@ -351,12 +404,13 @@ export function AppSheetMigrationReviewPanel({ context, runCommand, onRefresh, o
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!draft || !canReview || !draftCommandAvailable || busy) return;
-    if (!destinationReviewReady) {
+    if (!draft || !canReview || !draftCommandAvailable || busy || commandInFlightRef.current) return;
+    if (uncertainSubmission && !uncertainDestinationReplay) return;
+    if (!uncertainDestinationReplay && !destinationReviewReady) {
       setError("La vista previa del lote no coincide con este plan. Actualizá la vista previa o cargá el plan vigente; no se envió el comando.");
       return;
     }
-    if (evidenceIssues.length) {
+    if (!uncertainDestinationReplay && evidenceIssues.length) {
       setError("La evidencia supera el límite aceptado por el servidor. Corregí el archivo del plan antes de registrarlo; no se envió el comando.");
       return;
     }
@@ -370,13 +424,25 @@ export function AppSheetMigrationReviewPanel({ context, runCommand, onRefresh, o
       data.evidenceReference = evidenceReference;
     }
 
-    const pendingDeliveryCount = destinationPreview.status === "ready"
-      ? destinationPreview.preview.pendingDeliveryAssignmentCount
-      : null;
+    const pendingDeliveryCount = uncertainDestinationReplay
+      ? uncertainDestinationReplay.pendingDeliveryCount
+      : destinationPreview.status === "ready"
+        ? destinationPreview.preview.pendingDeliveryAssignmentCount
+        : null;
+    const submission = uncertainDestinationReplay ?? (draft.command === "AppSheetPendingImportDestinationReviewed"
+      ? snapshotDestinationSubmission(draft.command, draft.targetId, draft.expectedVersion, data, pendingDeliveryCount)
+      : null);
+    commandInFlightRef.current = true;
     setBusy(true);
     setError("");
     try {
-      await runCommand(draft.command, draft.targetId, draft.expectedVersion, data);
+      await runCommand(
+        submission?.command ?? draft.command,
+        submission?.targetId ?? draft.targetId,
+        submission?.expectedVersion ?? draft.expectedVersion,
+        submission?.data ?? data,
+      );
+      clearUncertainSubmission();
       setDraft(null);
       setFilename("");
       setSourceEvidence("");
@@ -392,14 +458,20 @@ export function AppSheetMigrationReviewPanel({ context, runCommand, onRefresh, o
       onNotice(notice);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : "No se pudo registrar la revisión.";
-      if (cause instanceof OperationsApiError && cause.code === "VERSION_CONFLICT") {
+      if (uncertainDestinationReplay) {
+        setError(`${message} El resultado del reintento sigue pendiente. Se conserva el comando exacto para volver a recuperar el comprobante cuando la autorización esté disponible.`);
+      } else if (cause instanceof OperationsApiError && cause.code === "VERSION_CONFLICT") {
+        clearUncertainSubmission();
         setError(`${message} Se conserva este borrador; verificá la versión actual y cargá el plan actualizado antes de volver a registrar.`);
       } else if (isUncertainCommandOutcome(cause)) {
+        if (submission) preserveUncertainSubmission(submission);
         setError(`${message} Se conserva el borrador para reintentar exactamente el mismo comando con el mismo UUID mientras esta vista siga abierta. Si se recargó, verificá el estado y cargá el plan vigente.`);
       } else {
+        clearUncertainSubmission();
         setError(`${message} Se conserva el borrador para corregirlo o reintentar.`);
       }
     } finally {
+      commandInFlightRef.current = false;
       setBusy(false);
     }
   }
@@ -417,7 +489,7 @@ export function AppSheetMigrationReviewPanel({ context, runCommand, onRefresh, o
       : <>
         <label className="ops-field ops-file-field">
           <span>Plan JSON de revisión (máximo 100 KB)</span>
-          <input ref={fileInput} type="file" accept="application/json,.json" disabled={busy} onChange={event => void loadReviewPlan(event)} />
+          <input ref={fileInput} type="file" accept="application/json,.json" disabled={busy || Boolean(uncertainSubmission)} onChange={event => void loadReviewPlan(event)} />
           <small>El archivo sólo prepara una revisión. No puede elegir la persona revisora ni el UUID del comando.</small>
         </label>
         {filename && <p className="ops-muted-copy">Plan cargado: <strong>{filename}</strong></p>}
@@ -437,9 +509,12 @@ export function AppSheetMigrationReviewPanel({ context, runCommand, onRefresh, o
           {!draftCommandAvailable && <InfoBand tone="blocked" title="Acción no disponible para esta sesión"><p>El plan se conserva, pero el servidor no ofrece ese comando con el permiso actual.</p></InfoBand>}
           {draft.command === "AppSheetHistorySourceReviewed" && <InfoBand tone="warning" title="Revisión de origen, separada del archivo auxiliar"><p>Esta acción registra la revisión de la captura AppSheet. No clasifica un archivo como archivo auxiliar, no publica historia y no ejecuta una importación.</p></InfoBand>}
           {draft.command === "AppSheetPendingImportDestinationReviewed" && <InfoBand tone="warning" title="Esta revisión crea entregas pendientes"><p>Al registrar la revisión, el servidor revisa el lote y sus rendiciones y crea asignaciones de entrega pendientes con sus objetos operativos. No despacha pedidos, cobra ni confirma entregas.</p></InfoBand>}
+          {uncertainDestinationReplay && <InfoBand tone="warning" title="Hay una revisión anterior sin comprobante confirmado"><p>Se conserva el comando exacto que ya se envió. El reintento recupera su comprobante con el mismo UUID aunque la vista previa ya no esté disponible; no cargues otro plan hasta resolverlo.</p></InfoBand>}
           {draft.command === "AppSheetPendingImportDestinationReviewed" && <div className="ops-review-destination-preview" aria-label="Vista previa autenticada del destino">
             {destinationPreview.status === "loading" && <InfoBand tone="info" title="Consultando el destino"><p>No se puede registrar la revisión hasta verificar en el servidor el lote, su versión y sus conteos actuales.</p></InfoBand>}
-            {destinationPreview.status === "error" && <InfoBand tone="blocked" title="No se pudo verificar el destino"><p>{destinationPreview.message} No se envió ningún comando.</p></InfoBand>}
+            {destinationPreview.status === "error" && <InfoBand tone="blocked" title="No se pudo verificar el destino"><p>{destinationPreview.message} {uncertainDestinationReplay
+              ? "La revisión anterior puede haberse registrado; el botón repetirá exactamente ese comando para recuperar su comprobante."
+              : "No se envió ningún comando."}</p></InfoBand>}
             {destinationPreview.status === "ready" && <>
               <div className="ops-import-progress" aria-label="Datos actuales del destino en el servidor">
                 {([
@@ -457,7 +532,9 @@ export function AppSheetMigrationReviewPanel({ context, runCommand, onRefresh, o
                   ["Entregas pendientes que se crearán", destinationPreview.preview.pendingDeliveryAssignmentCount],
                 ] as Array<[string, string | number]>).map(([label, value]) => <div key={label}><span>{label}</span><code>{value}</code></div>)}
               </div>
-              {previewMatchesDraft
+              {uncertainDestinationReplay
+                ? <InfoBand tone="warning" title="Se repetirá la revisión pendiente"><p>La vista previa actual no cambiará el comando que ya se envió. El próximo intento conserva los datos validados, la versión esperada y el mismo UUID.</p></InfoBand>
+                : previewMatchesDraft
                 ? <InfoBand tone="info" title="La vista previa coincide con el plan"><p>El lote, la versión, la captura y los hashes comprobados coinciden con el destino actual consultado al servidor. El comando vuelve a validar los demás vínculos antes de escribir.</p></InfoBand>
                 : <InfoBand tone="blocked" title="El plan no coincide con el destino actual"><p>No se registrará la revisión. Actualizá la vista previa o cargá el plan vigente; esta revisión requiere que versión, captura y hashes coincidan.</p></InfoBand>}
             </>}
@@ -478,7 +555,7 @@ export function AppSheetMigrationReviewPanel({ context, runCommand, onRefresh, o
           <form className="ops-form-grid" onSubmit={event => void submit(event)}>
             {draft.command === "AppSheetHistorySourceReviewed" && <label className="ops-field ops-file-field">
               <span>Evidencia de la revisión de origen</span>
-              <textarea value={sourceEvidence} onChange={event => setSourceEvidence(event.target.value)} maxLength={2_000} required disabled={busy} />
+              <textarea value={sourceEvidence} onChange={event => setSourceEvidence(event.target.value)} maxLength={2_000} required disabled={busy || Boolean(uncertainSubmission)} />
               <small>{typeof draft.data.evidenceReference === "string" ? "Se cargó la referencia del archivo; revisala. Si la cambiás, el texto nuevo se enviará de forma explícita." : "Agregá una referencia breve, sin credenciales ni tokens."}</small>
             </label>}
             <div className="ops-upload-foot">

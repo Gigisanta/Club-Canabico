@@ -575,6 +575,39 @@ test("la revisión de destino AppSheet muestra vista previa, bloquea planes obso
   expect(commandPosts).toHaveLength(2);
   await page.unroute("**/api/operations/commands", loseDestinationAcknowledgement);
 
+  const failedRefresh = page.waitForResponse(response =>
+    response.request().method() === "GET" && new URL(response.url()).pathname.endsWith("/review-preview"));
+  await page.getByRole("button", { name: "Actualizar vista previa" }).click();
+  expect((await failedRefresh).status()).toBe(423);
+  await expect(page.getByText("No se pudo verificar el destino", { exact: false })).toBeVisible();
+  await expect(page.getByLabel("Plan JSON de revisión (máximo 100 KB)")).toBeDisabled();
+  await expect(submit).toBeEnabled();
+  expect(commandPosts).toHaveLength(2);
+
+  const committedStateBeforeRevocation = await destinationState(scenario.batchId, scenario.snapshotId, scenario.orderId);
+  const destinationGrant = await db.operationAccess.findUniqueOrThrow({ where: { userId: scenario.actorIds.destinationReviewer } });
+  expect(destinationGrant.capabilities).toEqual(["imports.write", "imports.review"]);
+  try {
+    await db.operationAccess.update({ where: { userId: scenario.actorIds.destinationReviewer }, data: {
+      capabilities: ["imports.write"],
+    } });
+    const revokedReplayResponsePromise = page.waitForResponse(response =>
+      response.request().method() === "POST" && response.url().endsWith("/api/operations/commands") &&
+      response.request().postDataJSON().command === "AppSheetPendingImportDestinationReviewed");
+    await submit.click();
+    const revokedReplayResponse = await revokedReplayResponsePromise;
+    expect(revokedReplayResponse.status()).toBe(403);
+    expect((await revokedReplayResponse.json() as Record<string, unknown>).code).toBe("CAPABILITY_REQUIRED");
+    expect(await destinationState(scenario.batchId, scenario.snapshotId, scenario.orderId)).toEqual(committedStateBeforeRevocation);
+    expect(commandPosts).toHaveLength(3);
+    expect(commandPosts[2]).toEqual(commandPosts[1]);
+    await expect(submit).toBeEnabled();
+  } finally {
+    await db.operationAccess.update({ where: { userId: scenario.actorIds.destinationReviewer }, data: {
+      capabilities: destinationGrant.capabilities,
+    } });
+  }
+
   const replayResponsePromise = page.waitForResponse(response =>
     response.request().method() === "POST" && response.url().endsWith("/api/operations/commands") &&
     response.request().postDataJSON().command === "AppSheetPendingImportDestinationReviewed");
@@ -584,9 +617,12 @@ test("la revisión de destino AppSheet muestra vista previa, bloquea planes obso
   const replay = await replayResponse.json() as Record<string, unknown>;
   expect(replay.replay).toBe(true);
   expect(replay.requestId).toBe(firstAcknowledgementRequestId);
-  expect(commandPosts).toHaveLength(3);
+  expect(commandPosts).toHaveLength(4);
   expect(commandPosts[1]!.requestId).toBe(firstAcknowledgementRequestId);
   expect(commandPosts[2]!.requestId).toBe(firstAcknowledgementRequestId);
+  expect(commandPosts[3]!.requestId).toBe(firstAcknowledgementRequestId);
+  expect(commandPosts[2]).toEqual(commandPosts[1]);
+  expect(commandPosts[3]).toEqual(commandPosts[1]);
 
   const receipt = await db.commandReceipt.findUniqueOrThrow({ where: { requestId: firstAcknowledgementRequestId } });
   expect(receipt.actorId).toBe(scenario.actorIds.destinationReviewer);

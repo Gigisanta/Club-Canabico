@@ -161,6 +161,7 @@ function buildAppSheetInvoiceSnapshot(input:AppSheetInvoiceInput,skuById:Map<str
   return {
    id:line.id,skuId:sku?.id??line.skuId,unit,requested:line.quantity,unitPrice:formatDecimal(unitPriceScaled,12),
    referenceMinor:total.toString(),discountMinor:"0",revenueMinor:total.toString(),
+   ...(line.stockLotId?{stockLotId:line.stockLotId}:{}),
    appsheet:{date:line.date,scale:line.scale,explicitTotalMinor:total.toString(),...(line.pricePerGramMinor===undefined?{}:{pricePerGramMinor:line.pricePerGramMinor})},
   };
  });

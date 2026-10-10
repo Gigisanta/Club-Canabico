@@ -8,6 +8,7 @@ import {
   selectedDatabaseUrl,
 } from "./appsheet-history.js";
 import { AppSheetHistoryStageError } from "../server/operations/appsheet-history.js";
+import type { CommandEnvelope } from "../shared/operations/contracts.js";
 import { appSheetPendingImportReviewSchema } from "../shared/operations/appsheet-pending-import.js";
 
 const PRIVATE_DIR = ".local/appsheet-real-20261009";
@@ -133,9 +134,15 @@ export function appSheetPendingImportCommandEnvelope(input: {
   data: Record<string, unknown>;
   requestId: string;
   priorReceipt?: AppSheetPendingImportCommandReceipt | null;
-}) {
+}): CommandEnvelope {
   const prior = input.priorReceipt;
   const sameCommand = prior?.actorId === input.actorId && prior.targetId === input.targetId && prior.command === input.command;
+  const backupSnapshotAt = input.data.backupSnapshotAt;
+  const normalizesBackupSnapshotAt = input.command === "AppSheetPendingImportPlanReviewed" ||
+    input.command === "AppSheetPendingImportStaged";
+  const data = normalizesBackupSnapshotAt && backupSnapshotAt instanceof Date
+    ? { ...input.data, backupSnapshotAt: backupSnapshotAt.toISOString() }
+    : input.data;
   return {
     schemaVersion: 1,
     requestId: input.requestId,
@@ -143,7 +150,7 @@ export function appSheetPendingImportCommandEnvelope(input: {
     expectedVersion: sameCommand ? prior.resultingVersion - 1 : input.expectedVersion,
     occurredAt: sameCommand ? prior.occurredAt.toISOString() : new Date().toISOString(),
     command: input.command,
-    data: input.data,
+    data,
   };
 }
 

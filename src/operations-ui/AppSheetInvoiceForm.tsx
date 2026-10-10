@@ -15,7 +15,8 @@ type SourceLotLabelIdentity = { variety: string; description: string; purchaseLo
 type EditorMode = "invoice" | "preorder" | "edit-preorder" | "confirm-preorder";
 type Payment = "cash" | "transfer" | "mercado_pago" | "card";
 type NewMemberDraft = { name: string; email: string; phone: string; address: string };
-type InvoiceLineDraft = { id: string; skuId: string; sourceLotId: string; date: string; scale: string; quantity: string; total: string; pricePerGram: string; priceManual: boolean; totalManual: boolean };
+type InvoiceLineDraft = { id: string; skuId: string; sourceLotId: string; stockLotId: string; date: string; scale: string; quantity: string; total: string; pricePerGram: string; priceManual: boolean; totalManual: boolean };
+type ProductChoice = { value: string; skuId: string; sourceLotId: string; stockLotId: string; label: string; pending: boolean };
 type MotoDraft = {
   deliveryDate: string;
   paymentMethod: Payment;
@@ -88,15 +89,30 @@ function sourceLotOptions(item: Row | undefined): Row[] {
     catch { return false; }
   }) : [];
 }
-function sourceLotChoicePrefixes(nativeSkuIds: readonly string[]) {
+function nativeLotOptions(item: Row | undefined): Row[] {
+  const value = item?.appSheetNativeLots;
+  return Array.isArray(value) ? value.filter((row): row is Row => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+    const option = row as Row;
+    if (option.origin !== "bombo-goods-receipt" || typeof option.stockLotId !== "string" || !option.stockLotId.trim()) return false;
+    if (typeof option.availableQuantity !== "string") return false;
+    try { return parseQuantity(option.availableQuantity, "g") > 0n; }
+    catch { return false; }
+  }) : [];
+}
+function lotChoicePrefixes(nativeSkuIds: readonly string[]) {
   for (let suffix = 0; ; suffix += 1) {
     const sourceLot = `appsheet-source-lot:${suffix}:`;
+    const stockLot = `appsheet-stock-lot:${suffix}:`;
     const pending = `appsheet-source-lot-pending:${suffix}:`;
-    if (!nativeSkuIds.some(id => id.startsWith(sourceLot) || id.startsWith(pending))) return { sourceLot, pending };
+    if (!nativeSkuIds.some(id => id.startsWith(sourceLot) || id.startsWith(stockLot) || id.startsWith(pending))) return { sourceLot, stockLot, pending };
   }
 }
 function sourceLotChoice(prefix: string, skuId: string, sourceLotId: string) {
   return `${prefix}${encodeURIComponent(JSON.stringify([skuId, sourceLotId]))}`;
+}
+function nativeLotChoice(prefix: string, skuId: string, stockLotId: string) {
+  return `${prefix}${encodeURIComponent(JSON.stringify([skuId, stockLotId]))}`;
 }
 function pendingSourceLotChoice(prefix: string, skuId: string) {
   return `${prefix}${encodeURIComponent(skuId)}`;
@@ -152,7 +168,7 @@ function fromSnapshot(order: Row | undefined, fallbackDate: string): SnapshotDra
     const parsed = appsheetInvoiceLine.safeParse(value);
     if (!parsed.success || !parsed.data.id.trim() || lineIds.has(parsed.data.id)) return invalidLines;
     const stored = storedLines.get(parsed.data.id);
-    if (!stored || stored.skuId !== parsed.data.skuId || stored.unit !== "g" || stored.requested !== parsed.data.quantity ||
+    if (!stored || stored.skuId !== parsed.data.skuId || stored.stockLotId !== parsed.data.stockLotId || stored.unit !== "g" || stored.requested !== parsed.data.quantity ||
         stored.date !== parsed.data.date || stored.scale !== parsed.data.scale || stored.explicitTotalMinor !== parsed.data.totalMinor ||
         stored.referenceMinor !== parsed.data.totalMinor || stored.revenueMinor !== parsed.data.totalMinor ||
         stored.pricePerGramMinor !== parsed.data.pricePerGramMinor) return invalidLines;
@@ -160,7 +176,7 @@ function fromSnapshot(order: Row | undefined, fallbackDate: string): SnapshotDra
     originalLines.push(parsed.data);
   }
   const lines = originalLines.map(line => ({
-    id: line.id, skuId: line.skuId, sourceLotId: stringValue(line.sourceLotId), date: line.date,
+    id: line.id, skuId: line.skuId, sourceLotId: stringValue(line.sourceLotId), stockLotId: stringValue(line.stockLotId), date: line.date,
     scale: stringValue(line.scale), quantity: stringValue(line.quantity), total: minorToForm(line.totalMinor),
     pricePerGram: minorToForm(line.pricePerGramMinor), priceManual: true, totalManual: true,
   }));
@@ -228,6 +244,13 @@ function invoiceQuantityValid(value: string, replacementProfile: boolean) {
   if (!replacementProfile) return true;
   const quantity = Number(value.trim().replace(",", "."));
   return quantity >= 1 && quantity <= 99;
+}
+function samePreorderPriceInputs(current: InvoiceLineDraft, original: InvoiceLineDraft) {
+  if (current.skuId !== original.skuId || current.scale.trim() !== original.scale.trim()) return false;
+  try {
+    return parseQuantity(current.quantity.trim().replace(",", "."), "g") ===
+      parseQuantity(original.quantity.trim().replace(",", "."), "g");
+  } catch { return false; }
 }
 function invoiceSkuSelectable(item: Row, replacementProfile: boolean) {
   const available = objectValue(item.appSheet).availability;
@@ -371,7 +394,7 @@ export function AppSheetInvoiceForm(props: Props) {
   function openProduct(index?: number) {
     const existing = index === undefined ? null : draft.lines[index] ?? null;
     setProductIndex(index ?? null);
-    setProductDraft(existing ? { ...existing } : { id: crypto.randomUUID(), skuId: "", sourceLotId: "", date: draft.invoiceDate, scale: "", quantity: "", total: "", pricePerGram: "", priceManual: false, totalManual: false });
+    setProductDraft(existing ? { ...existing } : { id: crypto.randomUUID(), skuId: "", sourceLotId: "", stockLotId: "", date: draft.invoiceDate, scale: "", quantity: "", total: "", pricePerGram: "", priceManual: false, totalManual: false });
     setStage("product");
     setError("");
   }
@@ -407,10 +430,10 @@ export function AppSheetInvoiceForm(props: Props) {
     }
     return next;
   }
-  function updateProductField(field: "id" | "skuId" | "sourceLotId" | "date" | "scale" | "quantity" | "total" | "pricePerGram", value: string) {
+  function updateProductField(field: "id" | "skuId" | "sourceLotId" | "stockLotId" | "date" | "scale" | "quantity" | "total" | "pricePerGram", value: string) {
     setProductDraft(current => {
       if (!current) return current;
-      const updated: InvoiceLineDraft = { ...current, [field]: value, ...(field === "skuId" ? { sourceLotId: "" } : {}) };
+      const updated: InvoiceLineDraft = { ...current, [field]: value, ...(field === "skuId" ? { sourceLotId: "", stockLotId: "" } : {}) };
       if (field === "pricePerGram") return maybeSetInitialPricePerGram({ ...updated, priceManual: Boolean(value.trim()) });
       if (field === "total") return maybeSetInitialPricePerGram({ ...updated, totalManual: Boolean(value.trim()) });
       if (field === "skuId" || field === "scale" || field === "quantity") return maybeSetInitialPricePerGram(updated);
@@ -419,19 +442,19 @@ export function AppSheetInvoiceForm(props: Props) {
   }
   function selectProductChoice(value: string) {
     if (value === "") {
-      setProductDraft(current => current ? maybeSetInitialPricePerGram({ ...current, skuId: "", sourceLotId: "" }) : current);
+      setProductDraft(current => current ? maybeSetInitialPricePerGram({ ...current, skuId: "", sourceLotId: "", stockLotId: "" }) : current);
       return;
     }
     const matchingChoices = productChoices.filter(choice => choice.value === value);
     if (matchingChoices.length !== 1) {
       setError("La opción elegida ya no es única o vigente. Elegí nuevamente un artículo del catálogo.");
-      setProductDraft(current => current ? maybeSetInitialPricePerGram({ ...current, skuId: "", sourceLotId: "" }) : current);
+      setProductDraft(current => current ? maybeSetInitialPricePerGram({ ...current, skuId: "", sourceLotId: "", stockLotId: "" }) : current);
       return;
     }
     const choice = matchingChoices[0];
     setProductDraft(current => {
       if (!current) return current;
-      return maybeSetInitialPricePerGram({ ...current, skuId: choice.skuId, sourceLotId: choice.sourceLotId });
+      return maybeSetInitialPricePerGram({ ...current, skuId: choice.skuId, sourceLotId: choice.sourceLotId, stockLotId: choice.stockLotId });
     });
   }
   function cancelProduct() {
@@ -453,15 +476,28 @@ export function AppSheetInvoiceForm(props: Props) {
       setError("La variedad seleccionada ya no está disponible para nuevas líneas. Conservamos el borrador; elegí otra o verificá el catálogo antes de continuar.");
       return;
     }
-    const requiresSelectedSourceLot = activeReplacement && selected?.requiresAppSheetSourceLot === true && mode !== "preorder" && mode !== "edit-preorder";
+    const requiresSelectedLot = activeReplacement && selected?.requiresAppSheetSourceLot === true && mode !== "preorder" && mode !== "edit-preorder";
     const sourceLotOptionsForLine = sourceLotOptions(selected);
-    if (requiresSelectedSourceLot && (!submittedDraft.sourceLotId || !sourceLotOptionsForLine.some(option => stringValue(option.sourceLotId) === submittedDraft.sourceLotId))) {
-      setError("Elegí un lote de origen con disponibilidad actual para cada producto antes de guardar la factura.");
+    const nativeLotOptionsForLine = nativeLotOptions(selected);
+    const selectedSourceLotIsAvailable = Boolean(submittedDraft.sourceLotId && sourceLotOptionsForLine.some(option => stringValue(option.sourceLotId) === submittedDraft.sourceLotId));
+    const selectedNativeLotIsAvailable = Boolean(submittedDraft.stockLotId && nativeLotOptionsForLine.some(option => stringValue(option.stockLotId) === submittedDraft.stockLotId));
+    if (requiresSelectedLot && !selectedSourceLotIsAvailable && !selectedNativeLotIsAvailable) {
+      setError("Elegí un lote con disponibilidad actual para cada producto antes de guardar la factura.");
+      return;
+    }
+    if (submittedDraft.sourceLotId && submittedDraft.stockLotId) {
+      setError("Elegí un lote histórico AppSheet o un lote recibido por Bombo, no ambos.");
       return;
     }
     if (activeReplacement && submittedDraft.sourceLotId && (selectedCatalogProduct?.requiresAppSheetSourceLot !== true || !sourceLotOptions(selectedCatalogProduct).some(option => stringValue(option.sourceLotId) === submittedDraft.sourceLotId))) {
       setError(selectedCatalogProduct?.requiresAppSheetSourceLot === true
         ? "El lote guardado ya no tiene disponibilidad actual. Elegí otro o dejá la selección vacía para resolverlo al editar la preventa."
+        : "La referencia de lote no está disponible para esta variedad. Volvé a elegir una opción vigente.");
+      return;
+    }
+    if (activeReplacement && submittedDraft.stockLotId && (selectedCatalogProduct?.requiresAppSheetSourceLot !== true || !nativeLotOptions(selectedCatalogProduct).some(option => stringValue(option.stockLotId) === submittedDraft.stockLotId))) {
+      setError(selectedCatalogProduct?.requiresAppSheetSourceLot === true
+        ? "El lote recibido por Bombo ya no tiene disponibilidad actual. Elegí otro o dejá la selección vacía para resolverlo al editar la preventa."
         : "La referencia de lote no está disponible para esta variedad. Volvé a elegir una opción vigente.");
       return;
     }
@@ -595,7 +631,7 @@ export function AppSheetInvoiceForm(props: Props) {
       }
       const includePricePerGram = !preorder && (mode === "invoice" || mode === "edit-preorder") && line.pricePerGram.trim() !== "";
       const originalLine = initial.lines.find(original => original.id === line.id);
-      const preservedPreorderPrice = preorder && originalLine?.pricePerGram.trim()
+      const preservedPreorderPrice = preorder && originalLine && samePreorderPriceInputs(line, originalLine) && originalLine.pricePerGram.trim()
         ? amountFormToMinor(originalLine.pricePerGram)
         : undefined;
       const pricePerGramMinor = includePricePerGram
@@ -605,6 +641,7 @@ export function AppSheetInvoiceForm(props: Props) {
         id: line.id, skuId: line.skuId, date: line.date, scale: line.scale,
         quantity: line.quantity.trim().replace(",", "."), totalMinor: amountFormToMinor(line.total),
         ...(line.sourceLotId ? { sourceLotId: line.sourceLotId } : {}),
+        ...(line.stockLotId ? { stockLotId: line.stockLotId } : {}),
         ...(pricePerGramMinor === undefined ? {} : { pricePerGramMinor }),
       };
     });
@@ -662,11 +699,12 @@ export function AppSheetInvoiceForm(props: Props) {
         const missingSourceLot = draft.lines.find(line => {
           const product = catalog.find(item => String(item.id) === line.skuId);
           if (product?.requiresAppSheetSourceLot !== true) return false;
-          const options = sourceLotOptions(product);
-          return !line.sourceLotId || !options.some(option => stringValue(option.sourceLotId) === line.sourceLotId);
+          return line.sourceLotId
+            ? !sourceLotOptions(product).some(option => stringValue(option.sourceLotId) === line.sourceLotId)
+            : !line.stockLotId || !nativeLotOptions(product).some(option => stringValue(option.stockLotId) === line.stockLotId);
         });
         if (missingSourceLot) {
-          setError("Cada producto necesita un lote de origen con disponibilidad actual. Editá la línea, elegí un lote vigente y guardá de nuevo.");
+          setError("Cada producto necesita un lote con disponibilidad actual. Editá la línea, elegí un lote vigente y guardá de nuevo.");
           return;
         }
       }
@@ -712,7 +750,7 @@ export function AppSheetInvoiceForm(props: Props) {
       setConfirmationError(catalogChannelWaitMessage);
       return;
     }
-    if (!uncertain && unboundConfirmedSourceLot) {
+    if (!uncertain && unboundConfirmedLot) {
       setConfirmationError("Verificá el artículo y su lote en el catálogo de este canal antes de confirmar.");
       return;
     }
@@ -763,34 +801,44 @@ export function AppSheetInvoiceForm(props: Props) {
   const selectedProduct = productDraft ? catalog.find(item => String(item.id) === productDraft.skuId) : undefined;
   const retainedProductIsHistorical = Boolean(productDraft && replacementProfile && mode === "edit-preorder" && initial.lines.some(line => line.id === productDraft.id && line.skuId === productDraft.skuId));
   const allowPendingSourceLot = mode === "preorder" || mode === "edit-preorder";
-  const nativeSkuIds = catalog
-    .filter(item => !activeReplacement || item.requiresAppSheetSourceLot !== true)
-    .map(item => String(item.id));
-  if (productDraft?.skuId) nativeSkuIds.push(productDraft.skuId);
-  const sourceLotPrefixes = sourceLotChoicePrefixes(nativeSkuIds);
-  const productChoices = saleProducts.flatMap(item => {
+  const nativeSkuIds = catalog.map(item => String(item.id));
+  if (productDraft?.skuId && !nativeSkuIds.includes(productDraft.skuId)) nativeSkuIds.push(productDraft.skuId);
+  const sourceLotPrefixes = lotChoicePrefixes(nativeSkuIds);
+  const productChoices: ProductChoice[] = saleProducts.flatMap(item => {
     const skuId = String(item.id);
-    if (!activeReplacement || item.requiresAppSheetSourceLot !== true) return [{ value: skuId, skuId, sourceLotId: "", label: stringValue(item.name, stringValue(item.code, skuId)), pending: false }];
+    if (!activeReplacement || item.requiresAppSheetSourceLot !== true) return [{ value: skuId, skuId, sourceLotId: "", stockLotId: "", label: stringValue(item.name, stringValue(item.code, skuId)), pending: false }];
     const name = stringValue(item.name, stringValue(item.code, skuId));
-    const lots = sourceLotOptions(item).map(option => {
+    const historicalLots = sourceLotOptions(item).map(option => {
       const sourceLotId = stringValue(option.sourceLotId);
       const sourceLabelIdentity = readSourceLotLabelIdentity(option.sourceLabelIdentity);
       const receivedDate = stringValue(option.receivedDate).trim();
       const availableQuantity = stringValue(option.availableQuantity);
       return {
-        value: sourceLotChoice(sourceLotPrefixes.sourceLot, skuId, sourceLotId), skuId, sourceLotId,
+        value: sourceLotChoice(sourceLotPrefixes.sourceLot, skuId, sourceLotId), skuId, sourceLotId, stockLotId: "",
         label: sourceLabelIdentity
           ? `${sourceLabelIdentity.variety} |${sourceLabelIdentity.description} - ${sourceLabelIdentity.purchaseLotId} (${availableQuantity} gr)`
           : `${name} · ${receivedDate || "fecha de ingreso sin dato"} · ${availableQuantity} g disponibles · ID interno ${sourceLotId}`,
         pending: false,
       };
     });
+    const nativeLots = nativeLotOptions(item).map(option => {
+      const stockLotId = stringValue(option.stockLotId);
+      const receivedDate = stringValue(option.receivedDate).trim();
+      const lotLabel = stringValue(option.lotLabel).trim();
+      const availableQuantity = stringValue(option.availableQuantity);
+      return {
+        value: nativeLotChoice(sourceLotPrefixes.stockLot, skuId, stockLotId), skuId, sourceLotId: "", stockLotId,
+        label: `${name} · ${lotLabel || receivedDate || "lote sin etiqueta"} · ${availableQuantity} g disponibles`,
+        pending: false,
+      };
+    });
     return allowPendingSourceLot
-      ? [...lots, { value: pendingSourceLotChoice(sourceLotPrefixes.pending, skuId), skuId, sourceLotId: "", label: `${name} · lote pendiente de resolver`, pending: true }]
-      : lots;
+      ? [...historicalLots, ...nativeLots, { value: pendingSourceLotChoice(sourceLotPrefixes.pending, skuId), skuId, sourceLotId: "", stockLotId: "", label: `${name} · lote pendiente de resolver`, pending: true }]
+      : [...historicalLots, ...nativeLots];
   });
   const selectedProductChoiceValue = !productDraft?.skuId ? ""
     : productDraft.sourceLotId ? sourceLotChoice(sourceLotPrefixes.sourceLot, productDraft.skuId, productDraft.sourceLotId)
+      : productDraft.stockLotId ? nativeLotChoice(sourceLotPrefixes.stockLot, productDraft.skuId, productDraft.stockLotId)
       : activeReplacement && selectedProduct?.requiresAppSheetSourceLot === true && allowPendingSourceLot
         ? pendingSourceLotChoice(sourceLotPrefixes.pending, productDraft.skuId)
         : productDraft.skuId;
@@ -799,8 +847,9 @@ export function AppSheetInvoiceForm(props: Props) {
       value: selectedProductChoiceValue || productDraft.skuId,
       skuId: productDraft.skuId,
       sourceLotId: productDraft.sourceLotId,
+      stockLotId: productDraft.stockLotId,
       pending: false,
-      label: `${stringValue(selectedProduct?.name, productDraft.skuId)} · ${productDraft.sourceLotId ? `${productDraft.sourceLotId} · no disponible; borrador conservado` : retainedProductIsHistorical ? "guardada en la preventa" : "no disponible; borrador conservado"}`,
+      label: `${stringValue(selectedProduct?.name, productDraft.skuId)} · ${productDraft.sourceLotId ? `${productDraft.sourceLotId} · no disponible; borrador conservado` : productDraft.stockLotId ? `lote Bombo ${productDraft.stockLotId} · no disponible; borrador conservado` : retainedProductIsHistorical ? "guardada en la preventa" : "no disponible; borrador conservado"}`,
     }
     : null;
   const isRetainedHistoricalLine = (line: InvoiceLineDraft) =>
@@ -843,14 +892,16 @@ export function AppSheetInvoiceForm(props: Props) {
   const savedInputLines = Array.isArray(savedInput.lines)
     ? savedInput.lines.filter((item): item is Row => Boolean(item) && typeof item === "object")
     : savedLines;
-  const unboundConfirmedSourceLot = activeReplacement && !uncertain && catalogChannelReady
+  const unboundConfirmedLot = activeReplacement && !uncertain && catalogChannelReady
     ? savedInputLines.find(line => {
       const product = catalog.find(item => String(item.id) === stringValue(line.skuId));
       if (!product) return true;
-      if (product?.requiresAppSheetSourceLot !== true) return false;
       const sourceLotId = stringValue(line.sourceLotId);
-      const options = sourceLotOptions(product);
-      return !sourceLotId || !options.some(option => stringValue(option.sourceLotId) === sourceLotId);
+      const stockLotId = stringValue(line.stockLotId);
+      if (sourceLotId && stockLotId) return true;
+      if (sourceLotId) return product.requiresAppSheetSourceLot !== true || !sourceLotOptions(product).some(option => stringValue(option.sourceLotId) === sourceLotId);
+      if (stockLotId) return product.requiresAppSheetSourceLot !== true || !nativeLotOptions(product).some(option => stringValue(option.stockLotId) === stockLotId);
+      return product.requiresAppSheetSourceLot === true;
     })
     : undefined;
   const blankPreorder = confirming && savedLines.length === 0;
@@ -874,16 +925,27 @@ export function AppSheetInvoiceForm(props: Props) {
           <div><span>Total facturado</span><strong>{quote.totalCalculationState === "defined" ? formatMinor(quote.totalMinor, quote.currency) : "Pendiente de definición"}</strong></div>
           <div><span>Importe capturado</span><strong>{formatMinor(quote.capturedBaseMinor, stringValue(quote.currency, "ARS"))}</strong></div>
           {quote.currency === "USD" && <div><span>Moneda</span><strong>USD</strong></div>}
-          {savedLines.map((line, index) => <p key={stringValue(line.id, String(index))}>{stringValue(line.date)} · {stringValue(line.scale, "Escala sin dato")} · {stringValue(line.quantity, stringValue(line.requested))} g · {formatMinor(line.explicitTotalMinor, quote.currency)}</p>)}
+          {savedLines.map((line, index) => {
+            const inputLine = savedInputLines.find(candidate => stringValue(candidate.id) === stringValue(line.id)) ?? savedInputLines[index];
+            const product = catalog.find(item => String(item.id) === stringValue(inputLine?.skuId, stringValue(line.skuId)));
+            const sourceLot = sourceLotOptions(product).find(option => stringValue(option.sourceLotId) === stringValue(inputLine?.sourceLotId));
+            const nativeLot = nativeLotOptions(product).find(option => stringValue(option.stockLotId) === stringValue(inputLine?.stockLotId));
+            const lotLabel = sourceLot
+              ? stringValue(sourceLot.receivedDate)
+              : nativeLot
+                ? stringValue(nativeLot.lotLabel, stringValue(nativeLot.receivedDate))
+                : "";
+            return <p key={stringValue(line.id, String(index))}>{stringValue(line.date)} · {stringValue(line.scale, "Escala sin dato")} · {stringValue(line.quantity, stringValue(line.requested))} g · {formatMinor(line.explicitTotalMinor, quote.currency)}{lotLabel ? ` · Lote ${lotLabel}` : ""}</p>;
+          })}
           {Boolean(objectValue(quote.moto).deliveryDate) && <p>Viaje en moto · {stringValue(objectValue(quote.moto).deliveryDate)} · {stringValue(objectValue(quote.moto).destination)}</p>}
         </section>}
-        {unboundConfirmedSourceLot && <p className="ops-inline-error" role="alert">Esta preventa no tiene un lote de origen con disponibilidad actual para cada producto. Abrí «Formulario de venta», elegí un lote vigente y guardá los cambios antes de confirmar.</p>}
-        {unboundConfirmedSourceLot && hasMoreCatalog && !catalog.some(item => String(item.id) === stringValue(unboundConfirmedSourceLot.skuId)) && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={loadMoreCatalog} disabled={catalogLoading}>Cargar más variedades para verificar el lote</button>}
+        {unboundConfirmedLot && <p className="ops-inline-error" role="alert">Esta preventa no tiene un lote con disponibilidad actual para cada producto. Abrí «Formulario de venta», elegí un lote vigente y guardá los cambios antes de confirmar.</p>}
+        {unboundConfirmedLot && hasMoreCatalog && !catalog.some(item => String(item.id) === stringValue(unboundConfirmedLot.skuId)) && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={loadMoreCatalog} disabled={catalogLoading}>Cargar más variedades para verificar el lote</button>}
         {activeReplacement && catalogChannelWaitMessage && <p className={catalogError && catalogChannelMatches ? "ops-inline-error" : undefined} role={catalogError && catalogChannelMatches ? "alert" : "status"}>{catalogChannelWaitMessage}</p>}
         {activeReplacement && catalogError && catalogChannelMatches && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={retryCatalog} disabled={catalogLoading}>Reintentar catálogo</button>}
         {confirmation && !blankPreorder && <label className="ops-field appsheet-field" htmlFor="appsheet-acceptance"><span>Nota de confirmación · opcional</span><textarea id="appsheet-acceptance" name="acceptance" value={confirmationEvidence} onChange={event => setConfirmationEvidence(event.target.value)} maxLength={2000} disabled={busy || uncertain} /><small>Se registra quién confirma y la versión guardada.</small></label>}
         {uncertain && <p className="appsheet-pending" role="alert">Confirmación pendiente: se pudo confirmar la preventa. Conservá la evidencia y reintentá exactamente la misma acción.</p>}
-        <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={close} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" data-testid={uncertain ? "appsheet-retry-confirm-preorder" : "appsheet-confirm-preorder"} disabled={busy || confirmationLoading || !confirmation || blankPreorder || Boolean(unboundConfirmedSourceLot) || (activeReplacement && !uncertain && !catalogChannelReady) || !Number.isSafeInteger(confirmationVersion)}>{busy ? "Confirmando…" : uncertain ? "Reintentar confirmación" : "Confirmar preventa"}</button></footer>
+        <footer className="ops-dialog-actions"><button type="button" className="ops-button ops-button-quiet" onClick={close} disabled={busy || uncertain}>Cancelar</button><button type="submit" className="ops-button ops-button-primary" data-testid={uncertain ? "appsheet-retry-confirm-preorder" : "appsheet-confirm-preorder"} disabled={busy || confirmationLoading || !confirmation || blankPreorder || Boolean(unboundConfirmedLot) || (activeReplacement && !uncertain && !catalogChannelReady) || !Number.isSafeInteger(confirmationVersion)}>{busy ? "Confirmando…" : uncertain ? "Reintentar confirmación" : "Confirmar preventa"}</button></footer>
       </form> : <form className="appsheet-invoice-body" onSubmit={event => void saveInvoice(event)} aria-busy={busy}>
         {creatingShell ? <div className="appsheet-shell-grid">
           <label className="ops-field appsheet-field"><span>Fecha</span><input name="invoiceDate" data-testid="invoiceDate" aria-label="Fecha" type="date" value={draft.invoiceDate} disabled /></label>
@@ -915,10 +977,16 @@ export function AppSheetInvoiceForm(props: Props) {
             {draft.lines.length ? <ul className="appsheet-dialog-lines">{draft.lines.map((line, index) => {
               const product = catalog.find(item => String(item.id) === line.skuId);
               const sourceLot = sourceLotOptions(product).find(option => stringValue(option.sourceLotId) === line.sourceLotId);
+              const nativeLot = nativeLotOptions(product).find(option => stringValue(option.stockLotId) === line.stockLotId);
               const skuNeedsAttention = replacementProfile && !saleProducts.some(item => String(item.id) === line.skuId);
               const lineTotalMinor = amountMinorOrNull(line.total);
+              const lotSummary = line.sourceLotId
+                ? ` · Lote ${sourceLot?.receivedDate ?? "sin disponibilidad actual"}${sourceLot ? ` · ${sourceLot.availableQuantity} g disponibles` : ""}`
+                : line.stockLotId
+                  ? ` · Lote Bombo ${nativeLot?.lotLabel ?? nativeLot?.receivedDate ?? "sin disponibilidad actual"}${nativeLot ? ` · ${nativeLot.availableQuantity} g disponibles` : ""}`
+                  : activeReplacement && product?.requiresAppSheetSourceLot === true ? " · lote pendiente" : "";
               return <li className="appsheet-dialog-line" key={line.id} data-testid={`appsheet-product-row-${line.id}`}>
-                <div><strong>{stringValue(product?.name, line.skuId || "Producto")}</strong><span>{line.date} · {line.scale || "Escala sin dato"} · {line.quantity} g · {lineTotalMinor === null ? "Importe pendiente de corregir" : formatMinor(lineTotalMinor.toString(), draft.currency)}{line.sourceLotId ? ` · Lote ${sourceLot?.receivedDate ?? "sin disponibilidad actual"}${sourceLot ? ` · ${sourceLot.availableQuantity} g disponibles` : ""}` : activeReplacement && product?.requiresAppSheetSourceLot === true ? " · lote pendiente" : ""}</span>{skuNeedsAttention && <small className="appsheet-subtle-error" role="alert">{lineSkuAttentionMessage(line)}</small>}</div>
+                <div><strong>{stringValue(product?.name, line.skuId || "Producto")}</strong><span>{line.date} · {line.scale || "Escala sin dato"} · {line.quantity} g · {lineTotalMinor === null ? "Importe pendiente de corregir" : formatMinor(lineTotalMinor.toString(), draft.currency)}{lotSummary}</span>{skuNeedsAttention && <small className="appsheet-subtle-error" role="alert">{lineSkuAttentionMessage(line)}</small>}</div>
                 <div className="appsheet-line-actions"><button type="button" className="ops-button ops-button-quiet ops-button-small" data-testid={`appsheet-edit-product-${line.id}`} onClick={() => openProduct(index)} disabled={busy || uncertain}>Editar producto</button><button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={() => removeProduct(index)} disabled={busy || uncertain}>Quitar</button></div>
               </li>;
             })}</ul> : <p className="appsheet-footnote">Todavía no agregaste productos.</p>}
@@ -997,7 +1065,7 @@ export function AppSheetInvoiceForm(props: Props) {
             <label className="ops-field appsheet-field"><span>Id_Detalle</span><input name="line-id" data-testid="line-id" value={productDraft.id} onChange={event => updateProductField("id", event.target.value)} maxLength={100} required /></label>
             <label className="ops-field appsheet-field"><span>ID. Factura</span><input aria-label="ID. Factura" value={draft.invoiceNumber || "Se asigna al guardar"} readOnly /></label>
             <label className="ops-field appsheet-field"><span>Fecha</span><input name="line-date" data-testid="line-date" aria-label="Fecha del producto" type="date" value={productDraft.date} onChange={event => updateProductField("date", event.target.value)} required /></label>
-            <label className="ops-field appsheet-field"><span>{activeReplacement && mode === "invoice" ? "Artículo" : "Variedad"}</span><select name="line-skuId" data-testid="line-skuId" aria-label={activeReplacement && mode === "invoice" ? "Artículo" : "Variedad"} value={selectedProductChoiceValue} onChange={event => selectProductChoice(event.target.value)} disabled={activeReplacement && !catalogChannelReady} required><option value="">{activeReplacement && mode === "invoice" ? "Elegí artículo" : "Elegí variedad"}</option>{retainedProductChoice && <option value={retainedProductChoice.value} data-sku-id={retainedProductChoice.skuId} data-source-lot-id={retainedProductChoice.sourceLotId || undefined} disabled={Boolean(retainedProductChoice.sourceLotId)}>{retainedProductChoice.label}</option>}{productChoices.map(choice => <option key={choice.value} value={choice.value} data-sku-id={choice.skuId} data-source-lot-id={choice.sourceLotId || undefined} data-source-lot-pending={choice.pending ? "true" : undefined}>{choice.label}</option>)}</select>{catalogLoading && <small role="status">Cargando variedades…</small>}{catalogError && <small className="appsheet-subtle-error">No se pudo cargar catálogo. <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={retryCatalog}>Reintentar</button></small>}{activeReplacement && !catalogChannelMatches && <small role="status">Actualizando el catálogo para {desiredCatalogChannel === "delivery" ? "reparto" : "retiro"}…</small>}{!catalogLoading && !catalogError && !saleProducts.length && <small>No hay variedades activas disponibles para factura.</small>}{hasMoreCatalog && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={loadMoreCatalog} disabled={catalogLoading}>Cargar más variedades</button>}{activeReplacement && selectedProduct?.requiresAppSheetSourceLot === true && <small>{allowPendingSourceLot ? "Elegí el lote de cada producto o dejalo pendiente para resolverlo al confirmar la preventa. La disponibilidad se verificará de nuevo." : "La confirmación reserva únicamente el lote elegido y vuelve a comprobar su disponibilidad."}</small>}</label>
+            <label className="ops-field appsheet-field"><span>{activeReplacement && mode === "invoice" ? "Artículo" : "Variedad"}</span><select name="line-skuId" data-testid="line-skuId" aria-label={activeReplacement && mode === "invoice" ? "Artículo" : "Variedad"} value={selectedProductChoiceValue} onChange={event => selectProductChoice(event.target.value)} disabled={activeReplacement && !catalogChannelReady} required><option value="">{activeReplacement && mode === "invoice" ? "Elegí artículo" : "Elegí variedad"}</option>{retainedProductChoice && <option value={retainedProductChoice.value} data-sku-id={retainedProductChoice.skuId} data-source-lot-id={retainedProductChoice.sourceLotId || undefined} data-stock-lot-id={retainedProductChoice.stockLotId || undefined} disabled={Boolean(retainedProductChoice.sourceLotId || retainedProductChoice.stockLotId)}>{retainedProductChoice.label}</option>}{productChoices.map(choice => <option key={choice.value} value={choice.value} data-sku-id={choice.skuId} data-source-lot-id={choice.sourceLotId || undefined} data-stock-lot-id={choice.stockLotId || undefined} data-source-lot-pending={choice.pending ? "true" : undefined}>{choice.label}</option>)}</select>{catalogLoading && <small role="status">Cargando variedades…</small>}{catalogError && <small className="appsheet-subtle-error">No se pudo cargar catálogo. <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={retryCatalog}>Reintentar</button></small>}{activeReplacement && !catalogChannelMatches && <small role="status">Actualizando el catálogo para {desiredCatalogChannel === "delivery" ? "reparto" : "retiro"}…</small>}{!catalogLoading && !catalogError && !saleProducts.length && <small>No hay variedades activas disponibles para factura.</small>}{hasMoreCatalog && <button type="button" className="ops-button ops-button-quiet ops-button-small" onClick={loadMoreCatalog} disabled={catalogLoading}>Cargar más variedades</button>}{activeReplacement && selectedProduct?.requiresAppSheetSourceLot === true && <small>{allowPendingSourceLot ? "Elegí el lote de cada producto o dejalo pendiente para resolverlo al confirmar la preventa. La disponibilidad se verificará de nuevo." : "La confirmación reserva únicamente el lote elegido y vuelve a comprobar su disponibilidad."}</small>}</label>
             <label className="ops-field appsheet-field"><span>Escala_Tarifaria</span><select name="line-scale" data-testid="line-scale" aria-label="Escala tarifaria" value={productDraft.scale} onChange={event => updateProductField("scale", event.target.value)}><option value="">Elegí una escala</option>{productDraft.scale && !observedScales.includes(productDraft.scale) && <option value={productDraft.scale}>{productDraft.scale}</option>}{observedScales.map(scale => <option key={scale} value={scale}>{scale}</option>)}</select><small>Se conserva la escala elegida; el precio sugerido sólo se propone cuando coincide exactamente el campo del catálogo y la moneda.</small></label>
             <label className="ops-field appsheet-field"><span>Gramos pedidos</span><input name="line-quantity" data-testid="line-quantity" aria-label="Gramos pedidos" type={replacementProfile ? "number" : "text"} inputMode="decimal" {...(replacementProfile ? { min: 1, max: 99, step: "any", "aria-describedby": "appsheet-quantity-guidance" } : {})} onInvalid={() => { if (replacementProfile) setError("Ingresá entre 1 y 99 gramos, con hasta tres decimales."); }} value={productDraft.quantity} onChange={event => updateProductField("quantity", event.target.value)} required placeholder="Ej.: 3,5" />{replacementProfile && <small id="appsheet-quantity-guidance">1–99 gramos, hasta tres decimales.</small>}</label>
             <label className="ops-field appsheet-field"><span>Valor total</span><input name="line-total" data-testid="line-total" aria-label="Valor total" inputMode="decimal" value={productDraft.total} onChange={event => updateProductField("total", event.target.value)} required placeholder="Importe editable" /><small>El total editable se propone si el cálculo es exacto y se actualiza hasta que ingreses un valor.</small></label>

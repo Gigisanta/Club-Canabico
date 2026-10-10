@@ -18,7 +18,9 @@ The second declaration is a detail view, not proof of the editable form's runtim
 
 Only `Pre_Fechaventa` is marked with `TODAY()` in the captured header schema. Header segment, grams, subtotal, payment and transfer fields, delivery/address/zone fields, motorcycle amounts, total and note are operator-entered values. They are independent inputs: preserve them as entered; do not derive header grams or subtotal from details, or total/service amounts from other amounts.
 
-On the detail schema, `Pre_Fecha` uses `NOW()`. `Pre_Cantidad_Gr` is Decimal with two decimal digits and no captured min/max/step/`Valid_If`; preserve fractional quantities and do not invent a positive lower bound or cap. The captured line formulas are:
+The read-only column inspection distinguishes the calculation phases: `Pre_Fechaventa` is a Date with **App formula `TODAY()`**, and `Pre_Fecha` is a DateTime with **App formula `NOW()`**. Neither has an Initial value; both show Reset on edit disabled. They are not initial defaults frozen at creation. Opening an existing header for editing proposed the current date, but the form was canceled; no saved edit or runtime automation was executed. Keep the original stored date/time and a new calculation proposal separately until the operation is saved. AppSheet's [calculation-phase documentation](https://support.google.com/appsheet/answer/10106509?hl=en) and [device-time semantics](https://support.google.com/appsheet/answer/10108119?hl=en) do not establish the timezone of this operator's saved records.
+
+`Pre_Cantidad_Gr` is Decimal with two decimal digits and no captured min/max/step/`Valid_If`; preserve fractional quantities and do not invent a positive lower bound or cap. The captured line formulas are:
 
 - `Pre_Escala_Tarifaria`: select the catalog band for the manually selected segment (5, 10, 15, or 30 grams).
 - `Pre_Precio_gramo_línea`: look up the selected catalog price for 5, 10, 15, 20, 25, or 30 grams; default to zero.

@@ -98,11 +98,23 @@ type PreparationLimitCoverage = "approved" | "demo_missing_approved_rule";
 export type AppSheetSourceLotCandidate = Pick<Prisma.InventoryLotGetPayload<object>, "id" | "skuId" | "unit" | "receivedAt" | "sourceSystem" | "sourceId">;
 export type AppSheetSourceLotLabelIdentity = { variety: string; description: string; purchaseLotId: string };
 export type AppSheetSourceLotOption = {
+  origin: "appsheet-history";
   sourceLotId: string;
   inventoryLotId: string;
   receivedDate: string;
   availableQuantity: string;
   sourceLabelIdentity: AppSheetSourceLotLabelIdentity | null;
+};
+export type AppSheetNativeLotOption = {
+  origin: "bombo-goods-receipt";
+  stockLotId: string;
+  lotLabel: string;
+  receivedDate: string;
+  availableQuantity: string;
+};
+export type AppSheetNativeLotAvailabilityCandidate = {
+  lot: Pick<Prisma.InventoryLotGetPayload<object>, "id" | "skuId" | "unit" | "receivedAt" | "label" | "receiptId" | "purchaseLineId" | "sourceSystem" | "sourceId">;
+  balances: Array<{ unit: string; availabilityState: string; availableQuantity: string }>;
 };
 
 const ZERO = 0n;
@@ -518,7 +530,7 @@ export async function reserveOrder(ctx: CommandContext, orderId: string): Promis
   const skus = await ctx.tx.catalogSku.findMany({ where: { id: { in: skuIds } } });
   const skuById = new Map(skus.map((sku) => [sku.id, sku]));
   const authority = await ctx.tx.operationAuthority.findUnique({ where: { id: "operations" }, select: { mode: true, cutoverProfile: true } });
-  const replacementSourceLotByLine = new Map<string, string>();
+  const replacementLotIdByLine = new Map<string, string>();
   if (authority?.mode === "active" && authority.cutoverProfile === "appsheet-replacement") {
     const importedCanonicalLines = order.lines.filter((line) => {
       const sku = skuById.get(line.skuId);
@@ -540,14 +552,19 @@ export async function reserveOrder(ctx: CommandContext, orderId: string): Promis
         const sku = skuById.get(line.skuId);
         const canonicalImported = sku?.sourceSystem === APPSHEET_CANONICAL_SOURCE_SYSTEM && sku.sourceId !== null;
         if (!canonicalImported) {
-          if (snapshotLine.sourceLotId)
+          if (snapshotLine.sourceLotId || snapshotLine.stockLotId)
             throw new OperationError(409, "APPSHEET_SOURCE_LOT_SKU_MISMATCH", "Un lote AppSheet no puede vincularse a un producto nativo.");
           continue;
         }
-        const selected = snapshotLine.sourceLotId;
-        if (!selected) sourceLotFailure("confirmed_invoice_source_lot_missing");
-        await resolveAppSheetSourceLot(ctx, line.skuId, selected);
-        replacementSourceLotByLine.set(line.id, selected);
+        if (snapshotLine.sourceLotId) {
+          const selected = await resolveAppSheetSourceLot(ctx, line.skuId, snapshotLine.sourceLotId);
+          replacementLotIdByLine.set(line.id, selected.inventoryLotId);
+        } else if (snapshotLine.stockLotId) {
+          const selected = await resolveAppSheetNativeLot(ctx, line.skuId, snapshotLine.stockLotId);
+          replacementLotIdByLine.set(line.id, selected.stockLotId);
+        } else {
+          sourceLotFailure("confirmed_invoice_source_lot_missing");
+        }
       }
     }
   }
@@ -563,17 +580,17 @@ export async function reserveOrder(ctx: CommandContext, orderId: string): Promis
     activeByLine.set(reservation.lineId, (activeByLine.get(reservation.lineId) ?? ZERO) + remaining);
   }
 
-  if (replacementSourceLotByLine.size) {
+  if (replacementLotIdByLine.size) {
     const balanceIds = [...new Set(active.map((reservation) => reservation.balanceId))];
     const reservationBalances = balanceIds.length
       ? await ctx.tx.stockBalance.findMany({ where: { id: { in: balanceIds } }, include: { lot: true } })
       : [];
     const balanceById = new Map(reservationBalances.map((balance) => [balance.id, balance]));
     for (const reservation of active) {
-      const expectedSourceLotId = replacementSourceLotByLine.get(reservation.lineId);
-      if (!expectedSourceLotId) continue;
+      const expectedLotId = replacementLotIdByLine.get(reservation.lineId);
+      if (!expectedLotId) continue;
       const balance = balanceById.get(reservation.balanceId);
-      if (!balance || balance.lot.sourceSystem !== APPSHEET_HISTORY_SOURCE_SYSTEM || balance.lot.sourceId !== expectedSourceLotId)
+      if (!balance || balance.lot.id !== expectedLotId)
         sourceLotFailure("active_reservation_source_lot_mismatch");
     }
   }
@@ -593,8 +610,8 @@ export async function reserveOrder(ctx: CommandContext, orderId: string): Promis
 
   const groups = new Map<string, OrderLine[]>();
   for (const line of order.lines) {
-    const sourceLotId = replacementSourceLotByLine.get(line.id) ?? "";
-    const key = `${line.skuId}\u0000${line.unit}\u0000${sourceLotId}`;
+    const selectedLotId = replacementLotIdByLine.get(line.id) ?? "";
+    const key = `${line.skuId}\u0000${line.unit}\u0000${selectedLotId}`;
     groups.set(key, [...(groups.get(key) ?? []), line]);
   }
 
@@ -635,11 +652,11 @@ export async function reserveOrder(ctx: CommandContext, orderId: string): Promis
   for (const group of pendingGroups) {
     const first = group.first;
     const groupDemand = group.demand;
-    const selectedSourceLotId = replacementSourceLotByLine.get(first.id);
+    const selectedLotId = replacementLotIdByLine.get(first.id);
     let pendingFree = ZERO;
     const availableByBalance = balances
       .filter((balance) => balance.unit === first.unit && balance.lot.skuId === first.skuId &&
-        (!selectedSourceLotId || balance.lot.sourceSystem === APPSHEET_HISTORY_SOURCE_SYSTEM && balance.lot.sourceId === selectedSourceLotId))
+        (!selectedLotId || balance.lot.id === selectedLotId))
       .flatMap((balance) => {
         const result = availabilityByBalance.get(balance.id);
         if (!result) throw new OperationError(409, "STOCK_AVAILABILITY_INVARIANT", "Falta la evaluación de disponibilidad de un saldo visible");
@@ -1450,6 +1467,9 @@ function jsonRecord(value: unknown): JsonRecord | null {
 function sourceLotFailure(reason: string): never {
   throw new OperationError(423, "APPSHEET_SOURCE_LOT_NOT_ELIGIBLE", "El lote de origen AppSheet requiere una revisión vigente de captura, catálogo y apertura.", { reason });
 }
+function nativeLotFailure(reason: string): never {
+  throw new OperationError(423, "APPSHEET_NATIVE_STOCK_LOT_NOT_ELIGIBLE", "El lote nativo requiere una recepción Bombo íntegra y trazable.", { reason });
+}
 function appSheetToday(now: Date): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires" }).format(now);
 }
@@ -1783,8 +1803,121 @@ export async function resolveAppSheetSourceLot(ctx: CommandContext, skuId: strin
   if (auditSourceLot?.sourceLotId !== sourceLotId || auditSourceLot.inventoryLotId !== lot.id ||
       auditSourceLot.receivedDate !== selected.proof.sourceDeliveryDate)
     return sourceLotFailure("source_lot_review_result_mismatch");
-  return { sourceLotId, inventoryLotId: lot.id, receivedDate: selected.proof.sourceDeliveryDate, availableQuantity: "0",
+  return { origin: "appsheet-history", sourceLotId, inventoryLotId: lot.id, receivedDate: selected.proof.sourceDeliveryDate, availableQuantity: "0",
     sourceLabelIdentity: prepared.sourceLabelIdentity };
+}
+
+/** Re-read the exact Bombo GoodsReceived chain when a native inventory lot is selected or listed. */
+async function resolveAppSheetNativeLot(ctx: CommandContext, skuId: string, stockLotId: string): Promise<AppSheetNativeLotOption> {
+  const authority = await ctx.tx.operationAuthority.findUnique({ where: { id: "operations" }, select: { mode: true, cutoverProfile: true, captureManifestId: true } });
+  if (authority?.mode !== "active" || authority.cutoverProfile !== "appsheet-replacement" || !authority.captureManifestId)
+    nativeLotFailure("native_lot_use_requires_active_replacement");
+
+  const lot = await ctx.tx.inventoryLot.findFirst({ where: { id: stockLotId, skuId, sourceSystem: null, sourceId: null },
+    select: { id: true, skuId: true, unit: true, receivedAt: true, label: true, receiptId: true, purchaseLineId: true, sourceSystem: true, sourceId: true, unitCost: true, costCurrency: true } });
+  if (!lot || lot.unit !== "g" || !lot.receiptId || !lot.purchaseLineId || lot.sourceSystem !== null || lot.sourceId !== null)
+    nativeLotFailure("native_lot_binding_missing_or_sku_mismatch");
+
+  const receipt = await ctx.tx.goodsReceipt.findUnique({ where: { id: lot.receiptId } });
+  if (!receipt || !Array.isArray(receipt.items) || !civilDate.safeParse(receipt.receivedDate).success ||
+      receipt.receivedDate > civilToday(ctx.now) ||
+      sourceDateForLot(lot.receivedAt) !== receipt.receivedDate)
+    nativeLotFailure("native_goods_receipt_missing_or_date_mismatch");
+  const receiptEntries = receipt.items.flatMap(raw => {
+    const entry = jsonRecord(raw);
+    return entry?.lotId === lot.id ? [entry] : [];
+  });
+  if (receiptEntries.length !== 1) nativeLotFailure("native_goods_receipt_lot_missing_or_ambiguous");
+  const entry = receiptEntries[0]!;
+  const entryText = (key: string) => typeof entry[key] === "string" ? entry[key] as string : null;
+  const lineId = entryText("lineId"), balanceId = entryText("balanceId"), quantityText = entryText("quantity");
+  const unit = entryText("unit"), unitCostText = entryText("unitCost"), costMinorText = entryText("costMinor");
+  const itemCurrency = entryText("currency"), lotLabel = entryText("lotLabel");
+  if (lineId !== lot.purchaseLineId || entryText("skuId") !== lot.skuId || !balanceId || !quantityText || unit !== lot.unit ||
+      !unitCostText || !costMinorText || !/^(0|[1-9]\d{0,18})$/.test(costMinorText) || !currency.safeParse(itemCurrency).success ||
+      lotLabel !== lot.label)
+    nativeLotFailure("native_goods_receipt_item_mismatch");
+
+  let receivedQuantity: bigint;
+  let unitCostMatches = false;
+  let recordedCost: bigint;
+  try {
+    receivedQuantity = parseQ(quantityText, lot.unit, "Cantidad recibida");
+    recordedCost = BigInt(costMinorText);
+    unitCostMatches = new Prisma.Decimal(unitCostText).equals(lot.unitCost);
+  } catch {
+    nativeLotFailure("native_goods_receipt_quantity_or_cost_invalid");
+  }
+  if (receivedQuantity <= ZERO || !unitCostMatches ||
+      checkDatabaseMinor(moneyForQuantity(formatQ(receivedQuantity, lot.unit), unitCostText)) !== recordedCost ||
+      lot.costCurrency !== itemCurrency)
+    nativeLotFailure("native_goods_receipt_quantity_or_cost_mismatch");
+
+  const purchase = await ctx.tx.purchaseOrder.findUnique({ where: { id: receipt.purchaseId }, select: { id: true, status: true, items: true } });
+  const purchaseItems = purchase ? z.array(purchaseLineStored).safeParse(purchase.items) : null;
+  const purchaseLine = purchaseItems?.success ? purchaseItems.data.find(item => item.lineId === lineId) : undefined;
+  if (!purchase || !["partially_received", "received"].includes(purchase.status) || !purchaseLine ||
+      purchaseLine.skuId !== lot.skuId || purchaseLine.unit !== lot.unit || purchaseLine.unitCost !== unitCostText)
+    nativeLotFailure("native_purchase_line_mismatch");
+
+  const [balance, receiptObject, receiptFacts] = await Promise.all([
+    ctx.tx.stockBalance.findUnique({ where: { id: balanceId }, select: { id: true, lotId: true, unit: true, locationId: true, custodianId: true } }),
+    ctx.tx.operationObject.findUnique({ where: { id: receipt.id }, select: { id: true, kind: true, version: true } }),
+    ctx.tx.stockFact.findMany({ where: { lotId: lot.id, kind: "receipt" } }),
+  ]);
+  if (!balance || balance.lotId !== lot.id || balance.unit !== lot.unit || !receiptObject || receiptObject.kind !== "receipt" ||
+      receiptFacts.length !== 1 || !receiptFacts[0]!.requestId)
+    nativeLotFailure("native_receipt_balance_or_fact_missing");
+  const fact = receiptFacts[0]!;
+  if (fact.unit !== unit || !fact.quantity.equals(new Prisma.Decimal(quantityText)) || fact.costMinor !== recordedCost ||
+      fact.currency !== itemCurrency || fact.reason !== "purchase_goods_receipt" || fact.actorId !== receipt.receivedBy ||
+      fact.toLocationId !== balance.locationId || fact.toCustodianId !== balance.custodianId ||
+      fact.fromLocationId !== null || fact.fromCustodianId !== null)
+    nativeLotFailure("native_receipt_stock_fact_mismatch");
+
+  const [commandReceipt, audits] = await Promise.all([
+    ctx.tx.commandReceipt.findUnique({ where: { requestId: fact.requestId } }),
+    ctx.tx.operationAudit.findMany({ where: { objectId: receipt.id, requestId: fact.requestId, action: "GoodsReceived" } }),
+  ]);
+  if (!commandReceipt || commandReceipt.command !== "GoodsReceived" || commandReceipt.targetId !== receipt.id ||
+      commandReceipt.actorId !== receipt.receivedBy || commandReceipt.resultingVersion !== receiptObject.version || audits.length !== 2 ||
+      audits.some(auditRow => auditRow.actorId !== receipt.receivedBy))
+    nativeLotFailure("native_receipt_command_or_audit_missing");
+
+  const receiptAudit = audits.find(auditRow => {
+    const details = jsonRecord(auditRow.details);
+    return details?.purchaseId === receipt.purchaseId && details.receiptId === receipt.id && details.receivedDate === receipt.receivedDate;
+  });
+  const versionAudit = audits.find(auditRow => jsonRecord(auditRow.details)?.version === commandReceipt.resultingVersion);
+  const auditItems = jsonRecord(receiptAudit?.details)?.items;
+  const auditedLotItems = Array.isArray(auditItems) ? auditItems.flatMap(raw => {
+    const auditItem = jsonRecord(raw);
+    return auditItem?.lotId === lot.id ? [auditItem] : [];
+  }) : [];
+  if (!receiptAudit || !versionAudit || !Array.isArray(auditItems) || auditedLotItems.length !== 1 ||
+      auditedLotItems[0]!.balanceId !== balanceId || auditedLotItems[0]!.lineId !== lineId ||
+      auditedLotItems[0]!.skuId !== lot.skuId || auditedLotItems[0]!.quantity !== quantityText ||
+      auditedLotItems[0]!.unit !== unit || auditedLotItems[0]!.lotLabel !== lotLabel)
+    nativeLotFailure("native_receipt_audit_payload_mismatch");
+
+  const response = jsonRecord(commandReceipt.response);
+  const result = jsonRecord(response?.result);
+  const responseReceipt = jsonRecord(result?.receipt);
+  const responseReceiptItems = responseReceipt && Array.isArray(responseReceipt.items) ? responseReceipt.items : [];
+  const responseLots = Array.isArray(result?.lots) ? result.lots : [];
+  const responseHasLot = (rows: unknown[]) => rows.filter(raw => {
+    const row = jsonRecord(raw);
+    return row?.lotId === lot.id && row.balanceId === balanceId && row.lineId === lineId && row.skuId === lot.skuId &&
+      row.quantity === quantityText && row.unit === unit && row.lotLabel === lotLabel;
+  }).length === 1;
+  if (response?.requestId !== commandReceipt.requestId || response.targetId !== receipt.id ||
+      response.version !== commandReceipt.resultingVersion || responseReceipt?.id !== receipt.id ||
+      responseReceipt.purchaseId !== receipt.purchaseId || responseReceipt.receivedBy !== receipt.receivedBy ||
+      responseReceipt.receivedDate !== receipt.receivedDate ||
+      !responseHasLot(responseReceiptItems) || !responseHasLot(responseLots))
+    nativeLotFailure("native_receipt_command_response_mismatch");
+
+  return { origin: "bombo-goods-receipt", stockLotId: lot.id, lotLabel, receivedDate: receipt.receivedDate, availableQuantity: "0" };
 }
 
 export type AppSheetSourceLotAvailabilityCandidate = {
@@ -1820,6 +1953,36 @@ export async function listAppSheetSourceLotOptions(
     }
   }
   return output.sort((a, b) => a.receivedDate.localeCompare(b.receivedDate) || a.sourceLotId.localeCompare(b.sourceLotId));
+}
+
+/** Native invoice options require a current-scope balance and the immutable Bombo receipt proof. */
+export async function listAppSheetNativeLotOptions(
+  tx: Prisma.TransactionClient,
+  actor: User,
+  now: Date,
+  skuId: string,
+  candidates: AppSheetNativeLotAvailabilityCandidate[],
+): Promise<AppSheetNativeLotOption[]> {
+  const output: AppSheetNativeLotOption[] = [];
+  for (const candidate of candidates) {
+    const { lot } = candidate;
+    if (lot.skuId !== skuId || lot.unit !== "g" || lot.sourceSystem !== null || lot.sourceId !== null) continue;
+    let available = ZERO;
+    for (const balance of candidate.balances) {
+      if (balance.unit !== lot.unit || (balance.availabilityState !== "available" && balance.availabilityState !== "rehearsal_compatibility")) continue;
+      try { available += parseQ(balance.availableQuantity, balance.unit, "Stock apto para factura"); }
+      catch { nativeLotFailure("native_lot_availability_invalid"); }
+    }
+    if (available <= ZERO) continue;
+    try {
+      const option = await resolveAppSheetNativeLot(sourceLotReadContext(tx, actor, now, lot.id), skuId, lot.id);
+      output.push({ ...option, availableQuantity: formatQ(available, lot.unit) });
+    } catch (error) {
+      if (error instanceof OperationError && error.code === "APPSHEET_NATIVE_STOCK_LOT_NOT_ELIGIBLE") continue;
+      throw error;
+    }
+  }
+  return output.sort((a, b) => a.receivedDate.localeCompare(b.receivedDate) || a.stockLotId.localeCompare(b.stockLotId));
 }
 
 registerCommand("AppSheetSourceLotReviewed", {

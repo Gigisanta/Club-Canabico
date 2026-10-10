@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { canonicalCommandBodyHash } from "../server/operations/canonical.js";
 import {
   appSheetPendingImportCommandEnvelope,
   AppSheetPendingImportCliError,
@@ -74,6 +75,50 @@ test("same actor, command, target and request UUID reconstruct the receipt envel
   });
 
   assert.deepEqual(retry, initial);
+});
+
+test("plan review and staging normalize backup snapshot dates at the command transport boundary", () => {
+  const backupSnapshotAt = new Date("2026-10-09T12:05:00.000Z");
+  for (const command of ["AppSheetPendingImportPlanReviewed", "AppSheetPendingImportStaged"]) {
+    const data = { backupSnapshotAt, preservedUndefined: undefined };
+    const initial = appSheetPendingImportCommandEnvelope({
+      actorId: "reviewer-1", targetId: "pending-batch-1", expectedVersion: 0,
+      command, requestId, data,
+    });
+    assert.equal(initial.data.backupSnapshotAt, backupSnapshotAt.toISOString());
+    assert.equal(Object.hasOwn(initial.data, "preservedUndefined"), true);
+    assert.equal(initial.data.preservedUndefined, undefined);
+    assert.equal(data.backupSnapshotAt, backupSnapshotAt, "normalization must not mutate the caller's binding");
+
+    const receipt = { actorId: "reviewer-1", targetId: "pending-batch-1", command,
+      occurredAt: new Date(initial.occurredAt), resultingVersion: 1 };
+    const retry = appSheetPendingImportCommandEnvelope({
+      actorId: "reviewer-1", targetId: "pending-batch-1", expectedVersion: 1,
+      command, requestId, priorReceipt: receipt,
+      data: { backupSnapshotAt: backupSnapshotAt.toISOString(), preservedUndefined: undefined },
+    });
+
+    assert.deepEqual(retry, initial, "a JSON-backed retry must reconstruct the original wire envelope");
+    assert.equal(canonicalCommandBodyHash(retry), canonicalCommandBodyHash(initial),
+      "Date and ISO inputs must produce the same idempotency body hash");
+  }
+
+  const backupSnapshotAtIso = backupSnapshotAt.toISOString();
+  const alreadySerialized = appSheetPendingImportCommandEnvelope({
+    actorId: "reviewer-1", targetId: "pending-batch-1", expectedVersion: 0,
+    command: "AppSheetPendingImportPlanReviewed", requestId,
+    data: { backupSnapshotAt: backupSnapshotAtIso },
+  });
+  assert.equal(alreadySerialized.data.backupSnapshotAt, backupSnapshotAtIso,
+    "an ISO value already on the wire must remain byte-for-byte stable");
+
+  const unrelatedCommand = appSheetPendingImportCommandEnvelope({
+    actorId: "reviewer-1", targetId: "pending-batch-1", expectedVersion: 0,
+    command: "AppSheetHistorySourceReviewed", requestId,
+    data: { backupSnapshotAt },
+  });
+  assert.equal(unrelatedCommand.data.backupSnapshotAt, backupSnapshotAt,
+    "date normalization is scoped to the command schemas that require the binding");
 });
 
 test("a receipt for another actor, command or target cannot replace the current envelope version", () => {

@@ -8,9 +8,12 @@ import { reportPeriodDateBounds } from "./report-queries.js";
 import { signCursor, verifyCursor } from "./signed-cursor.js";
 import { stockFactScopeWhere } from "./stock-scope.js";
 import { isAppSheetInvoiceTotalPending } from "../../shared/operations/appsheet.js";
-import { APPSHEET_INVOICE_RULE_VERSION } from "../../shared/operations/appsheet-invoice-rules.js";
+import { APPSHEET_INVOICE_RULE_VERSION_V1 } from "../../shared/operations/appsheet-invoice-rules.js";
 
 const feeds = ["sales-lines", "ledger", "stock", "history"] as const;
+// These values describe persisted snapshot semantics. Do not substitute the
+// current rule version: older invoices must remain readable after future bumps.
+const APPSHEET_INVOICE_RULE_VERSION_V2 = "appsheet-invoice-rules/v2" as const;
 type Feed = typeof feeds[number];
 type Scope = Awaited<ReturnType<typeof objectScope>>;
 const query = z.strictObject({ from: z.iso.date().optional(), to: z.iso.date().optional(), cursor: z.string().max(4096).optional(), limit: z.coerce.number().int().min(1).max(200).default(100) });
@@ -64,18 +67,23 @@ async function page(tx: Tx, feed: Feed, range: { from?: string; to?: string }, s
       const totalConsistent = quoteTotal !== null && BigInt(quoteTotal) === row.order.totalMinor;
       const invoiceTotalKnown = !appSheet || ((calculationState === "defined" || calculationState === "staff_confirmed") && totalConsistent);
       const staffConfirmed = appSheet && calculationState === "staff_confirmed";
-      // v2 stores the calculated AppSheet Moto value under its source name.
-      // Keep reading clientTotalMinor for prior snapshots; staff confirmations
-      // continue to use their separately recorded resolution amount.
-      const motoUsesV2Subtotal = appSheet && formulaEvidence.ruleVersion === APPSHEET_INVOICE_RULE_VERSION;
+      // Persisted v1 stores Moto's total; persisted v2 stores its calculated
+      // subtotal. Historical snapshots without a ruleVersion predate versioned
+      // formulas and stored the amount as clientTotalMinor; explicit unknown
+      // markers remain unsafe to interpret.
+      const motoUsesV1Total = appSheet && formulaEvidence.ruleVersion === APPSHEET_INVOICE_RULE_VERSION_V1;
+      const motoUsesV2Subtotal = appSheet && formulaEvidence.ruleVersion === APPSHEET_INVOICE_RULE_VERSION_V2;
+      const motoUsesVersionlessStoredTotal = appSheet && !Object.hasOwn(formulaEvidence, "ruleVersion");
       const calculatedMotoV2 = motoUsesV2Subtotal && calculationState === "defined";
       const firstLine = firstLineByOrder.get(row.orderId) === row.id;
       const productTotal = staffConfirmed && typeof resolution.productsTotalMinor === "string"
         ? resolution.productsTotalMinor : staffConfirmed ? null : typeof productComponent.totalMinor === "string" ? productComponent.totalMinor : null;
       const motoTotal = staffConfirmed && typeof resolution.motoClientTotalMinor === "string"
         ? resolution.motoClientTotalMinor : staffConfirmed ? null
-          : motoUsesV2Subtotal
-            ? calculatedMotoV2 && typeof motoComponent.clientSubtotalMinor === "string" ? motoComponent.clientSubtotalMinor : null
+          : appSheet
+            ? motoUsesV1Total || motoUsesVersionlessStoredTotal
+              ? typeof motoComponent.clientTotalMinor === "string" ? motoComponent.clientTotalMinor : null
+              : motoUsesV2Subtotal && calculatedMotoV2 && typeof motoComponent.clientSubtotalMinor === "string" ? motoComponent.clientSubtotalMinor : null
             : typeof motoComponent.clientTotalMinor === "string" ? motoComponent.clientTotalMinor : null;
       const lineBasis = lineBasisByOrder.get(row.orderId)?.toString() ?? "0";
       const validProductTotal = productTotal !== null && /^(0|[1-9][0-9]*)$/.test(productTotal);

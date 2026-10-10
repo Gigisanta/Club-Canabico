@@ -5,7 +5,7 @@ import { parse as parseCsv } from "csv-parse/sync";
 import type { AddressInfo } from "node:net";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import { splitSqlStatements } from "./migration-sql.js";
 
 async function createReportTestSchema() {
@@ -238,7 +238,12 @@ test("pending AppSheet captures stay outside official reports while generic orde
     data: {
       id: "unknown-appsheet-order", memberId: "utc-boundary-member", channel: "local", currency: "ARS",
       commercialState: "confirmed", fulfillmentState: "delivered",
-      quote: { source: "appsheet-invoice", capturedBaseMinor: "900", capturedProductMinor: "800", totalCalculationState: "future-review" },
+      quote: {
+        source: "appsheet-invoice", capturedBaseMinor: "900", capturedProductMinor: "800",
+        totalCalculationState: "future-review",
+        appSheetFormula: { ruleVersion: "appsheet-invoice-rules/v999" },
+        paymentComponents: { moto: { paymentMethod: "cash", clientTotalMinor: "90" } },
+      },
       subtotalMinor: 800n, totalMinor: 900n, deliveryMinor: 100n, address: {}, createdBy: "report-contract-fixture", confirmedAt: fixture,
     },
   });
@@ -253,7 +258,8 @@ test("pending AppSheet captures stay outside official reports while generic orde
         appSheetFormula: { ruleVersion: "appsheet-invoice-rules/v2", results: { Subtotal_Cliente_Moto: "315" } },
         paymentComponents: {
           products: { paymentMethod: "transfer", transferMinor: "50", totalMinor: "1050" },
-          moto: { paymentMethod: "transfer", clientTariffMinor: "300", transferMinor: "15", clientSubtotalMinor: "315" },
+          // Preserve a conflicting legacy field to ensure persisted v2 semantics win after future rule-version bumps.
+          moto: { paymentMethod: "transfer", clientTariffMinor: "300", transferMinor: "15", clientSubtotalMinor: "315", clientTotalMinor: "900" },
         },
       },
       address: {}, createdBy: "report-contract-fixture", confirmedAt: fixture,
@@ -500,7 +506,9 @@ test("pending AppSheet captures stay outside official reports while generic orde
   assert.equal(manualExportRows[0]!.invoiceSnapshotHash, "a".repeat(64));
   assert.equal(manualExportRows[1]!.invoiceTotalMinor, "");
   assert.equal(manualExportRows[1]!.invoiceMotoClientTotalMinor, "");
-  assert.equal(exportedRows.find(row => row.objectId === "unknown-appsheet-order")!.kind, "captured-product-line");
+  const unknownRuleInvoice = exportedRows.find(row => row.objectId === "unknown-appsheet-order")!;
+  assert.equal(unknownRuleInvoice.kind, "captured-product-line");
+  assert.equal(unknownRuleInvoice.invoiceMotoClientTotalMinor, "");
 
   const calculatedV2Rows = exportedRows.filter(row => row.objectId === "v2-calculated-appsheet-order");
   assert.equal(calculatedV2Rows.length, 2);
@@ -515,6 +523,64 @@ test("pending AppSheet captures stay outside official reports while generic orde
   const legacyV1Invoice = exportedRows.find(row => row.objectId === "legacy-v1-moto-order")!;
   assert.equal(legacyV1Invoice.invoiceTotalMinor, "475");
   assert.equal(legacyV1Invoice.invoiceMotoClientTotalMinor, "75");
+
+  const legacyV1Order = await reportTestSchema!.db.operationOrder.findUnique({
+    where: { id: "legacy-v1-moto-order" },
+    select: { quote: true },
+  });
+  assert.ok(legacyV1Order);
+  assert.ok(legacyV1Order.quote !== null && typeof legacyV1Order.quote === "object" && !Array.isArray(legacyV1Order.quote));
+  const versionlessQuote = {
+    ...(legacyV1Order.quote as Prisma.JsonObject),
+    appSheetFormula: {},
+  } satisfies Prisma.InputJsonObject;
+  await reportTestSchema!.db.operationOrder.update({
+    where: { id: "legacy-v1-moto-order" },
+    data: { quote: versionlessQuote },
+  });
+
+  const readCurrentSalesLineRows = async () => {
+    const response = await fetch(`http://127.0.0.1:${address.port}/exports/sales-lines?from=${civilDate}&to=${civilDate}&limit=200`);
+    assert.equal(response.status, 200, await response.clone().text());
+    const block = await response.json() as { csv: string; nextCursor: string | null; coverage: { queryVersion: string } };
+    assert.equal(block.coverage.queryVersion, "canonical-csv-v3");
+    assert.equal(block.nextCursor, null, "fixture report must fit in a single export page");
+    return parseCsv(block.csv, { bom: true, columns: true, skip_empty_lines: true }) as Array<Record<string, string>>;
+  };
+  const versionlessRows = await readCurrentSalesLineRows();
+  const versionlessInvoice = versionlessRows.find(row => row.objectId === "legacy-v1-moto-order")!;
+  assert.equal(versionlessInvoice.invoiceTotalState, "known");
+  assert.equal(versionlessInvoice.invoiceMotoClientTotalMinor, "75",
+    "an absent ruleVersion preserves the historical stored client total");
+
+  const explicitNullFormulaEvidence = { ruleVersion: null } satisfies Prisma.InputJsonObject;
+  const explicitNullQuote = {
+    ...versionlessQuote,
+    appSheetFormula: explicitNullFormulaEvidence,
+  } satisfies Prisma.InputJsonObject;
+  await reportTestSchema!.db.operationOrder.update({
+    where: { id: "legacy-v1-moto-order" },
+    data: { quote: explicitNullQuote },
+  });
+  const explicitNullRows = await readCurrentSalesLineRows();
+  const explicitNullInvoice = explicitNullRows.find(row => row.objectId === "legacy-v1-moto-order")!;
+  assert.equal(explicitNullInvoice.invoiceTotalState, "known");
+  assert.equal(explicitNullInvoice.invoiceMotoClientTotalMinor, "",
+    "an explicitly present null ruleVersion remains unsupported");
+
+  const explicitUnknownQuote = {
+    ...versionlessQuote,
+    appSheetFormula: { ruleVersion: "appsheet-invoice-rules/v999" },
+  } satisfies Prisma.InputJsonObject;
+  await reportTestSchema!.db.operationOrder.update({
+    where: { id: "legacy-v1-moto-order" },
+    data: { quote: explicitUnknownQuote },
+  });
+  const explicitUnknownRows = await readCurrentSalesLineRows();
+  const explicitUnknownInvoice = explicitUnknownRows.find(row => row.objectId === "legacy-v1-moto-order")!;
+  assert.equal(explicitUnknownInvoice.invoiceTotalState, "known");
+  assert.equal(explicitUnknownInvoice.invoiceMotoClientTotalMinor, "",
+    "an explicit unsupported ruleVersion remains blank for a defined invoice total");
 
   const incompleteV2Invoice = exportedRows.find(row => row.objectId === "v2-missing-moto-order")!;
   assert.equal(incompleteV2Invoice.invoiceTotalMinor, "500");

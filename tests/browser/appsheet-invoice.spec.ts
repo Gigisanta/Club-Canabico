@@ -68,19 +68,28 @@ async function addProduct(page: Page, invoice: ReturnType<Page["getByTestId"]>, 
   scale: string;
   quantity: string;
   total: string;
+  stockLotId?: string;
 }) {
   await invoice.getByTestId("appsheet-add-product").click();
   const product = page.getByTestId("appsheet-product-dialog");
   await expect(product).toBeVisible();
   await field(product, "line-date").fill(values.date);
   const productChoice = field(product, "line-skuId");
-  const pendingChoice = productChoice.locator(`option[data-sku-id="${values.skuId}"][data-source-lot-pending="true"]`);
-  if (await pendingChoice.count() === 1) {
-    const value = await pendingChoice.getAttribute("value");
-    if (value === null) throw new Error("La opción pendiente de origen no tiene un valor seleccionable.");
+  if (values.stockLotId) {
+    const nativeChoice = productChoice.locator(`option[data-sku-id="${values.skuId}"][data-stock-lot-id="${values.stockLotId}"]`);
+    await expect(nativeChoice).toHaveCount(1);
+    const value = await nativeChoice.getAttribute("value");
+    if (value === null) throw new Error("La opción nativa no tiene un valor seleccionable.");
     await productChoice.selectOption(value);
   } else {
-    await productChoice.selectOption(values.skuId);
+    const pendingChoice = productChoice.locator(`option[data-sku-id="${values.skuId}"][data-source-lot-pending="true"]`);
+    if (await pendingChoice.count() === 1) {
+      const value = await pendingChoice.getAttribute("value");
+      if (value === null) throw new Error("La opción pendiente de origen no tiene un valor seleccionable.");
+      await productChoice.selectOption(value);
+    } else {
+      await productChoice.selectOption(values.skuId);
+    }
   }
   await setSelectOrFill(product, "line-scale", values.scale);
   await field(product, "line-quantity").fill(values.quantity);
@@ -123,7 +132,11 @@ async function getJson(page: Page, path: string) {
   return response.json();
 }
 
-async function fulfillCatalogAvailability(route: Route, availability: (skuId: string) => string | undefined) {
+async function fulfillCatalogAvailability(
+  route: Route,
+  availability: (skuId: string) => string | undefined,
+  nativeLots?: (skuId: string) => Array<Record<string, unknown>> | undefined,
+) {
   const response = await route.fetch();
   if (response.status() !== 200) return route.fulfill({ response });
   const body = await response.json() as { items?: Array<Record<string, unknown>> };
@@ -132,8 +145,14 @@ async function fulfillCatalogAvailability(route: Route, availability: (skuId: st
       ? item.appSheet as Record<string, unknown>
       : {};
     const { availability: _previous, ...rest } = appSheet;
-    const nextAvailability = availability(String(item.id));
-    return { ...item, appSheet: nextAvailability === undefined ? rest : { ...rest, availability: nextAvailability } };
+    const skuId = String(item.id);
+    const nextAvailability = availability(skuId);
+    const nativeLotOptions = nativeLots?.(skuId);
+    return {
+      ...item,
+      appSheet: nextAvailability === undefined ? rest : { ...rest, availability: nextAvailability },
+      ...(nativeLotOptions === undefined ? {} : { requiresAppSheetSourceLot: true, appSheetNativeLots: nativeLotOptions }),
+    };
   });
   return route.fulfill({ response, json: { ...body, items } });
 }
@@ -993,10 +1012,11 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
   });
   // Client-only replacement preview exercises draft attention; it is not canonical proof or an authority activation.
   let skuCAvailability = "Sí";
+  let skuAAvailability = "Sí";
   let catalogReads = 0;
   await page.route("**/api/operations/catalog**", async route => {
     catalogReads += 1;
-    return fulfillCatalogAvailability(route, skuId => skuId === "ops-sku-c" ? skuCAvailability : "NO");
+    return fulfillCatalogAvailability(route, skuId => skuId === "ops-sku-c" ? skuCAvailability : skuId === "ops-sku-a" ? skuAAvailability : "NO");
   });
   const invoiceUpdatedPosts: Request[] = [];
   const invoiceConfirmedPosts: Request[] = [];
@@ -1309,6 +1329,106 @@ test("saving an AppSheet preorder stays pending until the separate confirmation 
   expect(confirmed.reservations[0]).toMatchObject({ quantity: "3" });
   expect(confirmed.deliveries).toHaveLength(0);
   expect(await financeSnapshot(page)).toEqual(financeBefore);
+
+  const priceBasisOrderId = randomUUID();
+  const priceBasisLineIds = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+  await postCommand(page, {
+    ...savedEnvelope,
+    requestId: randomUUID(),
+    targetId: priceBasisOrderId,
+  });
+  const seedLines = initialUpdateEnvelope.data.lines as Array<Record<string, unknown>>;
+  expect(seedLines).toHaveLength(1);
+  await postCommand(page, {
+    ...initialUpdateEnvelope,
+    requestId: randomUUID(),
+    targetId: priceBasisOrderId,
+    data: {
+      ...initialUpdateEnvelope.data,
+      lines: priceBasisLineIds.map(id => ({ ...seedLines[0]!, id, pricePerGramMinor: "400" })),
+    },
+  });
+
+  const priceBasisRefresh = page.waitForResponse(response =>
+    response.request().method() === "GET" && new URL(response.url()).pathname === "/api/operations/orders",
+  );
+  await page.getByRole("button", { name: "↻ Actualizar", exact: true }).evaluate(element => {
+    element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+  });
+  await priceBasisRefresh;
+  const priceBasisRow = page.locator("tbody tr").filter({ hasText: `Factura #${priceBasisOrderId.slice(0, 8).toUpperCase()}` });
+  await expect(priceBasisRow).toHaveCount(1);
+  await priceBasisRow.getByRole("button", { name: "Formulario de venta", exact: true }).click();
+  const priceBasisEditor = page.getByTestId("appsheet-invoice-dialog");
+  await expect(priceBasisEditor).toBeVisible();
+
+  const priceBasisChanges = [
+    { id: priceBasisLineIds[0]!, field: "line-skuId", value: "ops-sku-a" },
+    { id: priceBasisLineIds[1]!, field: "line-scale", value: "Precio_10_Gramos" },
+    { id: priceBasisLineIds[2]!, field: "line-quantity", value: "4" },
+  ] as const;
+  for (const change of priceBasisChanges) {
+    await priceBasisEditor.getByTestId(`appsheet-edit-product-${change.id}`).click();
+    const product = page.getByTestId("appsheet-product-dialog");
+    await expect(product).toBeVisible();
+    const changedField = field(product, change.field);
+    if (change.field === "line-quantity") await changedField.fill(change.value);
+    else await changedField.selectOption(change.value);
+    await expect(field(product, "line-total")).toHaveValue("12.01");
+    await product.getByRole("button", { name: "Guardar cambios", exact: true }).click();
+    await expect(product).toHaveCount(0);
+  }
+
+  const priceBasisUpdatePromise = saveResponse(page, "InvoiceUpdated");
+  await priceBasisEditor.getByTestId("appsheet-save-invoice").click();
+  const priceBasisUpdate = await priceBasisUpdatePromise;
+  const priceBasisStatus = priceBasisUpdate.status();
+  const priceBasisText = priceBasisStatus === 200 ? "" : await priceBasisUpdate.text();
+  expect(priceBasisStatus, priceBasisText).toBe(200);
+  const priceBasisEnvelope = priceBasisUpdate.request().postDataJSON() as CommandEnvelope;
+  expect(priceBasisEnvelope.targetId).toBe(priceBasisOrderId);
+  const changedPayloadLines = priceBasisEnvelope.data.lines as Array<Record<string, unknown>>;
+  expect(changedPayloadLines).toHaveLength(4);
+  const unchangedPricePayload = changedPayloadLines.find(line => line.id === priceBasisLineIds[3]);
+  expect(unchangedPricePayload).toMatchObject({
+    id: priceBasisLineIds[3], skuId: "ops-sku-c", scale: "Precio_5_Gramos", quantity: "3", totalMinor: "1201", pricePerGramMinor: "400",
+  });
+  for (const changedLineId of priceBasisLineIds.slice(0, 3)) {
+    const line = changedPayloadLines.find(candidate => candidate.id === changedLineId);
+    expect(line).toBeDefined();
+    expect(line).not.toHaveProperty("pricePerGramMinor");
+    expect(line.totalMinor).toBe("1201");
+  }
+  await expect(priceBasisEditor).toHaveCount(0);
+
+  const priceBasisSaved = await getJson(page, `orders/${encodeURIComponent(priceBasisOrderId)}`);
+  expect(priceBasisSaved.order).toMatchObject({ commercialState: "preorder" });
+  expect(priceBasisSaved.reservations).toHaveLength(0);
+  expect(priceBasisSaved.deliveries).toHaveLength(0);
+  const savedInputs = priceBasisSaved.order.quote.input.lines as Array<Record<string, unknown>>;
+  const savedDetails = priceBasisSaved.order.quote.lines as Array<Record<string, unknown>>;
+  expect(savedInputs).toHaveLength(4);
+  expect(savedDetails).toHaveLength(4);
+  const expectedPriceBasisLines = [
+    { id: priceBasisLineIds[0]!, skuId: "ops-sku-a", scale: "Precio_5_Gramos", quantity: "3" },
+    { id: priceBasisLineIds[1]!, skuId: "ops-sku-c", scale: "Precio_10_Gramos", quantity: "3" },
+    { id: priceBasisLineIds[2]!, skuId: "ops-sku-c", scale: "Precio_5_Gramos", quantity: "4" },
+    { id: priceBasisLineIds[3]!, skuId: "ops-sku-c", scale: "Precio_5_Gramos", quantity: "3" },
+  ];
+  for (const expected of expectedPriceBasisLines) {
+    const input = savedInputs.find(line => line.id === expected.id);
+    const detail = savedDetails.find(line => line.id === expected.id);
+    expect(input).toMatchObject({ ...expected, totalMinor: "1201" });
+    expect(detail).toMatchObject({ id: expected.id, skuId: expected.skuId, scale: expected.scale, requested: expected.quantity, explicitTotalMinor: "1201" });
+    if (expected.id === priceBasisLineIds[3]) {
+      expect(input).toMatchObject({ pricePerGramMinor: "400" });
+      expect(detail).toMatchObject({ pricePerGramMinor: "400" });
+    } else {
+      expect(input).not.toHaveProperty("pricePerGramMinor");
+      expect(detail).not.toHaveProperty("pricePerGramMinor");
+    }
+  }
+  expect(await financeSnapshot(page)).toEqual(financeBefore);
 });
 
 function mockedCataloguePage(prefix: string, count: number, nextCursor: string | null) {
@@ -1416,8 +1536,9 @@ test("a late catalog page cannot leak rows or its cursor into a newer search", a
   expect(commandPosts).toEqual([]);
 });
 
-test("an AppSheet source-lot invoice choice transports the explicit non-FIFO SKU and lot pair", async ({ page }) => {
+test("one AppSheet Article selector combines historical and Bombo lots and transports each SKU/lot pair", async ({ page }) => {
   const selectedLotId = "source-lot-later-selected";
+  const selectedNativeLotId = "native-lot-received-selected";
   await page.route("**/api/operations/context", async route => {
     const response = await route.fetch();
     if (response.status() !== 200) return route.fulfill({ response });
@@ -1446,6 +1567,10 @@ test("an AppSheet source-lot invoice choice transports the explicit non-FIFO SKU
             sourceLabelIdentity: { variety: "Variedad fuente", description: "Descripción capturada", purchaseLotId: "COMPRA-2026-77" } },
           { sourceLotId: "source-lot-unavailable", receivedDate: "2026-10-09", availableQuantity: "0" },
         ],
+        appSheetNativeLots: [
+          { origin: "bombo-goods-receipt", stockLotId: selectedNativeLotId, lotLabel: "Lote recibido", receivedDate: "2026-10-09", availableQuantity: "12" },
+          { origin: "bombo-goods-receipt", stockLotId: "native-lot-unavailable", lotLabel: "Sin saldo", receivedDate: "2026-10-09", availableQuantity: "0" },
+        ],
       };
     });
     return route.fulfill({ response, json: { ...body, items } });
@@ -1470,9 +1595,13 @@ test("an AppSheet source-lot invoice choice transports the explicit non-FIFO SKU
   const combinedChoice = field(product, "line-skuId");
   await expect(field(product, "line-sourceLotId")).toHaveCount(0);
   const selectedOption = combinedChoice.locator(`option[data-sku-id="ops-sku-c"][data-source-lot-id="${selectedLotId}"]`);
+  const selectedNativeOption = combinedChoice.locator(`option[data-sku-id="ops-sku-c"][data-stock-lot-id="${selectedNativeLotId}"]`);
   await expect(selectedOption).toHaveCount(1);
   await expect(selectedOption).toHaveText("Variedad fuente |Descripción capturada - COMPRA-2026-77 (18 gr)");
+  await expect(selectedNativeOption).toHaveCount(1);
+  await expect(selectedNativeOption).toHaveText("ops-sku-c · Lote recibido · 12 g disponibles");
   await expect(combinedChoice.locator('option[data-source-lot-id="source-lot-unavailable"]')).toHaveCount(0);
+  await expect(combinedChoice.locator('option[data-stock-lot-id="native-lot-unavailable"]')).toHaveCount(0);
   const selectedOptionValue = await selectedOption.getAttribute("value");
   if (selectedOptionValue === null) throw new Error("La opción combinada de variedad y lote no tiene valor.");
   await combinedChoice.selectOption(selectedOptionValue);
@@ -1484,6 +1613,20 @@ test("an AppSheet source-lot invoice choice transports the explicit non-FIFO SKU
   await product.getByRole("button", { name: "Añadir producto", exact: true }).click();
   await expect(product).toHaveCount(0);
 
+  await invoice.getByTestId("appsheet-add-product").click();
+  const nativeProduct = page.getByTestId("appsheet-product-dialog");
+  const nativeChoice = field(nativeProduct, "line-skuId");
+  const nativeOption = nativeChoice.locator(`option[data-sku-id="ops-sku-c"][data-stock-lot-id="${selectedNativeLotId}"]`);
+  const nativeOptionValue = await nativeOption.getAttribute("value");
+  if (nativeOptionValue === null) throw new Error("La opción combinada de variedad y lote nativo no tiene valor.");
+  await nativeChoice.selectOption(nativeOptionValue);
+  await field(nativeProduct, "line-date").fill(invoiceDate);
+  await field(nativeProduct, "line-scale").selectOption("Precio_5_Gramos");
+  await field(nativeProduct, "line-quantity").fill("2");
+  await field(nativeProduct, "line-total").fill("8.00");
+  await nativeProduct.getByRole("button", { name: "Añadir producto", exact: true }).click();
+  await expect(nativeProduct).toHaveCount(0);
+
   const saveResponsePromise = saveResponse(page, "InvoiceSaved");
   await invoice.getByTestId("appsheet-save-invoice").click();
   const response = await saveResponsePromise;
@@ -1491,10 +1634,38 @@ test("an AppSheet source-lot invoice choice transports the explicit non-FIFO SKU
   await expect(invoice.getByRole("alert")).toContainText("Rechazo sintético");
   expect(savedEnvelope).not.toBeNull();
   expect(savedEnvelope!.command).toBe("InvoiceSaved");
-  expect(savedEnvelope!.data.lines).toMatchObject([{ skuId: "ops-sku-c", sourceLotId: selectedLotId }]);
+  expect(savedEnvelope!.data.lines).toMatchObject([
+    { skuId: "ops-sku-c", sourceLotId: selectedLotId },
+    { skuId: "ops-sku-c", stockLotId: selectedNativeLotId },
+  ]);
+  for (const line of savedEnvelope!.data.lines as Array<Record<string, unknown>>) {
+    expect(Boolean(line.sourceLotId) && Boolean(line.stockLotId)).toBe(false);
+  }
 });
 
 test("an empty AppSheet preorder shell saves as pending, rejects failed writes, and blocks an invalid snapshot", async ({ page }) => {
+  const nativePreviewLotId = "ui-preview-native-lot-does-not-prove-stock-authority";
+  await page.route("**/api/operations/context", async route => {
+    const response = await route.fetch();
+    if (response.status() !== 200) return route.fulfill({ response });
+    const context = await response.json();
+    // This client fixture exposes the native-lot editor branch only; it does not activate or prove server authority.
+    return route.fulfill({ response, json: {
+      ...context,
+      authority: { ...context.authority, mode: "active", cutoverProfile: "appsheet-replacement" },
+    } });
+  });
+  await page.route("**/api/operations/catalog**", async route => fulfillCatalogAvailability(
+    route,
+    skuId => skuId === "ops-sku-c" ? "Sí" : undefined,
+    skuId => skuId === "ops-sku-c" ? [{
+      origin: "bombo-goods-receipt",
+      stockLotId: nativePreviewLotId,
+      lotLabel: "Lote nativo de UI",
+      receivedDate: "2026-10-09",
+      availableQuantity: "12",
+    }] : undefined,
+  ));
   let rejectNextUpdate = true;
   let rejectedUpdateEnvelope: CommandEnvelope | null = null;
   await page.route("**/api/operations/commands", async route => {
@@ -1561,6 +1732,7 @@ test("an empty AppSheet preorder shell saves as pending, rejects failed writes, 
     scale: "Precio_5_Gramos",
     quantity: "3",
     total: "12.01",
+    stockLotId: nativePreviewLotId,
   });
 
   const productRow = editor.locator(".appsheet-dialog-lines li");
@@ -1569,7 +1741,11 @@ test("an empty AppSheet preorder shell saves as pending, rejects failed writes, 
   const product = page.getByTestId("appsheet-product-dialog");
   await expect(product).toBeVisible();
   const productChoice = field(product, "line-skuId");
-  await expect(productChoice).toHaveValue("ops-sku-c");
+  const selectedNativeOption = productChoice.locator(`option[data-sku-id="ops-sku-c"][data-stock-lot-id="${nativePreviewLotId}"]`);
+  await expect(selectedNativeOption).toHaveCount(1);
+  const selectedNativeValue = await selectedNativeOption.getAttribute("value");
+  if (selectedNativeValue === null) throw new Error("La preventa no conserva el valor seleccionable del lote nativo.");
+  await expect(productChoice).toHaveValue(selectedNativeValue);
   await expect(field(product, "line-sourceLotId")).toHaveCount(0);
   await product.getByRole("button", { name: "Guardar cambios", exact: true }).click();
   await expect(product).toHaveCount(0);
@@ -1589,7 +1765,7 @@ test("an empty AppSheet preorder shell saves as pending, rejects failed writes, 
   const rejected = await rejectedPromise;
   expect(rejected.status()).toBe(422);
   expect(rejectedUpdateEnvelope).not.toBeNull();
-  expect(rejectedUpdateEnvelope!.data).toMatchObject({ preorder: true, lines: [{ totalMinor: "1201" }] });
+  expect(rejectedUpdateEnvelope!.data).toMatchObject({ preorder: true, lines: [{ totalMinor: "1201", stockLotId: nativePreviewLotId }] });
   expect(Object.hasOwn(rejectedUpdateEnvelope!.data, "acceptance")).toBe(false);
   await expect(editor.getByRole("alert")).toContainText("Rechazo sintético");
   await expect(field(editor, "note")).toHaveValue(note);
@@ -1620,7 +1796,7 @@ test("an empty AppSheet preorder shell saves as pending, rejects failed writes, 
     invoiceDate,
     preorder: true,
     note,
-    lines: [{ skuId: "ops-sku-c", scale: "Precio_5_Gramos", quantity: "3", totalMinor: "1201" }],
+    lines: [{ skuId: "ops-sku-c", scale: "Precio_5_Gramos", quantity: "3", totalMinor: "1201", stockLotId: nativePreviewLotId }],
   });
   expect(Object.hasOwn(updatedEnvelope.data, "acceptance")).toBe(false);
   expect(invoiceUpdatedPosts).toHaveLength(2);
@@ -1634,10 +1810,46 @@ test("an empty AppSheet preorder shell saves as pending, rejects failed writes, 
   expect(pending.order).toMatchObject({ id: shellId, memberId: "ops-member", commercialState: "preorder" });
   expect(pending.order.quote).toMatchObject({ note, input: { note, preorder: true } });
   expect(pending.order.quote.lines).toHaveLength(1);
-  expect(pending.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201" });
+  expect(pending.order.quote.input.lines[0]).toMatchObject({ skuId: "ops-sku-c", stockLotId: nativePreviewLotId });
+  expect(pending.order.quote.lines[0]).toMatchObject({ date: invoiceDate, scale: "Precio_5_Gramos", requested: "3", explicitTotalMinor: "1201", stockLotId: nativePreviewLotId });
   expect(Object.hasOwn(pending.order.quote.input.lines[0], "sourceLotId")).toBe(false);
   expect(pending.reservations).toHaveLength(0);
   expect(pending.deliveries).toHaveLength(0);
+  expect(await stockSnapshot(page, "ops-sku-c")).toEqual(stockBefore);
+  expect(await financeSnapshot(page)).toEqual(financeBefore);
+
+  preorderRow = page.locator("tbody tr").filter({ hasText: `Factura #${shellId.slice(0, 8).toUpperCase()}` });
+  await preorderRow.getByRole("button", { name: "Formulario de venta", exact: true }).click();
+  const rehydratedEditor = page.getByTestId("appsheet-invoice-dialog");
+  await expect(rehydratedEditor).toBeVisible();
+  const rehydratedLine = rehydratedEditor.locator(".appsheet-dialog-lines li");
+  await expect(rehydratedLine).toHaveCount(1);
+  await expect(rehydratedLine).toContainText("Lote Bombo Lote nativo de UI");
+  await rehydratedLine.getByRole("button", { name: "Editar producto", exact: true }).click();
+  const rehydratedProduct = page.getByTestId("appsheet-product-dialog");
+  const rehydratedChoice = field(rehydratedProduct, "line-skuId");
+  const rehydratedNativeOption = rehydratedChoice.locator(`option[data-sku-id="ops-sku-c"][data-stock-lot-id="${nativePreviewLotId}"]`);
+  await expect(rehydratedNativeOption).toHaveCount(1);
+  const rehydratedNativeValue = await rehydratedNativeOption.getAttribute("value");
+  if (rehydratedNativeValue === null) throw new Error("La preventa rehidratada no conserva el valor seleccionable del lote nativo.");
+  await expect(rehydratedChoice).toHaveValue(rehydratedNativeValue);
+  await expect(field(rehydratedProduct, "line-sourceLotId")).toHaveCount(0);
+  await rehydratedProduct.getByRole("button", { name: "Cancelar", exact: true }).click();
+  await rehydratedEditor.getByRole("button", { name: "Cerrar formulario", exact: true }).click();
+
+  const nativePreorderActions = preorderRow.locator("details.ops-row-actions-disclosure");
+  await nativePreorderActions.locator("summary").click();
+  await preorderRow.getByRole("button", { name: "Confirmar preventa", exact: true }).click();
+  const nativeConfirmationDialog = page.getByTestId("appsheet-invoice-dialog");
+  await expect(nativeConfirmationDialog).toBeVisible();
+  await expect(nativeConfirmationDialog.locator(".appsheet-saved-summary")).toContainText("Lote nativo de UI");
+  await expect(nativeConfirmationDialog.getByTestId("appsheet-confirm-preorder")).toBeEnabled();
+  await nativeConfirmationDialog.getByRole("button", { name: "Cancelar", exact: true }).click();
+  const afterNativePreviewCancel = await getJson(page, `orders/${encodeURIComponent(shellId)}`);
+  expect(afterNativePreviewCancel.order.commercialState).toBe("preorder");
+  expect(afterNativePreviewCancel.reservations).toHaveLength(0);
+  expect(afterNativePreviewCancel.deliveries).toHaveLength(0);
+  expect(invoiceConfirmedPosts.some(request => request.postDataJSON().targetId === shellId)).toBe(false);
   expect(await stockSnapshot(page, "ops-sku-c")).toEqual(stockBefore);
   expect(await financeSnapshot(page)).toEqual(financeBefore);
 

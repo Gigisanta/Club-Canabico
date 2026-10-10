@@ -47,6 +47,12 @@ export const appsheetInvoiceLine = z.strictObject({
   pricePerGramMinor: amountMinor.optional(),
   /** Selected C_Mercaderia source key; the server resolves it to one reviewed internal lot. */
   sourceLotId: z.string().trim().min(1).max(150).optional(),
+  /** Selected Bombo inventory lot created by a GoodsReceived receipt. */
+  stockLotId: z.string().trim().min(1).max(150).optional(),
+}).superRefine((line, ctx) => {
+  if (line.sourceLotId && line.stockLotId) {
+    ctx.addIssue({ code: "custom", path: ["stockLotId"], message: "Elegí un lote histórico AppSheet o un lote recibido por Bombo, no ambos." });
+  }
 });
 
 export const appsheetMoto = z.strictObject({

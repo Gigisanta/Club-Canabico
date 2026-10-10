@@ -24,7 +24,7 @@ function databaseTargetIdentity(url: URL) {
   return JSON.stringify([normalizedHost, url.port || "5432", decodeURIComponent(url.pathname.slice(1))]);
 }
 
-test("reviewed AppSheet source lots flow through the HTTP selector and confirmed invoice reservation", {
+test("reviewed AppSheet and native GoodsReceived lots flow through the HTTP selector and confirmed invoice reservation", {
   skip: !process.env.TEST_DATABASE_URL,
   timeout: 60_000,
 }, async () => {
@@ -575,6 +575,67 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
         projectionHash: sourceFixture.projection.projectionHash, destinationIdentity: productionDestinationIdentity,
         ...activationEntry, snapshot: activatedSnapshot } } });
 
+    // Exercise a native lot through the real purchase approval and GoodsReceived
+    // commands. The separate owner is the independent purchase reviewer.
+    const purchaseReviewerId = `appsheet-native-purchase-reviewer-${randomUUID()}`;
+    await db.user.create({ data: { id: purchaseReviewerId, name: "Synthetic purchase reviewer", email: `${purchaseReviewerId}@appsheet-invoice.test`, password, role: "owner" } });
+    await login(purchaseReviewerId);
+    const supplierId = `appsheet-native-supplier-${randomUUID()}`;
+    await db.supplier.create({ data: { id: supplierId, name: "Synthetic receipt supplier", key: supplierId } });
+    const purchaseId = `appsheet-native-purchase-${randomUUID()}`;
+    const purchaseLineId = `appsheet-native-purchase-line-${randomUUID()}`;
+    await command(envelope(purchaseId, "PurchaseOrderCreated", {
+      supplierId, agreementDate: today, currency: "ARS",
+      items: [{ lineId: purchaseLineId, skuId: sourceSku.id, unit: "g", quantity: "100", unitCost: "2" }],
+      evidence: { reference: "synthetic native-lot invoice test" },
+    }));
+    await command(envelope(purchaseId, "PurchaseOrderApproved", {
+      evidence: { reference: "independent synthetic purchase review" },
+    }, 1), purchaseReviewerId);
+    const goodsReceiptId = `appsheet-native-receipt-${randomUUID()}`;
+    const goodsReceivedRequest = envelope(goodsReceiptId, "GoodsReceived", {
+      purchaseId, receivedDate: today, locationId, custodianId: ownerId,
+      items: [{ lineId: purchaseLineId, quantity: "100", lotLabel: "Lote nativo de prueba" }],
+      evidence: { reference: "synthetic native-lot invoice test" },
+    });
+    const goodsReceived = await command(goodsReceivedRequest);
+    const receivedLot = goodsReceived.body.result.lots[0] as { lotId: string; balanceId: string };
+    assert.ok(receivedLot.lotId);
+    assert.ok(receivedLot.balanceId);
+    assert.equal(goodsReceived.body.result.receipt.receivedDate, today, "GoodsReceived command response records the persisted receipt date");
+    const receivedNativeLot = await db.inventoryLot.findUniqueOrThrow({ where: { id: receivedLot.lotId } });
+    assert.equal(receivedNativeLot.skuId, sourceSku.id);
+    assert.equal(receivedNativeLot.receiptId, goodsReceiptId);
+    assert.equal(receivedNativeLot.purchaseLineId, purchaseLineId);
+    assert.equal(receivedNativeLot.sourceSystem, null);
+    assert.equal(receivedNativeLot.sourceId, null);
+    const nativeReceiptEffects = async () => ({
+      receipt: await db.goodsReceipt.findUnique({ where: { id: goodsReceiptId } }),
+      lot: await db.inventoryLot.findUnique({ where: { id: receivedLot.lotId } }),
+      balance: await db.stockBalance.findUnique({ where: { id: receivedLot.balanceId } }),
+      facts: await db.stockFact.findMany({ where: { requestId: goodsReceivedRequest.requestId }, orderBy: { id: "asc" } }),
+      commandReceipts: await db.commandReceipt.findMany({ where: { requestId: goodsReceivedRequest.requestId } }),
+      audits: await db.operationAudit.findMany({ where: { requestId: goodsReceivedRequest.requestId }, orderBy: { id: "asc" } }),
+      outbox: await db.operationOutbox.findMany({ where: { requestId: goodsReceivedRequest.requestId } }),
+    });
+    const nativeReceiptEffectsAfterWrite = await nativeReceiptEffects();
+    assert.equal(nativeReceiptEffectsAfterWrite.facts.length, 1);
+    assert.equal(nativeReceiptEffectsAfterWrite.commandReceipts.length, 1);
+    assert.equal(nativeReceiptEffectsAfterWrite.audits.length, 2);
+    const goodsReceivedReplay = await command(goodsReceivedRequest);
+    assert.equal(goodsReceivedReplay.body.replay, true);
+    assert.deepEqual(await nativeReceiptEffects(), nativeReceiptEffectsAfterWrite, "GoodsReceived replay does not duplicate the receipt, balance, or stock fact");
+
+    // A positive on-hand native lot without the immutable receipt chain must not
+    // become a selectable option, even when it belongs to the eligible SKU.
+    const noProofLotId = `appsheet-native-unproven-lot-${randomUUID()}`;
+    const noProofBalanceId = `appsheet-native-unproven-balance-${randomUUID()}`;
+    await db.inventoryLot.create({ data: {
+      id: noProofLotId, skuId: sourceSku.id, receiptId: `missing-native-receipt-${randomUUID()}`, purchaseLineId: `missing-native-line-${randomUUID()}`,
+      label: "Lote sin recepción", unit: "g", unitCost: "2", costCurrency: "ARS", receivedAt: new Date(),
+    } });
+    await db.stockBalance.create({ data: { id: noProofBalanceId, lotId: noProofLotId, locationId, custodianId: ownerId, unit: "g", quantity: "50", reserved: "0" } });
+
     // Number allocation is a synthetic precondition; the test is about the
     // actual source-lot review and confirmed reservation transaction.
     const historyPublication = await db.legacyHistoryPublication.findUniqueOrThrow({ where: { sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM } });
@@ -590,7 +651,7 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
 
     const catalogResponse = await call("/operations/catalog?channel=local");
     assert.equal(catalogResponse.status, 200, await catalogResponse.clone().text());
-    const catalog = await catalogResponse.json() as { items: Array<{ id: string; appSheetSourceLots?: Array<any> }> };
+    const catalog = await catalogResponse.json() as { items: Array<{ id: string; appSheetSourceLots?: Array<any>; appSheetNativeLots?: Array<any> }> };
     const catalogSku = catalog.items.find(item => item.id === sourceSku.id);
     assert.ok(catalogSku);
     const sourceLotOptions = catalogSku.appSheetSourceLots ?? [];
@@ -603,6 +664,22 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
     assert.deepEqual(selectedOption.sourceLabelIdentity, {
       variety: "Fixture", description: "Synthetic catalog product", purchaseLotId: "purchase-source-lot-explicit-selection",
     }, "catalogue returns the exact captured label components, including the dereferenced variety");
+    const nativeLotOptions = catalogSku.appSheetNativeLots ?? [];
+    assert.equal(nativeLotOptions.length, 1, "only the lot with a complete Bombo GoodsReceived chain is selectable");
+    const selectedNativeLot = nativeLotOptions[0]!;
+    assert.deepEqual(selectedNativeLot, {
+      origin: "bombo-goods-receipt", stockLotId: receivedLot.lotId, lotLabel: "Lote nativo de prueba", receivedDate: today, availableQuantity: "100.000",
+    });
+    await db.operationAccess.update({ where: { userId: scopedId }, data: {
+      profile: "commercial", enabled: true, capabilities: ["orders.write"],
+      scope: { locationIds: ["outside-native-lot-location"], custodianIds: [ownerId] },
+    } });
+    const scopedCatalogResponse = await call("/operations/catalog?channel=local", scopedId);
+    assert.equal(scopedCatalogResponse.status, 200, await scopedCatalogResponse.clone().text());
+    const scopedCatalog = await scopedCatalogResponse.json() as { items: Array<{ id: string; appSheetNativeLots?: Array<any> }> };
+    const scopedCatalogSku = scopedCatalog.items.find(item => item.id === sourceSku.id);
+    assert.ok(scopedCatalogSku);
+    assert.deepEqual(scopedCatalogSku.appSheetNativeLots, [], "the selectable native lot is filtered by the caller's location scope");
 
     const invoiceTargetId = `appsheet-source-lot-invoice-${randomUUID()}`;
     const invoice = invoiceData({ preorder: false, quantity: "3", lineId: `source-lot-invoice-line-${randomUUID()}` });
@@ -646,6 +723,100 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
     const replayedInvoice = await command(invoiceRequest);
     assert.equal(replayedInvoice.body.replay, true);
     assert.deepEqual(await confirmedInvoiceEffects(), effectsAfterInvoice, "invoice replay does not double-reserve stock or advance numbering");
+
+    const nativeInvoiceTargetId = `appsheet-native-lot-invoice-${randomUUID()}`;
+    const nativeInvoice = invoiceData({ preorder: false, quantity: "3", lineId: `native-lot-invoice-line-${randomUUID()}` });
+    const nativeInvoiceInput: Record<string, any> = {
+      ...nativeInvoice, memberId: sourceMember.id,
+      lines: nativeInvoice.lines.map(line => ({ ...line, skuId: sourceSku.id, stockLotId: selectedNativeLot.stockLotId })),
+    };
+    delete nativeInvoiceInput.invoiceNumber;
+    const nativeInvoiceRequest = envelope(nativeInvoiceTargetId, "InvoiceSaved", nativeInvoiceInput);
+    const confirmedNativeInvoice = await send(nativeInvoiceRequest);
+    assert.equal(confirmedNativeInvoice.response.status, 200, JSON.stringify(confirmedNativeInvoice.body));
+    assert.equal(confirmedNativeInvoice.body.result.commercialState, "confirmed");
+    const savedNativeOrder = await db.operationOrder.findUniqueOrThrow({ where: { id: nativeInvoiceTargetId } });
+    assert.equal((savedNativeOrder.quote as any).input.lines[0].stockLotId, receivedLot.lotId);
+    assert.equal((savedNativeOrder.quote as any).lines[0].stockLotId, receivedLot.lotId, "the immutable invoice snapshot retains the selected native lot");
+    const nativeReservations = await db.stockReservation.findMany({ where: { orderId: nativeInvoiceTargetId } });
+    assert.equal(nativeReservations.length, 1);
+    assert.equal(nativeReservations[0]!.quantity.toString(), "3");
+    const nativeReservedBalance = await db.stockBalance.findUniqueOrThrow({ where: { id: nativeReservations[0]!.balanceId } });
+    assert.equal(nativeReservedBalance.lotId, receivedLot.lotId, "the invoice reserves only the selected Bombo GoodsReceived lot");
+    assert.equal(nativeReservedBalance.reserved.toString(), "3");
+    const nativeInvoiceEffects = async () => ({
+      order: await db.operationOrder.findUniqueOrThrow({ where: { id: nativeInvoiceTargetId } }),
+      object: await db.operationObject.findUniqueOrThrow({ where: { id: nativeInvoiceTargetId } }),
+      lines: await db.operationOrderLine.findMany({ where: { orderId: nativeInvoiceTargetId }, orderBy: { id: "asc" } }),
+      reservations: await db.stockReservation.findMany({ where: { orderId: nativeInvoiceTargetId }, orderBy: { id: "asc" } }),
+      balance: await db.stockBalance.findUniqueOrThrow({ where: { id: receivedLot.balanceId } }),
+      sequence: await db.appSheetInvoiceSequence.findUniqueOrThrow({ where: { namespace: capture.captureId } }),
+      numberReservations: await db.appSheetInvoiceNumberReservation.findMany({ where: { namespace: capture.captureId }, orderBy: { id: "asc" } }),
+      receipt: await db.commandReceipt.findUniqueOrThrow({ where: { requestId: nativeInvoiceRequest.requestId } }),
+      audits: await db.operationAudit.findMany({ where: { requestId: nativeInvoiceRequest.requestId }, orderBy: { id: "asc" } }),
+      outbox: await db.operationOutbox.findMany({ where: { requestId: nativeInvoiceRequest.requestId }, orderBy: { id: "asc" } }),
+    });
+    const nativeInvoiceEffectsAfterWrite = await nativeInvoiceEffects();
+    const replayedNativeInvoice = await command(nativeInvoiceRequest);
+    assert.equal(replayedNativeInvoice.body.replay, true);
+    assert.deepEqual(await nativeInvoiceEffects(), nativeInvoiceEffectsAfterWrite, "native invoice replay does not double-reserve stock or advance numbering");
+
+    const nativeFailureEffects = async () => ({
+      sequence: await db.appSheetInvoiceSequence.findUniqueOrThrow({ where: { namespace: capture.captureId } }),
+      numberReservations: await db.appSheetInvoiceNumberReservation.findMany({ where: { namespace: capture.captureId }, orderBy: { id: "asc" } }),
+      orderCount: await db.operationOrder.count(), orderLineCount: await db.operationOrderLine.count(),
+      reservationCount: await db.stockReservation.count(), assignmentCount: await db.deliveryAssignment.count(),
+      stockFactCount: await db.stockFact.count(), goodsReceiptCount: await db.goodsReceipt.count(), inventoryLotCount: await db.inventoryLot.count(),
+      balances: await db.stockBalance.findMany({ orderBy: { id: "asc" } }),
+      commandReceiptCount: await db.commandReceipt.count(), auditCount: await db.operationAudit.count(), outboxCount: await db.operationOutbox.count(),
+    });
+    async function assertRejectedNativeInvoice(targetId: string, line: Record<string, unknown>, status: number, code?: string, reason?: string) {
+      const failedInput: Record<string, any> = { ...invoiceData({ preorder: false, quantity: "3", lineId: `native-rejected-line-${randomUUID()}` }), memberId: sourceMember.id };
+      delete failedInput.invoiceNumber;
+      failedInput.lines = [{ ...failedInput.lines[0], ...line, skuId: sourceSku.id }];
+      const failedRequest = envelope(targetId, "InvoiceSaved", failedInput);
+      const beforeFailure = await nativeFailureEffects();
+      const failed = await send(failedRequest);
+      assert.equal(failed.response.status, status, JSON.stringify(failed.body));
+      if (code) assert.equal(failed.body.code, code, JSON.stringify(failed.body));
+      if (reason) assert.equal(failed.body.details?.reason, reason, JSON.stringify(failed.body));
+      assert.deepEqual(await nativeFailureEffects(), beforeFailure, "rejected native invoice leaves the invoice sequence, balances, and command effects unchanged");
+      assert.equal(await db.operationOrder.findUnique({ where: { id: targetId } }), null);
+      assert.equal(await db.operationOrderLine.count({ where: { orderId: targetId } }), 0);
+      assert.equal(await db.operationObject.findUnique({ where: { id: targetId } }), null);
+      assert.equal(await db.appSheetInvoiceNumberReservation.findUnique({ where: { orderId: targetId } }), null);
+      assert.equal(await db.commandReceipt.count({ where: { requestId: failedRequest.requestId } }), 0);
+      assert.equal(await db.operationAudit.count({ where: { requestId: failedRequest.requestId } }), 0);
+      assert.equal(await db.operationOutbox.count({ where: { requestId: failedRequest.requestId } }), 0);
+    }
+    await assertRejectedNativeInvoice(`appsheet-native-no-proof-${randomUUID()}`, { stockLotId: noProofLotId }, 423,
+      "APPSHEET_NATIVE_STOCK_LOT_NOT_ELIGIBLE", "native_goods_receipt_missing_or_date_mismatch");
+    await assertRejectedNativeInvoice(`appsheet-native-wrong-sku-${randomUUID()}`, { stockLotId: lotId }, 423,
+      "APPSHEET_NATIVE_STOCK_LOT_NOT_ELIGIBLE", "native_lot_binding_missing_or_sku_mismatch");
+    await assertRejectedNativeInvoice(`appsheet-native-dual-source-${randomUUID()}`, {
+      stockLotId: receivedLot.lotId, sourceLotId: selectedSourceLot.sourceLotId,
+    }, 400);
+
+    const goodsReceivedCommandReceipt = await db.commandReceipt.findUniqueOrThrow({ where: { requestId: goodsReceivedRequest.requestId } });
+    const originalGoodsReceivedResponse = inputJson(goodsReceivedCommandReceipt.response);
+    const inconsistentGoodsReceivedResponse = inputJson(originalGoodsReceivedResponse) as unknown as Record<string, any>;
+    assert.equal(inconsistentGoodsReceivedResponse.result.receipt.receivedDate, today);
+    inconsistentGoodsReceivedResponse.result.receipt.receivedDate = "2000-01-01";
+    await db.commandReceipt.update({ where: { requestId: goodsReceivedRequest.requestId }, data: { response: inconsistentGoodsReceivedResponse } });
+    try {
+      const inconsistentCatalogResponse = await call("/operations/catalog?channel=local");
+      assert.equal(inconsistentCatalogResponse.status, 200, await inconsistentCatalogResponse.clone().text());
+      const inconsistentCatalog = await inconsistentCatalogResponse.json() as { items: Array<{ id: string; appSheetNativeLots?: Array<any> }> };
+      const inconsistentCatalogSku = inconsistentCatalog.items.find(item => item.id === sourceSku.id);
+      assert.ok(inconsistentCatalogSku);
+      assert.deepEqual(inconsistentCatalogSku.appSheetNativeLots, [], "catalogue hides a lot when its GoodsReceived response date conflicts with the receipt");
+      await assertRejectedNativeInvoice(`appsheet-native-response-date-mismatch-${randomUUID()}`, { stockLotId: receivedLot.lotId }, 423,
+        "APPSHEET_NATIVE_STOCK_LOT_NOT_ELIGIBLE", "native_receipt_command_response_mismatch");
+    } finally {
+      await db.commandReceipt.update({ where: { requestId: goodsReceivedRequest.requestId }, data: { response: originalGoodsReceivedResponse } });
+    }
+    assert.deepEqual(inputJson((await db.commandReceipt.findUniqueOrThrow({ where: { requestId: goodsReceivedRequest.requestId } })).response),
+      originalGoodsReceivedResponse, "the test restores the stored GoodsReceived response after its corruption case");
 
     const rejectedTargetId = `appsheet-source-lot-invalid-invoice-${randomUUID()}`;
     const invalidInvoice = invoiceData({ preorder: false, quantity: "3", lineId: `invalid-source-lot-line-${randomUUID()}` });

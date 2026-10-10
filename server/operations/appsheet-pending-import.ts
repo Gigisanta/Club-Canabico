@@ -34,6 +34,7 @@ import { audit, OperationError, registerCommand, requireCapability, type Command
 
 type Tx = Prisma.TransactionClient;
 const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+const DUPLICATE_ORDER_DESTINATION_REASON = "duplicate_order_destination_mapping";
 const asObject = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 
@@ -352,6 +353,7 @@ export async function prepareAppSheetPendingImportPlan(
 
   // A receivable becomes a separate historical settlement only when an exact, already approved invoice-to-order identity exists.
   const settlements: AppSheetPendingImportPlan["materializedSettlements"] = [];
+  const duplicateOrderMappingSourceIds = new Set<string>();
   for (const row of normalizedRecords) {
     const classification = row.reconciliation.dimensions.receivable;
     if (row.sourceTable !== "C_Facturacion" || classification.status !== "confirmed_pending" || !classification.settlement) continue;
@@ -364,6 +366,14 @@ export async function prepareAppSheetPendingImportPlan(
       destinationType: "order", approvedBy: { not: null },
     }, select: { id: true, destinationId: true, approvedBy: true } });
     if (identities.length !== 1 || !identities[0]?.approvedBy) continue;
+    const competingIdentity = await tx.legacyIdentity.findFirst({ where: {
+      sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, sourceTable: "C_Facturacion", destinationType: "order",
+      destinationId: identities[0].destinationId, sourceKey: { not: row.sourceKey },
+    }, select: { id: true } });
+    if (competingIdentity) {
+      duplicateOrderMappingSourceIds.add(row.sourceRecordId);
+      continue;
+    }
     const reviewer = await tx.user.findFirst({ where: { id: identities[0].approvedBy, active: true }, select: { id: true } });
     if (!reviewer || reviewer.id === snapshot.createdBy) continue;
     const resolution = asObject(row.resolution);
@@ -388,7 +398,10 @@ export async function prepareAppSheetPendingImportPlan(
     if (!orderObject || orderObject.kind !== "order") continue;
     const dispositionId = dispositionIdFor(batchId, row.sourceRecordId, "receivable");
     const conflictingSettlement = await tx.appSheetLegacySettlement.findFirst({ where: { operationOrderId: order.id }, select: { batchId: true } });
-    if (conflictingSettlement && conflictingSettlement.batchId !== batchId) continue;
+    if (conflictingSettlement && conflictingSettlement.batchId !== batchId) {
+      duplicateOrderMappingSourceIds.add(row.sourceRecordId);
+      continue;
+    }
     // The source identity review proves which order version was inspected then. Later
     // legitimate receipts/refunds change that version; bind the invariant financial
     // basis separately so they do not erase an approved legacy settlement.
@@ -540,6 +553,9 @@ export async function prepareAppSheetPendingImportPlan(
   const settlementByRecord = new Map(settlements.map(row => [row.sourceRecordId, row]));
   const deliveryByRecord = new Map(materializedDeliveries.map(row => [row.sourceRecordId, row]));
   const readyDispositions = dispositions.map(row => {
+    if (row.dimension === "receivable" && duplicateOrderMappingSourceIds.has(row.sourceRecordId))
+      return { ...row, state: "blocked" as const, reason: DUPLICATE_ORDER_DESTINATION_REASON,
+        destinationType: null, destinationId: null, destinationVersion: null, destinationHash: null };
     if (row.dimension === "delivery" && ambiguousDeliverySourceIds.has(row.sourceRecordId))
       return { ...row, state: "blocked" as const, reason: APPSHEET_PENDING_DELIVERY_CARDINALITY_REVIEW_REASON,
         destinationType: null, destinationId: null, destinationVersion: null, destinationHash: null };
@@ -816,6 +832,11 @@ registerCommand("AppSheetPendingOrderIdentityReviewed", {
         fail("pending_order_mapping_conflict");
       fail("pending_order_mapping_exists_replay_same_command_receipt");
     }
+    const competingIdentity = await ctx.tx.legacyIdentity.findFirst({ where: {
+      sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, sourceTable: "C_Facturacion", destinationType: "order",
+      destinationId: order.id, sourceKey: { not: source.sourceKey },
+    }, select: { id: true } });
+    if (competingIdentity) fail("pending_order_mapping_destination_already_occupied");
     if (await ctx.tx.appSheetLegacySettlement.findFirst({ where: { operationOrderId: order.id }, select: { id: true } }))
       fail("pending_order_already_has_legacy_settlement");
     await ctx.tx.legacyIdentity.create({ data: {
@@ -1037,12 +1058,13 @@ export async function reviewAppSheetPendingImport(ctx: CommandContext): Promise<
   if (sourceReviewers.has(ctx.actor.id)) fail("pending_destination_reviewer_not_independent");
   await materializeReviewedPendingDeliveries(ctx, plan);
   const nextVersion = object.version + 1;
+  const authoritativeReviewedAt = new Date(ctx.now.getTime());
   await ctx.tx.appSheetPendingImportBatch.update({ where: { id: batch.id }, data: {
-    status: "reviewed", reviewedBy: ctx.actor.id, reviewedAt: new Date(destinationReview.reviewedAt),
+    status: "reviewed", reviewedBy: ctx.actor.id, reviewedAt: authoritativeReviewedAt,
     reviewedObjectVersion: nextVersion, reviewEvidence: destinationReview as unknown as Prisma.InputJsonValue,
   } });
   await ctx.tx.appSheetLegacySettlement.updateMany({ where: { batchId: batch.id, status: "staged" }, data: {
-    status: "reviewed", reviewedBy: ctx.actor.id, reviewedAt: new Date(destinationReview.reviewedAt),
+    status: "reviewed", reviewedBy: ctx.actor.id, reviewedAt: authoritativeReviewedAt,
   } });
   await audit(ctx, "appsheet.pending_import_destination_reviewed", { captureId: batch.captureId, manifestHash: batch.manifestHash,
     sourceSpecHash: batch.sourceSpecHash, projectionHash: batch.projectionHash, dispositionHash: batch.dispositionHash, destinationHash: batch.destinationHash,
@@ -1231,6 +1253,11 @@ export async function reviewedAppSheetLegacyPaidForOrder(tx: Tx, order: {
       !settlement.reviewedAt || settlement.reviewedAt.getTime() !== batch.reviewedAt.getTime() ||
       settlement.destinationVersion !== 1 || batch.destinationVersion !== 1 || !batch.reviewedObjectVersion)
     throw new OperationError(423, "APPSHEET_LEGACY_SETTLEMENT_UNREVIEWED", "El cobro histórico necesita revisión independiente antes de afectar el saldo pendiente.");
+  const authority = await tx.operationAuthority.findUnique({ where: { id: "operations" },
+    select: { mode: true, cutoverProfile: true, captureManifestId: true } });
+  if (authority?.mode === "active" && authority.cutoverProfile === "appsheet-replacement" &&
+      authority.captureManifestId !== settlement.captureId)
+    throw new OperationError(423, "APPSHEET_LEGACY_SETTLEMENT_SOURCE_INVALID", "El cobro histórico no corresponde a la captura activa de reemplazo.");
   const [batchObject, disposition, capture] = await Promise.all([
     tx.operationObject.findUnique({ where: { id: batch.id }, select: { kind: true, version: true } }),
     tx.appSheetPendingImportDisposition.findUnique({ where: { id: settlement.dispositionId }, select: {

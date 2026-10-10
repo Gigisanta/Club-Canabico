@@ -6,7 +6,7 @@ import bcrypt from "bcryptjs";
 import { Prisma } from "@prisma/client";
 import type { CommandEnvelope } from "../shared/operations/contracts.js";
 import { canonicalJson } from "../shared/operations/exact.js";
-import { APPSHEET_HISTORY_IMPORTER_VERSION } from "../shared/operations/appsheet-history.js";
+import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_SOURCE_SYSTEM } from "../shared/operations/appsheet-history.js";
 import { appSheetDatabaseDestinationIdentity } from "../server/operations/appsheet-database-target.js";
 import { splitSqlStatements } from "./migration-sql.js";
 
@@ -44,10 +44,13 @@ test("AppSheet pending import binds a reviewed receipt and preserves partial ARS
   // so the process-wide Prisma singleton captures the intended destination.
   const { syntheticPendingHistorySource } = await import("./support/appsheet-pending-import-fixture.js");
   const { db } = await import("../server/db.js");
-  const { executeCommand } = await import("../server/operations/core.js");
+  const { executeCommand, OperationError } = await import("../server/operations/core.js");
   const { prepareAppSheetHistoryProjection, stageAppSheetHistoryProjection } = await import("../server/operations/appsheet-history.js");
   const { requireBoundAppSheetHistoryStage } = await import("../server/operations/appsheet-history-review.js");
-  const { prepareAppSheetPendingImportPlan, appSheetPendingOrderCommercialBasisHash } = await import("../server/operations/appsheet-pending-import.js");
+  const { ensureAppSheetCaptureManifest } = await import("../server/operations/appsheet-canonical.js");
+  const { prepareAppSheetCaptureManifest, prepareAppSheetProjectionCaptureManifest } = await import("../shared/operations/appsheet-canonical.js");
+  const { prepareAppSheetPendingImportPlan, appSheetPendingOrderCommercialBasisHash, reviewedAppSheetLegacyPaidForOrder } =
+    await import("../server/operations/appsheet-pending-import.js");
   const { appSheetDeliveryInvoiceReferenceMatches } = await import("../shared/operations/appsheet-pending-import.js");
   await import("../server/operations/appsheet-pending-import.js");
   await import("../server/operations/finance.js");
@@ -94,7 +97,7 @@ test("AppSheet pending import binds a reviewed receipt and preserves partial ARS
       });
       const capabilities = id === actorIds.sourceReader ? ["imports.read"]
         : id === actorIds.collectionReporter ? ["collections.report", "finance.read"]
-          : id === actorIds.collectionVerifier ? ["collections.verify"]
+          : id === actorIds.collectionVerifier ? ["collections.verify", "operations.read"]
             : ["imports.write", "imports.review"];
       await db.operationAccess.create({
         data: { userId: id, profile: "admin", capabilities, scope: {} },
@@ -361,6 +364,13 @@ test("AppSheet pending import binds a reviewed receipt and preserves partial ARS
       version: orderObject.version,
     });
     assert.match(appSheetPendingOrderCommercialBasisHash(order) ?? "", /^[a-f0-9]{64}$/, "el pedido fixture tiene una base comercial sellable");
+    const competingSourceKey = `synthetic:occupied-order-${randomUUID()}`;
+    const competingIdentityId = sha256(`${APPSHEET_HISTORY_SOURCE_SYSTEM}\0C_Facturacion\0${competingSourceKey}\0order`);
+    const createCompetingOrderIdentity = () => db.legacyIdentity.create({ data: {
+      id: competingIdentityId, sourceSystem: APPSHEET_HISTORY_SOURCE_SYSTEM, sourceTable: "C_Facturacion",
+      sourceKey: competingSourceKey, destinationType: "order", destinationId: orderId, approvedBy: actorIds.orderMapper,
+    } });
+    const deleteCompetingOrderIdentity = () => db.legacyIdentity.delete({ where: { id: competingIdentityId } });
 
     const pendingBinding = {
       target: "isolated-test" as const,
@@ -390,12 +400,35 @@ test("AppSheet pending import binds a reviewed receipt and preserves partial ARS
       "la API autenticada rechaza `actorId` provisto en el envelope en vez de permitir suplantación");
     assert.deepEqual(await commandFailureState(orderIdentityRequest), orderMappingStateBeforeSpoof,
       "el intento de suplantar al actor no crea receipt, audit ni resolución");
+    await createCompetingOrderIdentity();
+    const occupiedOrderMappingState = await commandFailureState(orderIdentityRequest);
+    const occupiedOrderMappingResponse = await commandOverHttp(actorIds.orderMapper, orderIdentityRequest);
+    assert.equal(occupiedOrderMappingResponse.status, 423, await occupiedOrderMappingResponse.clone().text());
+    assert.equal((await occupiedOrderMappingResponse.json() as { code: string }).code,
+      "pending_order_mapping_destination_already_occupied", "la misma orden no admite una segunda identidad de factura");
+    assert.deepEqual(await commandFailureState(orderIdentityRequest), occupiedOrderMappingState,
+      "rechazar una orden ocupada no guarda mapping, receipt, audit ni resolución");
+    assert.equal(await db.legacyIdentity.count({ where: { destinationId: orderId } }), 1,
+      "el intento rechazado conserva sólo la identidad competidora previa");
+    assert.equal((await db.legacySourceRecord.findUniqueOrThrow({ where: { id: invoiceDisposition.sourceRecordId }, select: { resolution: true } })).resolution,
+      null, "el intento rechazado no altera la resolución de la factura");
+    await deleteCompetingOrderIdentity();
     const mappedOrderResponse = await commandOverHttp(actorIds.orderMapper, orderIdentityRequest);
     assert.equal(mappedOrderResponse.status, 200, await mappedOrderResponse.clone().text());
     const mappedOrder = await mappedOrderResponse.json() as { result: Record<string, unknown>; replay: boolean };
     assert.equal(mappedOrder.result.operationOrderId, orderId);
     assert.equal((await db.commandReceipt.findUniqueOrThrow({ where: { requestId: orderIdentityRequest.requestId } })).actorId,
       actorIds.orderMapper, "la identidad registrada proviene de la sesión HTTP autenticada");
+    await createCompetingOrderIdentity();
+    const duplicateOrderPlan = await db.$transaction((tx) => prepareAppSheetPendingImportPlan(tx, { snapshotId }));
+    const duplicateReceivable = duplicateOrderPlan.dispositions.find((row) =>
+      row.sourceRecordId === invoiceDisposition.sourceRecordId && row.dimension === "receivable");
+    assert.ok(duplicateReceivable);
+    assert.equal(duplicateReceivable.state, "blocked");
+    assert.equal(duplicateReceivable.reason, "duplicate_order_destination_mapping",
+      "el plan identifica la colisión persistida en vez de producir dos liquidaciones para la misma orden");
+    assert.equal(duplicateOrderPlan.materializedSettlements.length, 0);
+    await deleteCompetingOrderIdentity();
 
     const sourceCell = async (sourceRecordId: string, header: string) => {
       const record = await db.legacySourceRecord.findUniqueOrThrow({ where: { id: sourceRecordId } });
@@ -483,7 +516,8 @@ test("AppSheet pending import binds a reviewed receipt and preserves partial ARS
     assert.equal(plan.materializedDeliveries[0]!.address.address, source.historicalAddress);
 
     const planReviewObjectId = `appsheet-pending-plan-review:${plan.batchId}`;
-    const reviewFor = (reviewer: string, reviewKind: "independent-pending-import-plan" | "independent-pending-import-destination") => ({
+    const reviewFor = (reviewer: string, reviewKind: "independent-pending-import-plan" | "independent-pending-import-destination",
+      reviewedAt = new Date().toISOString()) => ({
       schemaVersion: "appsheet-pending-import-review/v1" as const,
       reviewKind,
       captureId: plan.captureId,
@@ -504,7 +538,7 @@ test("AppSheet pending import binds a reviewed receipt and preserves partial ARS
       importer: actorIds.importer,
       reviewer,
       approved: true as const,
-      reviewedAt: new Date().toISOString(),
+      reviewedAt,
       findings: [],
     });
     const planReviewEnvelope = (expectedVersion: number) => request(planReviewObjectId, "AppSheetPendingImportPlanReviewed", {
@@ -615,8 +649,9 @@ test("AppSheet pending import binds a reviewed receipt and preserves partial ARS
     assert.equal(await db.appSheetPendingImportDisposition.count({ where: { batchId: plan.batchId } }), 16);
     assert.deepEqual(await beforePendingEffects(), operationsBeforePendingImport);
 
+    const declaredDestinationReviewedAt = new Date(Date.now() - 30_000).toISOString();
     const destinationReviewRequest = request(plan.batchId, "AppSheetPendingImportDestinationReviewed", {
-      review: reviewFor(actorIds.destinationReviewer, "independent-pending-import-destination"),
+      review: reviewFor(actorIds.destinationReviewer, "independent-pending-import-destination", declaredDestinationReviewedAt),
     }, 1);
     const destinationPreviewUrl = `${apiBase}/operations/appsheet-pending-imports/${encodeURIComponent(plan.batchId)}/review-preview`;
     const previewReadState = async () => ({
@@ -668,7 +703,9 @@ test("AppSheet pending import binds a reviewed receipt and preserves partial ARS
     assert.equal((await db.appSheetPendingImportBatch.findUniqueOrThrow({ where: { id: plan.batchId } })).status, "staged");
     assert.equal(await db.deliveryAssignment.count({ where: { orderId } }), 0);
 
+    const destinationReviewStartedAt = Date.now();
     const destinationReviewResponse = await commandOverHttp(actorIds.destinationReviewer, destinationReviewRequest);
+    const destinationReviewCompletedAt = Date.now();
     assert.equal(destinationReviewResponse.status, 200, await destinationReviewResponse.clone().text());
     const destinationReview = await destinationReviewResponse.json() as { result: Record<string, unknown>; replay: boolean };
     assert.equal(destinationReview.result.status, "reviewed");
@@ -677,12 +714,31 @@ test("AppSheet pending import binds a reviewed receipt and preserves partial ARS
     const reviewedBatch = await db.appSheetPendingImportBatch.findUniqueOrThrow({ where: { id: plan.batchId } });
     assert.equal(reviewedBatch.status, "reviewed");
     assert.equal(reviewedBatch.reviewedBy, actorIds.destinationReviewer);
+    assert.equal((reviewedBatch.reviewEvidence as { reviewedAt: string }).reviewedAt, declaredDestinationReviewedAt,
+      "la evidencia conserva literalmente la fecha declarada por el revisor");
+    assert.ok(reviewedBatch.reviewedAt);
+    assert.notEqual(reviewedBatch.reviewedAt.toISOString(), declaredDestinationReviewedAt,
+      "la fecha declarada no retrodata el sello oficial del lote");
+    assert.ok(reviewedBatch.reviewedAt.getTime() >= destinationReviewStartedAt - 1_000 &&
+      reviewedBatch.reviewedAt.getTime() <= destinationReviewCompletedAt + 1_000,
+      "el sello oficial del lote usa el reloj del servidor durante el comando");
     const settlement = await db.appSheetLegacySettlement.findFirstOrThrow({ where: { batchId: plan.batchId } });
     assert.equal(settlement.currency, "ARS");
     assert.equal(settlement.dueMinor, 10_000n);
     assert.equal(settlement.legacyPaidMinor, 4_000n);
     assert.equal(settlement.remainingMinor, 6_000n);
     assert.equal(settlement.status, "reviewed");
+    assert.ok(settlement.reviewedAt);
+    assert.equal(settlement.reviewedAt.getTime(), reviewedBatch.reviewedAt.getTime(),
+      "el cobro histórico comparte el sello oficial del lote");
+    const destinationReviewAudits = await db.operationAudit.findMany({ where: { requestId: destinationReviewRequest.requestId },
+      select: { actorId: true, action: true, objectId: true, createdAt: true } });
+    assert.deepEqual(destinationReviewAudits.map(row => row.action).sort(), [
+      "AppSheetPendingImportDestinationReviewed", "appsheet.pending_import_destination_reviewed",
+    ].sort(), "la revisión conserva el audit automático del comando y el audit semántico único");
+    assert.ok(destinationReviewAudits.every(row => row.actorId === actorIds.destinationReviewer && row.objectId === plan.batchId &&
+      Math.abs(row.createdAt.getTime() - reviewedBatch.reviewedAt!.getTime()) <= 5_000),
+    "los audits quedan atribuidos al revisor y cercanos al sello temporal del servidor");
     const assignment = await db.deliveryAssignment.findFirstOrThrow({ where: { orderId } });
     assert.equal(assignment.status, "pending");
     assert.equal(assignment.routeId, null);
@@ -708,6 +764,116 @@ test("AppSheet pending import binds a reviewed receipt and preserves partial ARS
     const replayedDestinationReview = await replayedDestinationReviewResponse.json() as { result: Record<string, unknown>; replay: boolean };
     assert.equal(replayedDestinationReview.replay, true);
     assert.deepEqual(await beforePendingEffects(), effectsAfterDestinationReview, "repetir la revisión exacta no duplica liquidación ni asignación");
+
+    const alternateSource = syntheticPendingHistorySource();
+    const alternateCaptureProjection = prepareAppSheetProjectionCaptureManifest(alternateSource.capture.manifest, { mode: "stable" });
+    const alternateCaptureManifest = prepareAppSheetCaptureManifest({ schemaVersion: "appsheet-capture-manifest/v1",
+      ...alternateCaptureProjection, coverage: alternateCaptureProjection.dataCoverage, pages: alternateCaptureProjection.pageManifest });
+    const alternateCaptureId = await db.$transaction((tx) => ensureAppSheetCaptureManifest(tx, alternateCaptureManifest));
+    assert.notEqual(alternateCaptureId, source.capture.manifest.captureId, "el fixture de deriva pertenece a otra captura sintética válida");
+    // The isolated DB row simulates persisted authority drift; this fixture does not invoke activation or certify cutover.
+    const authorityBeforeFinancialProjection = await db.operationAuthority.findUnique({ where: { id: "operations" } });
+    const setActiveReplacementCapture = async (captureManifestId: string) => {
+      const current = await db.operationAuthority.findUnique({ where: { id: "operations" }, select: { mode: true } });
+      if (current?.mode === "active")
+        await db.operationAuthority.update({ where: { id: "operations" }, data: { mode: "shadow" } });
+      const shadow = await db.operationAuthority.findUnique({ where: { id: "operations" }, select: { id: true } });
+      if (shadow) return db.operationAuthority.update({ where: { id: "operations" }, data: {
+        mode: "active", cutoverProfile: "appsheet-replacement", captureManifestId,
+      } });
+      return db.operationAuthority.create({ data: {
+        id: "operations", mode: "active", cutoverProfile: "appsheet-replacement", captureManifestId, epoch: 1,
+      } });
+    };
+    const restoreFinancialProjectionAuthority = async () => {
+      if (authorityBeforeFinancialProjection) {
+        const current = await db.operationAuthority.findUnique({ where: { id: "operations" }, select: { mode: true } });
+        if (current?.mode === "active")
+          await db.operationAuthority.update({ where: { id: "operations" }, data: { mode: "shadow" } });
+        await db.operationAuthority.update({ where: { id: "operations" }, data: {
+          mode: authorityBeforeFinancialProjection.mode,
+          cutoverProfile: authorityBeforeFinancialProjection.cutoverProfile,
+          captureManifestId: authorityBeforeFinancialProjection.captureManifestId,
+        } });
+      } else {
+        await db.operationAuthority.deleteMany({ where: { id: "operations" } });
+      }
+    };
+    const orderForLegacyProjection = await db.operationOrder.findUniqueOrThrow({ where: { id: orderId }, select: {
+      id: true, memberId: true, currency: true, totalMinor: true, verifiedMinor: true, refundedMinor: true, commercialState: true,
+    } });
+    const readOrderDetail = async () => {
+      const response = await fetch(`${apiBase}/operations/orders/${encodeURIComponent(orderId)}`, {
+        headers: { Cookie: cookies[actorIds.collectionVerifier]!, Origin: "http://appsheet-pending.test" },
+      });
+      assert.equal(response.status, 200, await response.clone().text());
+      return await response.json() as { order: Record<string, unknown> };
+    };
+    const readOrderList = async () => {
+      const response = await fetch(`${apiBase}/operations/orders?limit=200`, {
+        headers: { Cookie: cookies[actorIds.collectionVerifier]!, Origin: "http://appsheet-pending.test" },
+      });
+      assert.equal(response.status, 200, await response.clone().text());
+      return await response.json() as { items: Record<string, unknown>[] };
+    };
+    const assertReviewedProjection = (value: Record<string, unknown>) => {
+      assert.equal(value.legacyFinancialProjectionState, "reviewed");
+      assert.equal(value.legacyPaidMinor, "4000");
+      assert.equal(value.outstandingMinor, "6000");
+      assert.equal(value.legacyFinancialProjectionReason, null);
+    };
+    const assertUnknownProjection = (value: Record<string, unknown>) => {
+      assert.equal(value.legacyFinancialProjectionState, "unknown");
+      assert.equal(value.legacyPaidMinor, null);
+      assert.equal(value.outstandingMinor, null);
+      assert.equal(value.legacyFinancialProjectionReason, "historical_payment_review_blocked");
+    };
+    const projectionReadEffects = async () => ({
+      effects: await beforePendingEffects(),
+      settlement: await db.appSheetLegacySettlement.findUniqueOrThrow({ where: { operationOrderId: orderId }, select: {
+        id: true, batchId: true, captureId: true, status: true, reviewedBy: true, reviewedAt: true,
+        dueMinor: true, legacyPaidMinor: true, remainingMinor: true, destinationHash: true,
+      } }),
+      receipts: await db.commandReceipt.count(),
+      audits: await db.operationAudit.count(),
+      outbox: await db.operationOutbox.count(),
+      ledgerEvents: await db.ledgerEvent.count(),
+      ledgerLegs: await db.ledgerLeg.count(),
+      memberCredits: await db.memberCredit.count(),
+    });
+    try {
+      await setActiveReplacementCapture(source.capture.manifest.captureId);
+      const sameCaptureLegacyPaid = await db.$transaction((tx) => reviewedAppSheetLegacyPaidForOrder(tx, orderForLegacyProjection));
+      assert.equal(sameCaptureLegacyPaid, 4_000n, "el recibo revisado sigue vigente para la captura activa coincidente");
+      const matchingCaptureDetail = await readOrderDetail();
+      assertReviewedProjection(matchingCaptureDetail.order);
+      const matchingCaptureList = await readOrderList();
+      const matchingCaptureListItem = matchingCaptureList.items.find((item) => item.id === orderId);
+      assert.ok(matchingCaptureListItem);
+      assertReviewedProjection(matchingCaptureListItem);
+
+      await setActiveReplacementCapture(alternateCaptureId);
+      const mismatchedCaptureEffects = await projectionReadEffects();
+      const mismatchedCaptureDetail = await readOrderDetail();
+      assertUnknownProjection(mismatchedCaptureDetail.order);
+      const mismatchedCaptureList = await readOrderList();
+      const mismatchedCaptureListItem = mismatchedCaptureList.items.find((item) => item.id === orderId);
+      assert.ok(mismatchedCaptureListItem);
+      assertUnknownProjection(mismatchedCaptureListItem);
+      await assert.rejects(db.$transaction((tx) => reviewedAppSheetLegacyPaidForOrder(tx, orderForLegacyProjection)),
+        (error: unknown) => error instanceof OperationError && error.status === 423 &&
+          error.code === "APPSHEET_LEGACY_SETTLEMENT_SOURCE_INVALID",
+        "el guard financiero bloquea directamente un recibo de otra captura activa");
+      assert.deepEqual(await projectionReadEffects(), mismatchedCaptureEffects,
+        "las lecturas con captura activa distinta no escriben receipts, audits, outbox ni ledger y conservan la liquidación");
+
+      await setActiveReplacementCapture(source.capture.manifest.captureId);
+      const restoredCaptureLegacyPaid = await db.$transaction((tx) => reviewedAppSheetLegacyPaidForOrder(tx, orderForLegacyProjection));
+      assert.equal(restoredCaptureLegacyPaid, 4_000n, "restaurar la captura del recibo restablece su verificación financiera");
+      assertReviewedProjection((await readOrderDetail()).order);
+    } finally {
+      await restoreFinancialProjectionAuthority();
+    }
 
     const collectionAccountId = `pending-import-cash-${randomUUID()}`;
     await db.operationAccount.create({ data: {

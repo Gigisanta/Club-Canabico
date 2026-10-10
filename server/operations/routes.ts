@@ -17,7 +17,7 @@ import "./appsheet-history-review.js";
 import { memberHistory } from "./member-history.js";
 import { productHistory } from "./product-history.js";
 import { resolveStockAvailability } from "./stock-availability.js";
-import { listAppSheetSourceLotOptions } from "./stock.js";
+import { listAppSheetNativeLotOptions, listAppSheetSourceLotOptions } from "./stock.js";
 import { manualReferenceDataRoutes } from "./reference-data.js";
 import { buildOperationAccessSnapshot } from "./access-snapshot.js";
 export const operationsRoutes=Router();
@@ -137,8 +137,13 @@ operationsRoutes.get("/catalog",async(req,res)=>{
    lot:{id:l.id,skuId:s.id,unit:l.unit,receivedAt:l.receivedAt,sourceSystem:l.sourceSystem,sourceId:l.sourceId},
    balances:l.balances.map(b=>({unit:b.unit,availabilityState:b.availabilityState,availableQuantity:b.availableQuantity})),
   }))):undefined;
+  const appSheetNativeLots=activeReplacement&&eligibleCanonicalSkuIds.has(s.id)&&s.sourceSystem===APPSHEET_CANONICAL_SOURCE_SYSTEM&&s.sourceId!==null
+   ?await listAppSheetNativeLotOptions(db,req.user,now,s.id,lots.map(l=>({
+    lot:{id:l.id,skuId:s.id,unit:l.unit,receivedAt:l.receivedAt,label:l.label,receiptId:l.receiptId,purchaseLineId:l.purchaseLineId,sourceSystem:l.sourceSystem,sourceId:l.sourceId},
+    balances:l.balances.map(b=>({unit:b.unit,availabilityState:b.availabilityState,availableQuantity:b.availableQuantity})),
+   }))):[];
   const requiresAppSheetSourceLot=s.sourceSystem===APPSHEET_CANONICAL_SOURCE_SYSTEM&&s.sourceId!==null;
-  return {...s,lots,requiresAppSheetSourceLot,appSheetSourceLotEligible:eligibleCanonicalSkuIds.has(s.id),...(activeReplacement?{appSheetSourceLots}: {})};
+  return {...s,lots,requiresAppSheetSourceLot,appSheetSourceLotEligible:eligibleCanonicalSkuIds.has(s.id),...(activeReplacement?{appSheetSourceLots,appSheetNativeLots}: {})};
  }));
  res.json(wire({items,versions:await versions(visible.map(s=>s.id)),hasMore:skus.length>limit,nextCursor:skus.length>limit?visible.at(-1)!.id:null,channel,availabilityCoverage:availability.coverage,availability:"approved-location-custody-channel-minus-reservations"}));
 });
