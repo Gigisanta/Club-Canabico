@@ -229,11 +229,10 @@ test("reviewed AppSheet source lots flow through the HTTP selector and confirmed
       reviewer: "synthetic-independent-source-lot-technical-reviewer", approved: true,
       reviewedAt: new Date(Date.now() - 1_000).toISOString(), findings: [], target: "production", destinationIdentity: productionDestinationIdentity,
     };
-    const { appSheetCanonicalCurrentDestinationHash } = await import("../server/operations/appsheet-canonical.js");
+    const { appSheetCanonicalCurrentDestinationHash, appSheetDefinitionProductionReadiness } = await import("../server/operations/appsheet-canonical.js");
     const { finalDeltaProofForCapture } = await import("../server/operations/access.js");
     const { legacyPayloadHash } = await import("../server/operations/legacy-upload-contract.js");
     const { canonicalCommandBodyHash } = await import("../server/operations/canonical.js");
-    const { appSheetDefinitionProductionReadiness } = await import("../shared/operations/appsheet-definition.js");
     const destinationFingerprints: Array<{
       destinationType: "member" | "sku"; sourceTable: string; sourceKey: string; destinationId: string; dataHash: string; operationVersion: number;
     }> = [];

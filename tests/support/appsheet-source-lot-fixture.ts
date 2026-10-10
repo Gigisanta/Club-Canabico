@@ -2,9 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { APPSHEET_HISTORY_IMPORTER_VERSION, APPSHEET_HISTORY_MAPPING_ID } from "../../shared/operations/appsheet-history.js";
 import { APPSHEET_SOURCE_STOCK_APP_ID, APPSHEET_SOURCE_STOCK_FORMULA } from "../../shared/operations/appsheet-source-stock.js";
 import { APPSHEET_CANONICAL_SOURCE_SYSTEM } from "../../shared/operations/appsheet-canonical.js";
-import { appSheetAppliedDefinitionHash, prepareAppSheetMasterProjection } from "../../server/operations/appsheet-canonical.js";
+import { appSheetAppliedDefinitionHash, appSheetDefinitionProductionReadiness, prepareAppSheetMasterProjection } from "../../server/operations/appsheet-canonical.js";
 import { canonicalJson } from "../../shared/operations/exact.js";
-import { appSheetDefinitionProductionReadiness, type AppSheetDefinitionInventory } from "../../shared/operations/appsheet-definition.js";
+import type { AppSheetDefinitionInventory } from "../../shared/operations/appsheet-definition.js";
 import { definitionInventory as canonicalDefinitionInventory } from "./appsheet-canonical-fixture.js";
 
 const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
