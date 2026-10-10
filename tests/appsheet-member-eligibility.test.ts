@@ -73,6 +73,7 @@ test("AppSheet canonical member and SKU writes require capture-bound review evid
       return JSON.parse(serialized) as Prisma.InputJsonValue;
     };
     const now = new Date();
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Argentina/Buenos_Aires" }).format(now);
     await db.operationAuthority.create({
       data: { id: "operations", mode: "shadow", cutoverProfile: "legacy", captureManifestId: null, epoch: 1 },
     });

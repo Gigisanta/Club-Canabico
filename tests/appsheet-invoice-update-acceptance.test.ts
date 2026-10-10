@@ -664,7 +664,7 @@ test("replacement invoices enforce AppSheet quantity and availability, acceptanc
     const accepted = await call(acceptedRequest);
     assert.equal(accepted.response.status, 200, JSON.stringify(accepted.body));
     assert.equal(accepted.body.result.commercialState, "confirmed");
-    assert.equal(accepted.body.result.reservations.length, 1);
+    assert.equal(accepted.body.result.reservations.reservations.length, 1);
     assert.ok(accepted.body.result.deliveryId);
     const confirmedState = await readOrderState(preorderId);
     const confirmedQuote = confirmedState.order.quote as Record<string, any>;

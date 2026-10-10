@@ -254,7 +254,7 @@ test("legacy AppSheet preorder keeps its manual invoice number and confirms once
     assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
     assert.equal(confirmed.body.result.commercialState, "confirmed");
     assert.equal(confirmed.body.version, 2);
-    assert.equal(confirmed.body.result.reservations.length, 1);
+    assert.equal(confirmed.body.result.reservations.reservations.length, 1);
 
     const accepted = await readOrder(orderId);
     assert.equal(accepted.state, "confirmed");
